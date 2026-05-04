@@ -1,15 +1,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createCodexAppServerClient } from './codex-app-server.js';
 import { buildCodexLarkCliContext } from './lark-cli.js';
 import { detectFeishuSkillKeys } from './feishu-skills.js';
 
 const activeRuns = new Map();
 const NON_ASCII_PATH_PATTERN = /[^\u0000-\u007F]/;
-const CODEXMOBILE_REPLY_INSTRUCTION = [
-  'CodexMobile iOS/PWA 回复要求：最终回复必须简短、直接。',
-  '除非用户明确要求，最终只写结果、关键链接、必要下一步；不要复述内部过程、命令日志或长篇验证细节。'
-].join('\n');
 
 async function ensureAsciiWorkingDirectory(projectPath) {
   if (process.platform !== 'win32' || !NON_ASCII_PATH_PATTERN.test(projectPath)) {
@@ -106,24 +103,17 @@ function statusLabel(kind, status = 'running') {
     command_execution: done ? '命令已完成' : failed ? '命令失败' : '正在执行命令',
     file_change: done ? '文件已修改' : failed ? '文件修改失败' : '正在修改文件',
     mcp_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
+    dynamic_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
     web_search: done ? '搜索完成' : failed ? '搜索失败' : '正在搜索',
+    plan: done ? '计划已更新' : '正在规划',
     todo_list: done ? '计划已更新' : '正在规划',
     image_generation_call: done ? '图片生成完成' : failed ? '图片生成失败' : '正在生成图片',
+    context_compaction: '上下文已自动压缩',
     custom_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
     function_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
     error: '出现错误'
   };
   return labels[kind] || (done ? '已完成' : failed ? '失败' : '正在处理');
-}
-
-function compactStatusLabel(content, fallback = '正在处理') {
-  const label = String(content || '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!label) {
-    return fallback;
-  }
-  return label.length > 68 ? `${label.slice(0, 68)}...` : label;
 }
 
 function detailFromItem(item) {
@@ -136,6 +126,18 @@ function detailFromItem(item) {
   if (item.query) {
     return item.query;
   }
+  if (item.action?.query) {
+    return item.action.query;
+  }
+  if (Array.isArray(item.action?.queries) && item.action.queries.length) {
+    return item.action.queries.join('\n');
+  }
+  if (item.action?.url) {
+    return item.action.url;
+  }
+  if (item.action?.pattern && item.action?.url) {
+    return `${item.action.pattern} in ${item.action.url}`;
+  }
   if (item.tool || item.server) {
     return [item.server, item.tool].filter(Boolean).join(' / ');
   }
@@ -145,39 +147,54 @@ function detailFromItem(item) {
   if (item.message) {
     return item.message;
   }
-  return contentFromItem(item);
+  return item.aggregatedOutput || contentFromItem(item);
 }
 
-function eventItem(event) {
-  if (event.item) {
-    return event.item;
-  }
-  if (event.payload && (event.type === 'response_item' || event.type === 'event_msg')) {
-    return event.payload;
-  }
-  return null;
-}
-
-function eventStatus(event, item) {
-  if (item?.status) {
-    if (item.status === 'in_progress') {
-      return 'running';
+function diffStats(unifiedDiff = '') {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of String(unifiedDiff || '').split(/\r?\n/)) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue;
     }
-    return item.status;
+    if (line.startsWith('+')) {
+      additions += 1;
+    } else if (line.startsWith('-')) {
+      deletions += 1;
+    }
   }
-  if (event.type === 'item.completed') {
-    return 'completed';
+  return { additions, deletions };
+}
+
+function normalizeFileChanges(item) {
+  const changes = item?.changes;
+  if (Array.isArray(changes)) {
+    return changes.map((change) => {
+      const diff = change?.unified_diff || change?.diff || '';
+      const stats = diffStats(diff);
+      return {
+        ...change,
+        additions: Number(change?.additions) || stats.additions,
+        deletions: Number(change?.deletions) || stats.deletions,
+        unifiedDiff: diff,
+        movePath: change?.move_path || change?.movePath || null
+      };
+    });
   }
-  if (event.type === 'item.started' || event.type === 'item.updated') {
-    return 'running';
+  if (!changes || typeof changes !== 'object') {
+    return [];
   }
-  if (event.type === 'event_msg' && item?.type?.endsWith('_end')) {
-    return item.exit_code || item.exit_code === 0 ? (item.exit_code === 0 ? 'completed' : 'failed') : 'completed';
-  }
-  if (event.type === 'response_item') {
-    return 'completed';
-  }
-  return 'running';
+  return Object.entries(changes).map(([filePath, change]) => {
+    const stats = diffStats(change?.unified_diff || change?.diff || '');
+    return {
+      path: filePath,
+      kind: change?.type || change?.kind || 'update',
+      additions: Number(change?.additions) || stats.additions,
+      deletions: Number(change?.deletions) || stats.deletions,
+      unifiedDiff: change?.unified_diff || change?.diff || '',
+      movePath: change?.move_path || null
+    };
+  });
 }
 
 function emitStatus(emit, { sessionId, turnId, kind, status = 'running', label, detail = '' }) {
@@ -191,6 +208,66 @@ function emitStatus(emit, { sessionId, turnId, kind, status = 'running', label, 
     detail,
     timestamp: new Date().toISOString()
   });
+}
+
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function emitContextStatus(emit, { sessionId, turnId, state, timestamp = new Date().toISOString() }) {
+  const contextWindow = state.contextWindow || null;
+  const inputTokens = state.inputTokens || null;
+  const percent =
+    inputTokens && contextWindow
+      ? Math.max(0, Math.min(100, Math.round((inputTokens / contextWindow) * 1000) / 10))
+      : null;
+  emit({
+    type: 'context-status-update',
+    sessionId,
+    turnId,
+    inputTokens,
+    totalTokens: state.totalTokens || null,
+    contextWindow,
+    percent,
+    lastTokenUsage: state.lastTokenUsage || null,
+    totalTokenUsage: state.totalTokenUsage || null,
+    updatedAt: timestamp,
+    autoCompact: {
+      detected: Boolean(state.autoCompactDetected),
+      status: state.autoCompactDetected ? 'detected' : 'watching',
+      lastCompactedAt: state.autoCompactLastAt || null,
+      reason: state.autoCompactReason || ''
+    }
+  });
+}
+
+function applyTokenCountToContextState(contextState, payload, timestamp) {
+  const info = payload?.info && typeof payload.info === 'object' ? payload.info : {};
+  const last = info.last_token_usage && typeof info.last_token_usage === 'object' ? info.last_token_usage : {};
+  const total = info.total_token_usage && typeof info.total_token_usage === 'object' ? info.total_token_usage : {};
+  const inputTokens = positiveNumber(last.input_tokens ?? total.input_tokens);
+  const totalTokens = positiveNumber(total.total_tokens ?? last.total_tokens);
+  const contextWindow = positiveNumber(info.model_context_window ?? payload?.model_context_window);
+  const previousInputTokens = contextState.inputTokens;
+
+  contextState.inputTokens = inputTokens || contextState.inputTokens || null;
+  contextState.totalTokens = totalTokens || contextState.totalTokens || null;
+  contextState.contextWindow = contextWindow || contextState.contextWindow || null;
+  contextState.lastTokenUsage = last;
+  contextState.totalTokenUsage = total;
+  contextState.updatedAt = timestamp;
+
+  if (
+    previousInputTokens &&
+    inputTokens &&
+    previousInputTokens > 20000 &&
+    inputTokens < previousInputTokens * 0.62
+  ) {
+    contextState.autoCompactDetected = true;
+    contextState.autoCompactLastAt = timestamp;
+    contextState.autoCompactReason = '上下文用量回落';
+  }
 }
 
 function isSpawnPermissionError(error) {
@@ -234,160 +311,290 @@ function emitActivity(emit, { sessionId, turnId, messageId, item, kind, status }
     status,
     detail,
     command: item?.command || '',
-    output: item?.aggregated_output || item?.output || '',
-    fileChanges: Array.isArray(item?.changes) ? item.changes : [],
+    output: item?.aggregated_output || item?.aggregatedOutput || item?.output || '',
+    fileChanges: normalizeFileChanges(item),
     toolName: item?.tool || item?.name || '',
     error: item?.error?.message || item?.message || '',
     timestamp: new Date().toISOString()
   });
 }
 
-function emitCodexEvent(event, sessionId, turnId, emit, state) {
-  const threadId = event.thread_id || event.id || event.payload?.id;
-  if (event.type === 'thread.started' && threadId) {
-    emit({ type: 'thread-started', sessionId: threadId, turnId });
+function sandboxPolicyFromMode(sandboxMode, { networkAccess = false } = {}) {
+  if (sandboxMode === 'danger-full-access') {
+    return { type: 'dangerFullAccess' };
+  }
+  return {
+    type: 'workspaceWrite',
+    writableRoots: [],
+    networkAccess: Boolean(networkAccess),
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false
+  };
+}
+
+function appItemKind(type) {
+  const kinds = {
+    agentMessage: 'agent_message',
+    commandExecution: 'command_execution',
+    fileChange: 'file_change',
+    mcpToolCall: 'mcp_tool_call',
+    dynamicToolCall: 'dynamic_tool_call',
+    webSearch: 'web_search',
+    imageGeneration: 'image_generation_call',
+    contextCompaction: 'context_compaction',
+    plan: 'plan',
+    reasoning: 'reasoning',
+    userMessage: 'user_message'
+  };
+  return kinds[type] || type || 'item';
+}
+
+function appItemStatus(method, item) {
+  const raw = typeof item?.status === 'string' ? item.status.toLowerCase() : '';
+  if (method === 'item/completed') {
+    if (['failed', 'error', 'cancelled', 'canceled'].includes(raw)) {
+      return 'failed';
+    }
+    return 'completed';
+  }
+  if (['completed', 'success', 'succeeded'].includes(raw)) {
+    return 'completed';
+  }
+  if (['failed', 'error'].includes(raw)) {
+    return 'failed';
+  }
+  return 'running';
+}
+
+function normalizeAppItem(item, state = {}) {
+  if (!item || typeof item !== 'object') {
+    return item;
+  }
+  const copy = { ...item, type: appItemKind(item.type) };
+  if (item.aggregatedOutput && !copy.aggregated_output) {
+    copy.aggregated_output = item.aggregatedOutput;
+  }
+  if (item.type === 'dynamicToolCall') {
+    copy.tool = item.tool;
+    copy.name = item.tool;
+  }
+  if (item.type === 'imageGeneration') {
+    copy.message = item.revisedPrompt || item.result || '';
+  }
+  if (state.commandOutputs?.has(item.id)) {
+    copy.aggregatedOutput = state.commandOutputs.get(item.id);
+    copy.aggregated_output = copy.aggregatedOutput;
+  }
+  return copy;
+}
+
+function tokenUsagePayload(tokenUsage = {}) {
+  const last = tokenUsage.last || {};
+  const total = tokenUsage.total || {};
+  return {
+    info: {
+      last_token_usage: {
+        input_tokens: last.inputTokens,
+        cached_input_tokens: last.cachedInputTokens,
+        output_tokens: last.outputTokens,
+        reasoning_output_tokens: last.reasoningOutputTokens,
+        total_tokens: last.totalTokens
+      },
+      total_token_usage: {
+        input_tokens: total.inputTokens,
+        cached_input_tokens: total.cachedInputTokens,
+        output_tokens: total.outputTokens,
+        reasoning_output_tokens: total.reasoningOutputTokens,
+        total_tokens: total.totalTokens
+      },
+      model_context_window: tokenUsage.modelContextWindow
+    }
+  };
+}
+
+function errorTextFromNotification(params = {}) {
+  return params.error?.message || params.message || params.error || 'Codex turn failed';
+}
+
+function emitAppServerItem({ method, params }, sessionId, turnId, emit, state) {
+  const rawItem = params?.item;
+  if (!rawItem || rawItem.type === 'userMessage') {
     return;
   }
 
-  if (event.type === 'turn.started' || event.payload?.type === 'task_started') {
-    emitStatus(emit, { sessionId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
-    return;
-  }
+  const item = normalizeAppItem(rawItem, state);
+  const status = appItemStatus(method, rawItem);
+  const messageId = rawItem.id || `${turnId}-${item.type}`;
 
-  if (event.type === 'turn.completed') {
-    state.usage = event.usage || null;
-    emitStatus(emit, { sessionId, turnId, kind: 'turn', status: 'completed', label: '任务已完成' });
-    emit({ type: 'turn-complete', sessionId, turnId, usage: event.usage || null });
-    return;
-  }
-
-  if (event.type === 'turn.failed') {
-    const error = event.error?.message || event.error || 'Codex turn failed';
-    state.failed = true;
-    emitStatus(emit, { sessionId, turnId, kind: 'turn', status: 'failed', label: '任务失败', detail: error });
-    emit({ type: 'turn-failed', sessionId, turnId, error });
-    emit({ type: 'chat-error', sessionId, turnId, error });
-    console.error('[codex] Turn failed:', error);
-    return;
-  }
-
-  if (event.type === 'error') {
-    const error = event.message || 'Codex stream error';
-    emitStatus(emit, { sessionId, turnId, kind: 'error', status: 'failed', detail: error });
-    emit({ type: 'chat-error', sessionId, turnId, error });
-    console.error('[codex] Stream error:', error);
-    return;
-  }
-
-  const item = eventItem(event);
-  if (!item) {
-    return;
-  }
-  const done = event.type === 'item.completed';
-  const kind = item.type || 'item';
-  const status = eventStatus(event, item);
-  const messageId = item.id || `${turnId}-${kind}`;
-
-  if (kind === 'agent_message' || item.phase === 'commentary') {
-    const content = contentFromItem(item);
-    if (content.trim()) {
-      emitStatus(emit, {
-        sessionId,
-        turnId,
-        kind: kind === 'message' ? 'agent_message' : kind,
-        status: 'running',
-        label: compactStatusLabel(content)
-      });
+  if (rawItem.type === 'agentMessage') {
+    const content = String(rawItem.text || state.agentMessages?.get(messageId) || '').trimEnd();
+    if (!content.trim()) {
+      return;
+    }
+    const isCommentary = rawItem.phase === 'commentary';
+    emit({
+      type: 'assistant-update',
+      sessionId,
+      turnId,
+      messageId,
+      role: 'assistant',
+      kind: 'agent_message',
+      phase: isCommentary ? 'commentary' : 'final_answer',
+      content,
+      status,
+      done: !isCommentary && status === 'completed'
+    });
+    if (!isCommentary) {
+      state.hadAssistantText = true;
     }
     return;
   }
 
-  if (kind === 'message' && item.role === 'assistant') {
-    const content = contentFromItem(item);
+  if (rawItem.type === 'reasoning') {
+    emitStatus(emit, { sessionId, turnId, kind: 'reasoning', status, label: statusLabel('reasoning', status) });
+    return;
+  }
+
+  if (rawItem.type === 'contextCompaction') {
+    const timestamp = new Date().toISOString();
+    state.context.autoCompactDetected = true;
+    state.context.autoCompactLastAt = timestamp;
+    state.context.autoCompactReason = '上下文已自动压缩';
+    emitContextStatus(emit, { sessionId, turnId, state: state.context, timestamp });
+  }
+
+  emitStatus(emit, {
+    sessionId,
+    turnId,
+    kind: item.type,
+    status,
+    detail: detailFromItem(item)
+  });
+  emitActivity(emit, {
+    sessionId,
+    turnId,
+    messageId,
+    item,
+    kind: item.type,
+    status
+  });
+}
+
+function emitAppServerNotification(message, sessionId, turnId, emit, state) {
+  const { method, params = {} } = message;
+
+  if (method === 'turn/started') {
+    emitStatus(emit, { sessionId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
+    return;
+  }
+
+  if (method === 'thread/tokenUsage/updated') {
+    const timestamp = new Date().toISOString();
+    applyTokenCountToContextState(state.context, tokenUsagePayload(params.tokenUsage), timestamp);
+    emitContextStatus(emit, { sessionId, turnId, state: state.context, timestamp });
+    return;
+  }
+
+  if (method === 'thread/compacted') {
+    const timestamp = new Date().toISOString();
+    state.context.autoCompactDetected = true;
+    state.context.autoCompactLastAt = timestamp;
+    state.context.autoCompactReason = '上下文已自动压缩';
+    emitContextStatus(emit, { sessionId, turnId, state: state.context, timestamp });
+    emit({
+      type: 'activity-update',
+      sessionId,
+      turnId,
+      messageId: `${turnId}-context-compaction-${Date.now()}`,
+      kind: 'context_compaction',
+      label: '上下文已自动压缩',
+      status: 'completed',
+      detail: '',
+      timestamp
+    });
+    return;
+  }
+
+  if (method === 'item/agentMessage/delta') {
+    const messageId = params.itemId || `${turnId}-agent-message`;
+    const previous = state.agentMessages.get(messageId) || '';
+    const content = `${previous}${params.delta || ''}`;
+    state.agentMessages.set(messageId, content);
     if (content.trim()) {
       state.hadAssistantText = true;
-      emitStatus(emit, { sessionId, turnId, kind, status: 'running', label: '正在回复' });
+      emitStatus(emit, { sessionId, turnId, kind: 'agent_message', status: 'running', label: '正在回复' });
       emit({
         type: 'assistant-update',
         sessionId,
         turnId,
         messageId,
         role: 'assistant',
-        kind,
-        phase: item.phase || 'final_answer',
+        kind: 'agent_message',
+        phase: 'final_answer',
         content,
-        done: done || status === 'completed'
+        status: 'running',
+        done: false
       });
     }
     return;
   }
 
-  if (kind === 'reasoning') {
-    emitStatus(emit, {
-      sessionId,
-      turnId,
-      kind,
-      status,
-      label: statusLabel(kind, status)
-    });
-    return;
-  }
-
-  if (kind === 'error') {
-    const error = item.message || 'Codex item error';
-    emitStatus(emit, { sessionId, turnId, kind, status: 'failed', detail: error });
-    emit({
-      type: 'chat-error',
-      sessionId,
-      turnId,
-      error
-    });
-    console.error('[codex] Item error:', error);
-    return;
-  }
-
-  if (
-    kind === 'command_execution' ||
-    kind === 'file_change' ||
-    kind === 'mcp_tool_call' ||
-    kind === 'web_search' ||
-    kind === 'todo_list' ||
-    kind === 'image_generation_call' ||
-    kind === 'custom_tool_call' ||
-    kind === 'function_call' ||
-    kind === 'function_call_output' ||
-    kind === 'exec_command_begin' ||
-    kind === 'exec_command_end'
-  ) {
-    const normalizedKind =
-      kind === 'exec_command_begin' || kind === 'exec_command_end' ? 'command_execution' : kind;
-    const normalizedStatus = kind === 'function_call_output' ? 'completed' : status;
-    emitStatus(emit, {
-      sessionId,
-      turnId,
-      kind: normalizedKind,
-      status: normalizedStatus,
-      detail: detailFromItem(item)
-    });
+  if (method === 'item/commandExecution/outputDelta') {
+    const itemId = params.itemId || `${turnId}-command`;
+    const previous = state.commandOutputs.get(itemId) || '';
+    state.commandOutputs.set(itemId, `${previous}${params.delta || ''}`);
+    const item = normalizeAppItem(state.items.get(itemId) || { id: itemId, type: 'commandExecution' }, state);
     emitActivity(emit, {
       sessionId,
       turnId,
-      messageId,
+      messageId: itemId,
       item,
-      kind: normalizedKind,
-      status: normalizedStatus
+      kind: 'command_execution',
+      status: 'running'
     });
     return;
   }
 
-  const detail = detailFromItem(item);
-  if (detail) {
-    emitStatus(emit, { sessionId, turnId, kind, status, detail });
+  if (method === 'item/fileChange/outputDelta') {
+    const itemId = params.itemId || `${turnId}-file-change`;
+    const previous = state.commandOutputs.get(itemId) || '';
+    state.commandOutputs.set(itemId, `${previous}${params.delta || ''}`);
+    const item = normalizeAppItem(state.items.get(itemId) || { id: itemId, type: 'fileChange' }, state);
+    emitActivity(emit, {
+      sessionId,
+      turnId,
+      messageId: itemId,
+      item,
+      kind: 'file_change',
+      status: 'running'
+    });
+    return;
+  }
+
+  if (method === 'item/started' || method === 'item/completed') {
+    if (params.item?.id) {
+      state.items.set(params.item.id, params.item);
+    }
+    emitAppServerItem(message, sessionId, turnId, emit, state);
+    return;
+  }
+
+  if (method === 'error' && !params.willRetry) {
+    const error = errorTextFromNotification(params);
+    state.failed = true;
+    emitStatus(emit, { sessionId, turnId, kind: 'turn', status: 'failed', label: '任务失败', detail: error });
+    emit({ type: 'turn-failed', sessionId, turnId, error });
+    emit({ type: 'chat-error', sessionId, turnId, error });
   }
 }
 
+function abortError() {
+  const error = new Error('aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, model, reasoningEffort, permissionMode, turnId: providedTurnId }, emit) {
-  const { Codex } = await import('@openai/codex-sdk');
   const workingDirectory = await ensureAsciiWorkingDirectory(projectPath);
   const { sandboxMode, approvalPolicy } = mapPermissionMode(permissionMode);
   const feishuSkillKeys = detectFeishuSkillKeys(message);
@@ -400,9 +607,19 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   });
   const abortController = new AbortController();
   const turnId = providedTurnId || crypto.randomUUID();
-  const state = { hadAssistantText: false, failed: false, usage: null };
+  const state = {
+    hadAssistantText: false,
+    failed: false,
+    usage: null,
+    context: {},
+    agentMessages: new Map(),
+    commandOutputs: new Map(),
+    items: new Map()
+  };
   const run = {
     thread: null,
+    client: null,
+    appTurnId: null,
     abortController,
     turnId,
     sessionId: sessionId || draftSessionId || null,
@@ -413,27 +630,77 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
 
   let currentSessionId = sessionId || null;
   let previousSessionId = draftSessionId || sessionId || null;
-  let thread = null;
+  let client = null;
+  let completionResolve = null;
+  let completionReject = null;
+  const completionPromise = new Promise((resolve, reject) => {
+    completionResolve = resolve;
+    completionReject = reject;
+  });
+  const abortPromise = new Promise((_, reject) => {
+    abortController.signal.addEventListener('abort', () => reject(abortError()), { once: true });
+  });
 
   try {
     if (larkCliContext.enabled && larkCliContext.env) {
       larkCliContext.env.CODEXMOBILE_TURN_ID = turnId;
       larkCliContext.env.CODEXMOBILE_SESSION_ID = sessionId || draftSessionId || '';
     }
-    const codex = new Codex({ env: larkCliContext.env || { ...process.env } });
-    const threadOptions = {
-      workingDirectory,
-      skipGitRepoCheck: true,
-      sandboxMode,
-      approvalPolicy,
-      model,
-      modelReasoningEffort,
-      ...(larkCliContext.enabled ? { networkAccessEnabled: true } : {})
-    };
 
-    thread = sessionId ? codex.resumeThread(sessionId, threadOptions) : codex.startThread(threadOptions);
-    currentSessionId = thread.id || sessionId || `codex-${Date.now()}`;
-    run.thread = thread;
+    client = await createCodexAppServerClient({
+      env: larkCliContext.env || { ...process.env },
+      cwd: workingDirectory,
+      clientInfo: { name: 'CodexMobile', title: null, version: '0.1.0' },
+      onNotification: (appMessage) => {
+        const params = appMessage.params || {};
+        if (appMessage.method === 'thread/started' && params.thread?.id) {
+          const fromSessionId = previousSessionId || currentSessionId || draftSessionId || params.thread.id;
+          currentSessionId = params.thread.id;
+          run.sessionId = currentSessionId;
+          run.previousSessionId = fromSessionId;
+          emit({
+            type: 'thread-started',
+            sessionId: currentSessionId,
+            previousSessionId: fromSessionId,
+            turnId,
+            projectPath,
+            startedAt: new Date().toISOString()
+          });
+          return;
+        }
+        if (appMessage.method === 'turn/started' && params.turn?.id) {
+          run.appTurnId = params.turn.id;
+        }
+        if (params.threadId && currentSessionId && params.threadId !== currentSessionId) {
+          return;
+        }
+        emitAppServerNotification(appMessage, currentSessionId || sessionId || draftSessionId, turnId, emit, state);
+        if (appMessage.method === 'turn/completed') {
+          state.usage = params.turn || null;
+          emitStatus(emit, { sessionId: currentSessionId, turnId, kind: 'turn', status: 'completed', label: '任务已完成' });
+          emit({ type: 'turn-complete', sessionId: currentSessionId, turnId, usage: state.usage });
+          completionResolve(params.turn || {});
+        } else if (appMessage.method === 'error' && !params.willRetry) {
+          completionReject(new Error(errorTextFromNotification(params)));
+        }
+      }
+    });
+
+    const threadParams = {
+      cwd: workingDirectory,
+      approvalPolicy,
+      sandbox: sandboxMode,
+      model: model || null,
+      config: modelReasoningEffort ? { model_reasoning_effort: modelReasoningEffort } : null,
+      serviceName: 'CodexMobile'
+    };
+    const threadResponse = sessionId
+      ? await client.request('thread/resume', { threadId: sessionId, ...threadParams }, { timeoutMs: 30_000 })
+      : await client.request('thread/start', threadParams, { timeoutMs: 30_000 });
+    const desktopThread = threadResponse?.thread || {};
+    currentSessionId = desktopThread.id || sessionId || `codex-${Date.now()}`;
+    run.thread = desktopThread;
+    run.client = client;
     run.sessionId = currentSessionId;
     activeRuns.set(turnId, run);
 
@@ -447,36 +714,34 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     });
     emitStatus(emit, { sessionId: currentSessionId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
 
-    const codexInput = [message, CODEXMOBILE_REPLY_INSTRUCTION, larkCliContext.enabled ? larkCliContext.instruction : '']
+    const codexInput = [message, larkCliContext.enabled ? larkCliContext.instruction : '']
       .filter(Boolean)
       .join('\n\n');
-    const streamedTurn = await thread.runStreamed(codexInput, { signal: abortController.signal });
-    for await (const event of streamedTurn.events) {
-      const threadId = event.thread_id || event.id || event.payload?.id;
-      if (event.type === 'thread.started' && threadId) {
-        const fromSessionId = previousSessionId || currentSessionId;
-        if (threadId !== currentSessionId) {
-          currentSessionId = threadId;
-          run.sessionId = threadId;
-        }
-        previousSessionId = fromSessionId;
-        run.previousSessionId = fromSessionId;
-        emit({
-          type: 'thread-started',
-          sessionId: threadId,
-          previousSessionId: fromSessionId,
-          turnId,
-          projectPath,
-          startedAt: new Date().toISOString()
-        });
-        emitStatus(emit, { sessionId: threadId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
-        continue;
-      }
-      if (run.status === 'aborted') {
-        break;
-      }
-      emitCodexEvent(event, currentSessionId, turnId, emit, state);
+    const turnResponse = await client.request('turn/start', {
+      threadId: currentSessionId,
+      input: [{ type: 'text', text: codexInput, text_elements: [] }],
+      cwd: workingDirectory,
+      approvalPolicy,
+      sandboxPolicy: sandboxPolicyFromMode(sandboxMode, { networkAccess: larkCliContext.enabled }),
+      model: model || null,
+      effort: modelReasoningEffort || null
+    }, { timeoutMs: 30_000 });
+    if (turnResponse?.turn?.id) {
+      run.appTurnId = turnResponse.turn.id;
     }
+
+    await Promise.race([
+      completionPromise,
+      abortPromise,
+      client.closed.then(({ error }) => {
+        if (error && run.status !== 'aborted') {
+          throw error;
+        }
+        if (run.status !== 'aborted') {
+          throw new Error('Codex app-server closed before the turn completed');
+        }
+      })
+    ]);
 
     if (!state.failed) {
       emit({
@@ -485,6 +750,7 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
         previousSessionId,
         turnId,
         usage: state.usage,
+        context: state.context,
         hadAssistantText: state.hadAssistantText,
         completedAt: new Date().toISOString()
       });
@@ -514,6 +780,9 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       });
     }
   } finally {
+    if (client) {
+      client.close();
+    }
     if (activeRuns.has(turnId)) {
       const activeRun = activeRuns.get(turnId);
       activeRun.status = activeRun.status === 'aborted' ? 'aborted' : 'completed';
@@ -541,6 +810,14 @@ export function abortCodexTurn(identifier) {
   }
   for (const run of runs) {
     run.status = 'aborted';
+    if (run.client && run.sessionId && run.appTurnId) {
+      run.client.request('turn/interrupt', {
+        threadId: run.sessionId,
+        turnId: run.appTurnId
+      }, { timeoutMs: 5_000 }).catch((error) => {
+        console.warn('[codex] Failed to interrupt turn:', error.message);
+      });
+    }
     run.abortController.abort();
   }
   return true;
@@ -554,6 +831,7 @@ export function getActiveRuns() {
       previousSessionId: run.previousSessionId,
       startedAt: run.startedAt,
       status: run.status,
-      turnId: run.turnId
+      turnId: run.turnId,
+      context: run.context || null
     }));
 }

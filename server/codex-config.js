@@ -8,6 +8,7 @@ export const CODEX_GLOBAL_STATE_PATH = path.join(CODEX_HOME, '.codex-global-stat
 export const CODEX_MODELS_CACHE_PATH = path.join(CODEX_HOME, 'models_cache.json');
 export const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
 export const CODEX_SESSION_INDEX = path.join(CODEX_HOME, 'session_index.jsonl');
+export const CODEX_STATE_DB = path.join(CODEX_HOME, 'state_5.sqlite');
 
 function stripQuotes(value) {
   const trimmed = String(value || '').trim();
@@ -43,6 +44,37 @@ function publicModel(entry) {
   };
 }
 
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function contextWindowFromModel(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  return {
+    contextWindow: numberOrNull(entry.context_window),
+    maxContextWindow: numberOrNull(entry.max_context_window),
+    effectiveContextWindowPercent: numberOrNull(entry.effective_context_window_percent)
+  };
+}
+
+async function readCodexModelContext(currentModel = 'gpt-5.5') {
+  try {
+    const raw = await fs.readFile(CODEX_MODELS_CACHE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed.models) ? parsed.models : [];
+    const entry = entries.find((item) => item?.slug === currentModel);
+    return contextWindowFromModel(entry);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[config] Failed to read Codex model context:', error.message);
+    }
+    return null;
+  }
+}
+
 export async function readCodexModels(currentModel = 'gpt-5.5') {
   const models = new Map();
 
@@ -74,6 +106,14 @@ export async function readCodexWorkspaceState() {
     const raw = await fs.readFile(CODEX_GLOBAL_STATE_PATH, 'utf8');
     const parsed = JSON.parse(raw);
     const labels = parsed['electron-workspace-root-labels'] || {};
+    const projectlessThreadIds = Array.isArray(parsed['projectless-thread-ids'])
+      ? parsed['projectless-thread-ids'].filter((id) => typeof id === 'string' && id.trim())
+      : [];
+    const threadWorkspaceRootHints = parsed['thread-workspace-root-hints'] &&
+      typeof parsed['thread-workspace-root-hints'] === 'object' &&
+      !Array.isArray(parsed['thread-workspace-root-hints'])
+      ? parsed['thread-workspace-root-hints']
+      : {};
     const orderedRoots = [
       ...(Array.isArray(parsed['project-order']) ? parsed['project-order'] : []),
       ...(Array.isArray(parsed['electron-saved-workspace-roots']) ? parsed['electron-saved-workspace-roots'] : [])
@@ -96,12 +136,12 @@ export async function readCodexWorkspaceState() {
       });
     }
 
-    return { projects };
+    return { projects, projectlessThreadIds, threadWorkspaceRootHints };
   } catch (error) {
     if (error.code !== 'ENOENT') {
       console.warn('[config] Failed to read Codex workspace state:', error.message);
     }
-    return { projects: [] };
+    return { projects: [], projectlessThreadIds: [], threadWorkspaceRootHints: {} };
   }
 }
 
@@ -111,9 +151,19 @@ export async function readCodexConfig() {
     model: 'gpt-5.5',
     modelShort: '5.5 中',
     reasoningEffort: null,
+    modelContextWindow: null,
+    modelAutoCompactTokenLimit: null,
     baseUrl: null,
     models: [{ value: 'gpt-5.5', label: 'gpt-5.5' }],
-    projects: []
+    projects: [],
+    context: {
+      modelContextWindow: null,
+      configuredContextWindow: null,
+      maxContextWindow: null,
+      autoCompactTokenLimit: null,
+      autoCompactEnabled: true,
+      effectiveContextWindowPercent: null
+    }
   };
 
   let raw;
@@ -193,6 +243,10 @@ export async function readCodexConfig() {
       config.model = value;
     } else if (key === 'model_reasoning_effort') {
       config.reasoningEffort = value;
+    } else if (key === 'model_context_window') {
+      config.modelContextWindow = numberOrNull(value);
+    } else if (key === 'model_auto_compact_token_limit') {
+      config.modelAutoCompactTokenLimit = numberOrNull(value);
     }
   }
 
@@ -204,6 +258,20 @@ export async function readCodexConfig() {
   config.modelShort = shortModelName(config.model);
   config.baseUrl = providerBaseUrls.get(config.provider) || (config.provider === 'cliproxyapi' ? 'http://127.0.0.1:8317/v1' : null);
   config.models = await readCodexModels(config.model);
+  const modelContext = await readCodexModelContext(config.model);
+  const modelContextWindow =
+    config.modelContextWindow ||
+    modelContext?.contextWindow ||
+    modelContext?.maxContextWindow ||
+    null;
+  config.context = {
+    modelContextWindow,
+    configuredContextWindow: config.modelContextWindow || null,
+    maxContextWindow: modelContext?.maxContextWindow || modelContextWindow,
+    autoCompactTokenLimit: config.modelAutoCompactTokenLimit || null,
+    autoCompactEnabled: Boolean(config.modelAutoCompactTokenLimit || modelContextWindow),
+    effectiveContextWindowPercent: modelContext?.effectiveContextWindowPercent || null
+  };
   config.projects = [...projectMap.values()];
   return config;
 }

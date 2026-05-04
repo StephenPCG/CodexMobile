@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -145,11 +146,16 @@ function rememberTurnEvent(payload) {
     patch.assistantPreview = payload.content || '';
     patch.messageId = payload.messageId || undefined;
     patch.label = '正在回复';
+  } else if (payload.type === 'context-status-update') {
+    patch.status = payload.status || 'running';
+    patch.context = payload;
+    patch.label = '背景信息已同步';
   } else if (payload.type === 'chat-complete') {
     patch.status = 'completed';
     patch.completedAt = payload.completedAt || new Date().toISOString();
     patch.hadAssistantText = Boolean(payload.hadAssistantText);
     patch.usage = payload.usage || null;
+    patch.context = payload.context || null;
     patch.label = '任务已完成';
   } else if (payload.type === 'chat-error') {
     patch.status = 'failed';
@@ -541,6 +547,70 @@ function classifyUpload(mimeType) {
   return String(mimeType || '').startsWith('image/') ? 'image' : 'file';
 }
 
+function resolveLocalImagePath(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  if (/^file:\/\//i.test(raw)) {
+    return fileURLToPath(raw);
+  }
+  if (raw === '~') {
+    return os.homedir();
+  }
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) {
+    return path.join(os.homedir(), raw.slice(2));
+  }
+  return raw;
+}
+
+function safeDecodeLocalPath(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+async function sendLocalImage(req, res, url) {
+  const requestedPath = resolveLocalImagePath(url.searchParams.get('path'));
+  const decodedPath = /%[0-9a-f]{2}/i.test(requestedPath) ? resolveLocalImagePath(safeDecodeLocalPath(requestedPath)) : '';
+  const candidates = [...new Set([requestedPath, decodedPath].filter(Boolean))];
+  if (!candidates.length || !candidates.some((candidate) => path.isAbsolute(candidate))) {
+    sendJson(res, 400, { error: 'Image path must be absolute' });
+    return;
+  }
+
+  for (const candidate of candidates) {
+    if (!path.isAbsolute(candidate)) {
+      continue;
+    }
+    const filePath = path.resolve(candidate);
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = mimeTypes.get(ext) || '';
+    if (!contentType.startsWith('image/')) {
+      continue;
+    }
+    try {
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) {
+        continue;
+      }
+      const content = await fs.readFile(filePath);
+      sendStaticContent(req, res, 200, content, {
+        'content-type': contentType,
+        'cache-control': 'private, max-age=3600',
+        'x-content-type-options': 'nosniff'
+      }, ext);
+      return;
+    } catch {
+      // Try the decoded candidate before reporting a miss.
+    }
+  }
+
+  sendJson(res, 404, { error: 'Image not found' });
+}
+
 function parseMultipartFile(buffer, contentType, fieldName = 'file') {
   const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[1] || contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[2];
   if (!boundary) {
@@ -794,6 +864,7 @@ async function publicStatus(authenticated) {
     model: config.model || 'gpt-5.5',
     modelShort: config.modelShort || '5.5 中',
     models: config.models?.length ? config.models : fallbackModels(config),
+    context: config.context || null,
     reasoningEffort: DEFAULT_REASONING_EFFORT,
     voiceTranscription: publicVoiceTranscriptionStatus(config),
     voiceSpeech: publicVoiceSpeechStatus(config),
@@ -919,6 +990,7 @@ function runNextQueuedChat(queueKey) {
       await registerMobileSession({
         id: finalSessionId,
         projectPath: job.project.path,
+        projectless: job.project.projectless,
         title: job.displayMessage.slice(0, 52),
         summary: job.displayMessage,
         updatedAt: new Date().toISOString()
@@ -997,6 +1069,11 @@ async function handleApi(req, res, url) {
       console.warn(`[quota] codex quota failed remote=${remoteAddress(req)} message=${error.message || 'unknown'}`);
       sendJson(res, 500, { error: 'Failed to query Codex quota' });
     }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/local-image') {
+    await sendLocalImage(req, res, url);
     return;
   }
 
@@ -1166,7 +1243,8 @@ async function handleApi(req, res, url) {
     const result = await readSessionMessages(sessionId, {
       limit: limit ? Number(limit) : 120,
       offset: offset !== null ? Number(offset) : null,
-      latest: offset === null || url.searchParams.get('latest') === '1'
+      latest: offset === null || url.searchParams.get('latest') === '1',
+      includeActivity: url.searchParams.get('activity') === '1'
     });
     sendJson(res, 200, result);
     return;
@@ -1315,6 +1393,7 @@ async function handleApi(req, res, url) {
           sessionId: imageSessionId,
           previousSessionId,
           projectPath: project.path,
+          projectless: project.projectless,
           message: imagePrompt,
           attachments,
           config,
@@ -1392,7 +1471,7 @@ async function handleApi(req, res, url) {
       displayMessage,
       model: session?.model || body.model || config.model || 'gpt-5.5',
       reasoningEffort: body.reasoningEffort || DEFAULT_REASONING_EFFORT,
-      permissionMode: body.permissionMode || 'default'
+      permissionMode: body.permissionMode || 'bypassPermissions'
     });
 
     sendJson(res, 202, { accepted: true, queued, sessionId: selectedSessionId, draftSessionId, turnId });

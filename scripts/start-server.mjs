@@ -1,9 +1,10 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const logDir = path.join(root, '.codexmobile');
+const port = Number(process.env.PORT || 3321);
 fs.mkdirSync(logDir, { recursive: true });
 
 const outPath = path.join(logDir, 'server.out.log');
@@ -48,6 +49,71 @@ function childEnv() {
   ].filter(Boolean).join(path.delimiter));
   return env;
 }
+
+function listenerPidsForPort(value) {
+  if (process.platform === 'win32') {
+    return [];
+  }
+  const result = spawnSync('lsof', [`-tiTCP:${value}`, '-sTCP:LISTEN'], {
+    encoding: 'utf8'
+  });
+  if (result.status !== 0 && !result.stdout) {
+    return [];
+  }
+  return String(result.stdout || '')
+    .split(/\s+/)
+    .map((item) => Number(item))
+    .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
+}
+
+function commandForPid(pid) {
+  const result = spawnSync('ps', ['-p', String(pid), '-o', 'command='], {
+    encoding: 'utf8'
+  });
+  return result.status === 0 ? String(result.stdout || '').trim() : '';
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pidIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function stopExistingServer() {
+  const pids = listenerPidsForPort(port).filter((pid) => commandForPid(pid).includes('server/index.js'));
+  if (!pids.length) {
+    return;
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // Process already exited.
+    }
+  }
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (pids.every((pid) => !pidIsAlive(pid))) {
+      console.log(`Stopped existing CodexMobile server on port ${port}: ${pids.join(', ')}`);
+      return;
+    }
+    await sleep(100);
+  }
+  for (const pid of pids) {
+    if (pidIsAlive(pid)) {
+      process.kill(pid, 'SIGKILL');
+    }
+  }
+  console.log(`Force-stopped existing CodexMobile server on port ${port}: ${pids.join(', ')}`);
+}
+
+await stopExistingServer();
 
 const out = fs.openSync(outPath, 'a');
 const err = fs.openSync(errPath, 'a');

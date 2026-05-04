@@ -7,6 +7,7 @@ const DEFAULT_CLIPROXY_CONFIG = process.platform === 'win32'
   ? 'D:\\CLIProxyAPI\\config.yaml'
   : path.join(os.homedir(), '.cli-proxy-api', 'config.yaml');
 const DEFAULT_AUTH_DIR = path.join(os.homedir(), '.cli-proxy-api');
+const DEFAULT_CODEX_AUTH_PATH = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'auth.json');
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const REQUEST_TIMEOUT_MS = 18_000;
 const MANAGEMENT_TIMEOUT_MS = 30_000;
@@ -95,6 +96,14 @@ async function resolveAuthDir() {
   }
 
   return DEFAULT_AUTH_DIR;
+}
+
+function resolveCodexAuthPath() {
+  const explicit = process.env.CODEXMOBILE_CODEX_AUTH_PATH || process.env.CODEX_AUTH_PATH;
+  if (explicit) {
+    return path.resolve(expandHome(explicit));
+  }
+  return DEFAULT_CODEX_AUTH_PATH;
 }
 
 async function resolveManagementBaseUrl() {
@@ -509,6 +518,18 @@ function baseAccount(fileName, credential) {
   };
 }
 
+function baseAccountFromCodexAuth(authPath, credential) {
+  const email = credential.email || 'Codex';
+  return {
+    id: safeId(credential.account_id, credential.email, authPath),
+    label: maskAccount(email),
+    plan: normalizePlan(credential.plan_type || credential.planType),
+    disabled: false,
+    status: 'ok',
+    windows: []
+  };
+}
+
 function baseAccountFromAuthEntry(entry) {
   const name = authEntryName(entry);
   const email = entry?.email || entry?.account || entry?.label || name.replace(/^codex-/, '').replace(/-[^-]+\.json$/i, '');
@@ -551,10 +572,61 @@ async function quotaForFile(authDir, fileName) {
   }
 }
 
+async function quotaForCodexAuth() {
+  const authPath = resolveCodexAuthPath();
+  let parsed = null;
+  try {
+    parsed = await readJsonFile(authPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    return {
+      id: safeId(authPath),
+      label: 'Codex',
+      plan: '',
+      disabled: false,
+      status: 'failed',
+      error: 'Codex 凭证读取失败',
+      windows: []
+    };
+  }
+
+  const tokens = parsed?.tokens && typeof parsed.tokens === 'object' ? parsed.tokens : parsed;
+  const credential = {
+    access_token: tokens?.access_token,
+    account_id: tokens?.account_id,
+    email: parsed?.email || tokens?.email,
+    plan_type: parsed?.plan_type || parsed?.planType || tokens?.plan_type || tokens?.planType
+  };
+  const account = baseAccountFromCodexAuth(authPath, credential);
+
+  if (!credential.access_token || !credential.account_id) {
+    return { ...account, status: 'failed', error: 'Codex 凭证缺少额度查询信息' };
+  }
+
+  try {
+    const usage = await requestCodexUsage(credential);
+    return {
+      ...account,
+      label: maskAccount(usage?.email || credential.email || 'Codex'),
+      plan: normalizePlan(usage?.plan_type ?? usage?.planType, account.plan),
+      status: 'ok',
+      windows: extractQuotaWindows(usage)
+    };
+  } catch (error) {
+    return {
+      ...account,
+      status: 'failed',
+      error: safeErrorMessage(error)
+    };
+  }
+}
+
 async function quotaForManagementEntry(baseUrl, managementKey, entry) {
   const account = baseAccountFromAuthEntry(entry);
   if (account.disabled) {
-    return { ...account, status: 'disabled', error: '宸插仠鐢?' };
+    return { ...account, status: 'disabled', error: '已停用' };
   }
   const authIndex = String(entry?.auth_index || entry?.authIndex || '').trim();
   if (!authIndex) {
@@ -621,8 +693,10 @@ export async function getCodexQuota() {
       .filter((fileName) => /^codex-.+\.json$/i.test(fileName))
       .sort((a, b) => a.localeCompare(b));
   } catch (error) {
-    error.statusCode = 500;
-    throw error;
+    if (error.code !== 'ENOENT') {
+      error.statusCode = 500;
+      throw error;
+    }
   }
 
   const accounts = await Promise.all(
@@ -642,9 +716,14 @@ export async function getCodexQuota() {
       }
     })
   );
+  const codexAuthAccount = await quotaForCodexAuth();
+  if (codexAuthAccount && !accounts.some((account) => account.id === codexAuthAccount.id)) {
+    accounts.push(codexAuthAccount);
+  }
 
   return {
-    provider: 'cliproxyapi',
+    provider: 'codex',
+    source: accounts.length ? 'local-auth' : 'none',
     accounts
   };
 }

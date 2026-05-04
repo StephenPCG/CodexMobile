@@ -12,21 +12,27 @@ import {
   Loader2,
   Menu,
   Mic,
+  MessageSquare,
   MessageSquarePlus,
   Monitor,
   Paperclip,
   Pencil,
   Plus,
   RefreshCw,
+  Search,
   Settings,
   ShieldCheck,
   Square,
+  Terminal,
   Trash2,
   Volume2,
   Wifi,
   X
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
+import remarkGfm from 'remark-gfm';
 import { apiBlobFetch, apiFetch, clearToken, getToken, realtimeVoiceWebsocketUrl, setToken, websocketUrl } from './api.js';
 
 const DEFAULT_STATUS = {
@@ -54,6 +60,24 @@ const DEFAULT_STATUS = {
     slidesAuthorized: false,
     sheetsAuthorized: false,
     authPending: null
+  },
+  context: {
+    inputTokens: null,
+    totalTokens: null,
+    contextWindow: null,
+    modelContextWindow: null,
+    configuredContextWindow: null,
+    maxContextWindow: null,
+    percent: null,
+    updatedAt: null,
+    autoCompact: {
+      enabled: false,
+      tokenLimit: null,
+      detected: false,
+      status: 'unknown',
+      lastCompactedAt: null,
+      reason: ''
+    }
   },
   voiceRealtime: { configured: false, model: 'qwen3.5-omni-plus-realtime', provider: '阿里百炼' },
   auth: { authenticated: false }
@@ -150,6 +174,7 @@ const PERMISSION_OPTIONS = [
   { value: 'acceptEdits', label: '自动接受编辑' },
   { value: 'bypassPermissions', label: '完全访问', danger: true }
 ];
+const DEFAULT_PERMISSION_MODE = 'bypassPermissions';
 
 const REASONING_OPTIONS = [
   { value: 'low', label: '低' },
@@ -174,6 +199,35 @@ function formatTime(value) {
   }
 }
 
+function formatDuration(start, end = Date.now()) {
+  const startMs = new Date(start || end).getTime();
+  const endMs = new Date(end || Date.now()).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    return '';
+  }
+  const totalSeconds = Math.max(1, Math.round((endMs - startMs) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatDurationMs(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return '';
+  }
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+  return `${minutes}m ${seconds}s`;
+}
+
 function compactPath(value) {
   if (!value) {
     return '';
@@ -192,6 +246,97 @@ function formatBytes(value) {
     return `${Math.round(size / 102.4) / 10} KB`;
   }
   return `${Math.round(size / 1024 / 102.4) / 10} MB`;
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function formatTokenCount(value) {
+  const tokens = numberOrNull(value);
+  if (!tokens) {
+    return '--';
+  }
+  if (tokens >= 1000000) {
+    return `${Math.round(tokens / 100000) / 10}m`;
+  }
+  if (tokens >= 1000) {
+    return `${Math.round(tokens / 1000)}k`;
+  }
+  return String(Math.round(tokens));
+}
+
+function normalizeContextStatus(value = {}, fallback = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const base = fallback && typeof fallback === 'object' ? fallback : {};
+  const inputTokens = numberOrNull(source.inputTokens ?? source.input_tokens ?? base.inputTokens);
+  const totalTokens = numberOrNull(source.totalTokens ?? source.total_tokens ?? base.totalTokens);
+  const contextWindow = numberOrNull(
+    source.contextWindow ??
+    source.modelContextWindow ??
+    source.model_context_window ??
+    base.contextWindow ??
+    base.modelContextWindow
+  );
+  const percent =
+    numberOrNull(source.percent ?? base.percent) ||
+    (inputTokens && contextWindow ? Math.max(0, Math.min(100, Math.round((inputTokens / contextWindow) * 1000) / 10)) : null);
+  const sourceCompact = source.autoCompact && typeof source.autoCompact === 'object' ? source.autoCompact : {};
+  const baseCompact = base.autoCompact && typeof base.autoCompact === 'object' ? base.autoCompact : {};
+  const tokenLimit = numberOrNull(
+    sourceCompact.tokenLimit ??
+    sourceCompact.token_limit ??
+    source.autoCompactTokenLimit ??
+    source.modelAutoCompactTokenLimit ??
+    baseCompact.tokenLimit ??
+    base.autoCompactTokenLimit
+  );
+  const detected = Boolean(sourceCompact.detected ?? baseCompact.detected);
+  const compactEnabled = Boolean(sourceCompact.enabled ?? source.autoCompactEnabled ?? baseCompact.enabled ?? base.autoCompactEnabled ?? tokenLimit);
+  return {
+    ...base,
+    ...source,
+    inputTokens,
+    totalTokens,
+    contextWindow,
+    percent,
+    updatedAt: source.updatedAt || base.updatedAt || null,
+    autoCompact: {
+      ...baseCompact,
+      ...sourceCompact,
+      enabled: compactEnabled,
+      tokenLimit,
+      detected,
+      status: sourceCompact.status || baseCompact.status || (detected ? 'detected' : compactEnabled ? 'watching' : 'unknown'),
+      lastCompactedAt: sourceCompact.lastCompactedAt || baseCompact.lastCompactedAt || null,
+      reason: sourceCompact.reason || baseCompact.reason || ''
+    }
+  };
+}
+
+function mergeContextStatus(current, incoming, configContext = {}) {
+  const config = normalizeContextStatus(configContext);
+  const base = normalizeContextStatus(current || config, config);
+  const next = normalizeContextStatus(incoming || {}, base);
+  return {
+    ...base,
+    ...next,
+    inputTokens: next.inputTokens || base.inputTokens || null,
+    totalTokens: next.totalTokens || base.totalTokens || null,
+    contextWindow: next.contextWindow || base.contextWindow || config.contextWindow || null,
+    percent: next.percent || base.percent || null,
+    autoCompact: {
+      ...base.autoCompact,
+      ...next.autoCompact,
+      tokenLimit: next.autoCompact?.tokenLimit || base.autoCompact?.tokenLimit || null,
+      detected: Boolean(next.autoCompact?.detected || base.autoCompact?.detected)
+    }
+  };
+}
+
+function emptyContextStatus() {
+  return normalizeContextStatus(DEFAULT_STATUS.context, DEFAULT_STATUS.context);
 }
 
 function shortModelName(model) {
@@ -213,11 +358,125 @@ function reasoningLabel(value) {
 }
 
 function imageUrlWithRetry(url, retryKey) {
-  if (!retryKey) {
+  if (!retryKey || /^data:image\//i.test(String(url || '').trim())) {
     return url;
   }
   const separator = url.includes('?') ? '&' : '?';
   return `${url}${separator}r=${retryKey}`;
+}
+
+const resolvedImageSourceCache = new Map();
+
+function isLocalImageSource(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.startsWith('/generated/') || raw.startsWith('/assets/')) {
+    return false;
+  }
+  return (
+    /^file:\/\//i.test(raw) ||
+    /^\/(?:Users|private|var|tmp|Volumes)\//.test(raw) ||
+    /^~[\\/]/.test(raw) ||
+    /^[A-Za-z]:[\\/]/.test(raw)
+  );
+}
+
+function safeDecodeUriComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function localImageApiPath(value) {
+  const raw = String(value || '').trim();
+  const normalized = /%[0-9a-f]{2}/i.test(raw) ? safeDecodeUriComponent(raw) : raw;
+  return `/api/local-image?path=${encodeURIComponent(normalized)}`;
+}
+
+function dataImageObjectUrl(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^data:(image\/(?:png|jpe?g|webp|gif));base64,([\s\S]+)$/i);
+  if (!match) {
+    return '';
+  }
+  const binary = atob(match[2].replace(/\s+/g, ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return URL.createObjectURL(new Blob([bytes], { type: match[1].toLowerCase() }));
+}
+
+function cachedResolvedImageSource(url) {
+  const raw = String(url || '').trim();
+  if (!raw) {
+    return null;
+  }
+  return resolvedImageSourceCache.get(raw) || null;
+}
+
+function useResolvedImageSource(url, retryKey) {
+  const [resolved, setResolved] = useState(() => cachedResolvedImageSource(url) || { src: '', local: false, error: false, cached: false });
+
+  useEffect(() => {
+    const raw = String(url || '').trim();
+    if (!raw) {
+      setResolved({ src: '', local: false, error: true });
+      return undefined;
+    }
+    const cached = resolvedImageSourceCache.get(raw);
+    if (cached) {
+      setResolved(cached);
+      return undefined;
+    }
+    if (/^data:image\//i.test(raw)) {
+      try {
+        const src = dataImageObjectUrl(raw);
+        if (src) {
+          const next = { src, local: false, error: false, cached: true };
+          resolvedImageSourceCache.set(raw, next);
+          setResolved(next);
+          return undefined;
+        }
+      } catch {
+        setResolved({ src: raw, local: false, error: false, cached: false });
+        return undefined;
+      }
+    }
+    if (!isLocalImageSource(raw)) {
+      setResolved({ src: imageUrlWithRetry(raw, retryKey), local: false, error: false });
+      return undefined;
+    }
+
+    let stopped = false;
+    let objectUrl = '';
+    setResolved({ src: '', local: true, error: false });
+    apiBlobFetch(localImageApiPath(raw))
+      .then((blob) => {
+        if (stopped) {
+          return;
+        }
+        objectUrl = URL.createObjectURL(blob);
+        const next = { src: objectUrl, local: true, error: false, cached: true };
+        resolvedImageSourceCache.set(raw, next);
+        setResolved(next);
+      })
+      .catch(() => {
+        if (!stopped) {
+          setResolved({ src: '', local: true, error: true });
+        }
+      });
+
+    return () => {
+      stopped = true;
+      if (objectUrl && !resolvedImageSourceCache.has(raw)) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [url, retryKey]);
+
+  return resolved;
 }
 
 function createClientTurnId() {
@@ -242,6 +501,15 @@ function isDraftSession(session) {
   return Boolean(session?.draft || id?.startsWith('draft-'));
 }
 
+function sessionMessagesApiPath(sessionId, { limit = 120, activity = true } = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (activity) {
+    params.set('activity', '1');
+  }
+  return `/api/sessions/${encodeURIComponent(sessionId)}/messages?${params.toString()}`;
+}
+
 function titleFromFirstMessage(message) {
   const value = String(message || '').trim().replace(/\s+/g, ' ');
   return value ? value.slice(0, 52) : '新对话';
@@ -257,6 +525,56 @@ function selectedRunKeys(session) {
 
 function hasRunningKey(runningById, keys) {
   return keys.some((key) => Boolean(runningById[key]));
+}
+
+function sessionRunKeys(session) {
+  return [session?.id, session?.turnId, session?.previousSessionId].filter(Boolean);
+}
+
+function buildComposerRunStatus(messages, running, now = Date.now()) {
+  const activity = [...(messages || [])]
+    .reverse()
+    .find((message) => message.role === 'activity' && (message.status === 'running' || message.status === 'queued'));
+  if (!running && !activity) {
+    return null;
+  }
+
+  const steps = Array.isArray(activity?.activities) ? activity.activities : [];
+  const visibleSteps = steps.filter((step) => isVisibleActivityStep(step, activity?.status || 'running'));
+  const activeStep = [...visibleSteps].reverse().find((step) => step.status === 'running' || step.status === 'queued') || null;
+  const latestStep = activeStep || visibleSteps[visibleSteps.length - 1] || null;
+  const startedAt = activity?.startedAt || activity?.timestamp || now;
+  const duration = formatDuration(startedAt, now);
+  let label = '正在思考';
+
+  if (latestStep) {
+    if (latestStep.kind === 'agent_message' || latestStep.kind === 'message') {
+      label = '正在同步回复';
+    } else if (activeStep) {
+      label = describeActivityStep(latestStep).label || latestStep.label || label;
+    } else if (activity?.status === 'running' || activity?.status === 'queued') {
+      label = '正在思考';
+    } else {
+      const descriptor = describeActivityStep(latestStep);
+      label = descriptor.type === 'command'
+        ? '等待命令返回'
+        : descriptor.type === 'edit'
+          ? '文件变更已同步'
+          : descriptor.type === 'web_search'
+            ? '网页搜索已完成'
+            : descriptor.label || latestStep.label || '等待下一步';
+    }
+  } else if (activity?.detail) {
+    label = activity.detail;
+  } else if (activity?.label && !isGenericActivityLabel(activity.label)) {
+    label = activity.label;
+  }
+
+  return {
+    label: compactActivityText(label) || '正在处理',
+    duration,
+    running: true
+  };
 }
 
 function hasVisibleAssistantForTurn(messages, payload) {
@@ -527,7 +845,12 @@ function meaningfulActivityLabel(payload, rawLabel, detail) {
     return commandLabel;
   }
 
-  if (payload.kind === 'agent_message' || payload.kind === 'message' || payload.kind === 'reasoning') {
+  if (payload.kind === 'agent_message' || payload.kind === 'message') {
+    const text = rawLabel || payload.content || detail;
+    return isGenericActivityLabel(text) ? '' : text;
+  }
+
+  if (payload.kind === 'reasoning') {
     return briefActivityLabel(rawLabel || payload.content || detail);
   }
 
@@ -547,8 +870,11 @@ function isGenericActivityLabel(value) {
 }
 
 function activityStepFromPayload(payload, fallbackKind = 'status') {
-  const rawLabel = String(payload.label || payload.content || '').replace(/\s+/g, ' ').trim();
-  const detail = String(payload.detail || payload.error || '').replace(/\s+/g, ' ').trim();
+  const preservesText = payload.kind === 'agent_message' || payload.kind === 'message';
+  const rawLabel = preservesText
+    ? String(payload.label || payload.content || '').trim()
+    : String(payload.label || payload.content || '').replace(/\s+/g, ' ').trim();
+  const detail = String(payload.detail || payload.error || '').trim();
   const label = meaningfulActivityLabel(payload, rawLabel, detail);
   if (!label) {
     return null;
@@ -563,8 +889,25 @@ function activityStepFromPayload(payload, fallbackKind = 'status') {
     output: payload.output || '',
     error: payload.error || '',
     fileChanges: payload.fileChanges || [],
+    toolName: payload.toolName || payload.name || '',
     timestamp: payload.timestamp || new Date().toISOString()
   };
+}
+
+function compactActivityText(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) {
+    return '';
+  }
+  return text;
+}
+
+function conciseActivityDetail(value, maxLength = 140) {
+  const text = compactActivityText(value);
+  if (!text || text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength - 1)}…`;
 }
 
 function briefActivityLabel(value, fallback = '正在处理') {
@@ -622,7 +965,7 @@ function mergeActivityStep(currentSteps, step) {
   const existingIndex = steps.findIndex((item) => item.id === step.id);
   if (existingIndex >= 0) {
     steps[existingIndex] = { ...steps[existingIndex], ...step };
-    return steps.slice(-8);
+    return steps;
   }
   const sameWorkIndex = steps.findIndex(
     (item) =>
@@ -632,13 +975,13 @@ function mergeActivityStep(currentSteps, step) {
   );
   if (sameWorkIndex >= 0) {
     steps[sameWorkIndex] = { ...steps[sameWorkIndex], ...step };
-    return steps.slice(-8);
+    return steps;
   }
   const last = steps[steps.length - 1];
   if (last && last.label === step.label && last.detail === step.detail && last.status === step.status) {
     return steps;
   }
-  return [...steps, step].slice(-8);
+  return [...steps, step];
 }
 
 function isVisibleActivityStep(step, messageStatus) {
@@ -646,7 +989,20 @@ function isVisibleActivityStep(step, messageStatus) {
     return false;
   }
   const label = String(step.label || '').trim();
-  if (isGenericActivityLabel(label)) {
+  const hasWorkDetail =
+    Boolean(step.command || step.detail || step.output || step.error || step.toolName) ||
+    (Array.isArray(step.fileChanges) && step.fileChanges.length > 0);
+  const workKinds = new Set([
+    'command_execution',
+    'file_change',
+    'mcp_tool_call',
+    'dynamic_tool_call',
+    'web_search',
+    'image_generation_call',
+    'plan',
+    'context_compaction'
+  ]);
+  if (isGenericActivityLabel(label) && !hasWorkDetail && !workKinds.has(step.kind)) {
     return false;
   }
   if (
@@ -655,7 +1011,7 @@ function isVisibleActivityStep(step, messageStatus) {
   ) {
     return false;
   }
-  if (messageStatus !== 'failed' && step.kind === 'command_execution' && step.status === 'failed') {
+  if (step.kind === 'function_call_output' && messageStatus !== 'failed' && step.status !== 'failed') {
     return false;
   }
   if (messageStatus !== 'failed' && /blocked by policy|rejected/i.test(`${step.detail || ''}\n${step.output || ''}\n${step.error || ''}`)) {
@@ -664,19 +1020,119 @@ function isVisibleActivityStep(step, messageStatus) {
   return true;
 }
 
+function completeActivityMessagesForTurn(current, payload) {
+  const keys = new Set(payloadRunKeys(payload));
+  if (!keys.size) {
+    return current;
+  }
+  const finalText = normalizeActivityDuplicateText(payload.content || payload.label || '');
+  const completedAt = payload.completedAt || payload.timestamp || new Date().toISOString();
+  return current.map((message) => {
+    if (message.role !== 'activity' || !payloadRunKeys(message).some((key) => keys.has(key))) {
+      return message;
+    }
+    const activities =
+      finalText && Array.isArray(message.activities)
+        ? message.activities.filter((activity) => {
+          if (!['agent_message', 'message'].includes(activity?.kind)) {
+            return true;
+          }
+          return normalizeActivityDuplicateText(activity.label || activity.content || activity.detail) !== finalText;
+        })
+        : message.activities;
+    return {
+      ...message,
+      status: message.status === 'failed' ? 'failed' : 'completed',
+      label: message.status === 'failed' ? message.label : '过程已同步',
+      content: message.status === 'failed' ? message.content : '过程已同步',
+      startedAt: message.startedAt || payload.startedAt || message.timestamp || null,
+      completedAt: message.completedAt || completedAt,
+      durationMs: message.durationMs || payload.durationMs || null,
+      activities
+    };
+  });
+}
+
+function normalizeActivityDuplicateText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function messageMatchesRun(message, keys) {
+  if (!keys?.size) {
+    return false;
+  }
+  return payloadRunKeys(message).some((key) => keys.has(key));
+}
+
+function mergeLoadedMessagesPreservingActivity(current, loaded, payload) {
+  const keys = new Set(payloadRunKeys(payload));
+  if (!keys.size || !Array.isArray(loaded)) {
+    return loaded || [];
+  }
+  if (loaded.some((message) => message.role === 'activity' && message.durationMs)) {
+    return loaded;
+  }
+  const activityMessages = completeActivityMessagesForTurn(
+    current.filter((message) => message.role === 'activity' && messageMatchesRun(message, keys)),
+    payload
+  );
+  if (!activityMessages.length) {
+    return loaded;
+  }
+
+  const result = [];
+  let inserted = false;
+  for (const message of loaded) {
+    if (!inserted && message.role === 'assistant' && messageMatchesRun(message, keys)) {
+      result.push(...activityMessages);
+      inserted = true;
+    }
+    result.push(message);
+  }
+  if (!inserted) {
+    result.push(...activityMessages);
+  }
+  return result;
+}
+
+function messageStreamSignature(messages) {
+  return (messages || [])
+    .map((message) => {
+      const activities = Array.isArray(message.activities) ? message.activities : [];
+      const activitySignature = activities
+        .map((activity) => `${activity.id}:${activity.status}:${activity.label}:${activity.detail || activity.command || ''}`)
+        .map((signature, index) => {
+          const activity = activities[index] || {};
+          const fileChanges = Array.isArray(activity.fileChanges) ? activity.fileChanges : [];
+          const fileSignature = fileChanges
+            .map((change) => `${change.path || ''}:${change.kind || ''}:${change.additions || 0}:${change.deletions || 0}:${String(change.unifiedDiff || '').length}`)
+            .join(',');
+          const output = String(activity.output || activity.error || '');
+          return `${signature}:${output.length}:${output.slice(-160)}:${fileSignature}`;
+        })
+        .join('|');
+      return `${message.id}:${message.role}:${message.status || ''}:${message.content || ''}:${activitySignature}`;
+    })
+    .join('\n');
+}
+
 function upsertStatusMessage(current, payload) {
   const id = statusMessageId(payload);
   const existingIndex = current.findIndex((message) => message.id === id);
   const previous = existingIndex >= 0 ? current[existingIndex] : null;
   const normalizedPayload =
     payload.kind === 'agent_message'
-      ? { ...payload, label: briefActivityLabel(payload.label || payload.content) }
+      ? { ...payload, label: String(payload.label || payload.content || '').trim() }
       : payload;
   const detail =
     normalizedPayload.kind === 'reasoning'
       ? previous?.detail || ''
       : normalizedPayload.detail || previous?.detail || '';
   const isTurnLevel = normalizedPayload.kind === 'turn' || normalizedPayload.kind === 'error';
+  const terminalTimestamp =
+    normalizedPayload.completedAt ||
+    (['completed', 'failed'].includes(normalizedPayload.status) ? normalizedPayload.timestamp : '') ||
+    '';
   const nextMessage = {
     id,
     role: 'activity',
@@ -688,6 +1144,9 @@ function upsertStatusMessage(current, payload) {
     kind: normalizedPayload.kind || previous?.kind || 'turn',
     status: isTurnLevel ? (normalizedPayload.status || previous?.status || 'running') : (previous?.status || 'running'),
     timestamp: normalizedPayload.timestamp || previous?.timestamp || new Date().toISOString(),
+    startedAt: previous?.startedAt || normalizedPayload.startedAt || normalizedPayload.timestamp || new Date().toISOString(),
+    completedAt: previous?.completedAt || terminalTimestamp || null,
+    durationMs: previous?.durationMs || normalizedPayload.durationMs || null,
     activities: mergeActivityStep(previous?.activities || [], activityStepFromPayload(normalizedPayload))
   };
 
@@ -723,6 +1182,12 @@ function upsertActivityMessage(current, payload) {
     kind: payload.kind || previous?.kind || 'activity',
     status: isTurnLevel ? (payload.status || previous?.status || 'running') : (previous?.status || 'running'),
     timestamp: previous?.timestamp || payload.timestamp || new Date().toISOString(),
+    startedAt: previous?.startedAt || payload.startedAt || previous?.timestamp || payload.timestamp || new Date().toISOString(),
+    completedAt:
+      previous?.completedAt ||
+      payload.completedAt ||
+      (isTurnLevel && ['completed', 'failed'].includes(payload.status) ? payload.timestamp || new Date().toISOString() : null),
+    durationMs: previous?.durationMs || payload.durationMs || null,
     activities
   };
 
@@ -778,14 +1243,14 @@ function upsertAssistantMessage(current, payload) {
     sessionId: payload.sessionId || null,
     kind: payload.kind
   };
-  const withoutActivity = removeActivityMessagesForTurn(current, payload);
-  const existingIndex = withoutActivity.findIndex((message) => message.id === id);
+  const withCompletedActivity = payload.done === false ? current : completeActivityMessagesForTurn(current, payload);
+  const existingIndex = withCompletedActivity.findIndex((message) => message.id === id);
   if (existingIndex >= 0) {
-    const next = [...withoutActivity];
+    const next = [...withCompletedActivity];
     next[existingIndex] = nextMessage;
     return next;
   }
-  return [...withoutActivity, nextMessage];
+  return [...withCompletedActivity, nextMessage];
 }
 
 function PairingScreen({ onPaired }) {
@@ -893,6 +1358,9 @@ function Drawer({
   expandedProjectIds,
   sessionsByProject,
   loadingProjectId,
+  runningById,
+  threadRuntimeById,
+  completedSessionIds,
   onToggleProject,
   onSelectSession,
   onRenameSession,
@@ -990,12 +1458,12 @@ function Drawer({
           <MessageSquarePlus size={20} />
           <span>
             <strong>新对话</strong>
-            <small>在当前项目中新建</small>
+            <small>在当前分类中新建</small>
           </span>
         </button>
 
         <section className="drawer-section project-section">
-          <div className="drawer-heading">项目</div>
+          <div className="drawer-heading">对话分类</div>
           <div className="project-list">
             {projects.map((project) => {
               const isSelected = selectedProject?.id === project.id;
@@ -1007,10 +1475,10 @@ function Drawer({
                     className={`project-row ${isSelected ? 'is-selected' : ''} ${isExpanded ? 'is-expanded' : ''}`}
                     onClick={() => onToggleProject(project)}
                   >
-                    <Folder size={18} />
+                    {project.projectless ? <MessageSquare size={18} /> : <Folder size={18} />}
                     <span>
                       <strong>{project.name}</strong>
-                      <small>{compactPath(project.path)}</small>
+                      <small>{project.pathLabel || compactPath(project.path)}</small>
                     </span>
                     <small className="project-count">{project.sessionCount || projectSessions.length || 0}</small>
                     <ChevronDown size={15} className="project-chevron" />
@@ -1023,39 +1491,51 @@ function Drawer({
                           加载中
                         </div>
                       ) : projectSessions.length ? (
-                        projectSessions.map((session) => (
-                          <div
-                            key={session.id}
-                            className={`thread-row ${selectedSession?.id === session.id ? 'is-selected' : ''} ${session.draft ? 'is-draft' : ''}`}
-                          >
-                            <button
-                              type="button"
-                              className="thread-main"
-                              onClick={() => onSelectSession(session)}
+                        projectSessions.map((session) => {
+                          const runtime = threadRuntimeById?.[session.id] || null;
+                          const sessionRunning = runtime?.status === 'running' || hasRunningKey(runningById, sessionRunKeys(session));
+                          const sessionCompleted = runtime?.status === 'completed' || Boolean(completedSessionIds?.[session.id]);
+                          return (
+                            <div
+                              key={session.id}
+                              className={`thread-row ${selectedSession?.id === session.id ? 'is-selected' : ''} ${session.draft ? 'is-draft' : ''} ${sessionRunning ? 'is-running' : ''} ${sessionCompleted ? 'has-complete-notice' : ''}`}
                             >
-                              <span>{session.title || '对话'}</span>
-                              <small>{session.draft ? '待发送' : formatTime(session.updatedAt)}</small>
-                            </button>
-                            <button
-                              type="button"
-                              className="thread-rename"
-                              onClick={() => onRenameSession(project, session)}
-                              aria-label="重命名线程"
-                              title="重命名线程"
-                            >
-                              <Pencil size={14} />
-                            </button>
-                            <button
-                              type="button"
-                              className="thread-delete"
-                              onClick={() => onDeleteSession(project, session)}
-                              aria-label="删除线程"
-                              title="删除线程"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        ))
+                              <button
+                                type="button"
+                                className="thread-main"
+                                onClick={() => onSelectSession(session)}
+                              >
+                                <span className="thread-title-line">
+                                  <span>{session.title || '对话'}</span>
+                                  {sessionRunning ? (
+                                    <Loader2 className="thread-status-spin spin" size={12} aria-label="运行中" />
+                                  ) : sessionCompleted ? (
+                                    <span className="thread-complete-dot" aria-label="有新完成结果" />
+                                  ) : null}
+                                </span>
+                                <small>{sessionRunning ? '正在处理' : session.draft ? '待发送' : formatTime(session.updatedAt)}</small>
+                              </button>
+                              <button
+                                type="button"
+                                className="thread-rename"
+                                onClick={() => onRenameSession(project, session)}
+                                aria-label="重命名线程"
+                                title="重命名线程"
+                              >
+                                <Pencil size={14} />
+                              </button>
+                              <button
+                                type="button"
+                                className="thread-delete"
+                                onClick={() => onDeleteSession(project, session)}
+                                aria-label="删除线程"
+                                title="删除线程"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          );
+                        })
                       ) : (
                         <div className="thread-empty">暂无线程</div>
                       )}
@@ -1353,40 +1833,570 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
   );
 }
 
-function ActivityMessage({ message }) {
+function ActivityMessage({ message, now = Date.now() }) {
   const running = message.status === 'running' || message.status === 'queued';
   const failed = message.status === 'failed';
+  const [open, setOpen] = useState(() => running);
   const activities = message.activities || [];
-  const visibleSteps = activities.filter((activity) => isVisibleActivityStep(activity, message.status)).slice(-4);
-  const headline = running ? '正在思考中' : message.label || message.content || '正在处理';
+  const visibleSteps = activities.filter((activity) => isVisibleActivityStep(activity, message.status));
+  const details = activityTimeRange(visibleSteps);
+  const timeline = buildActivityTimeline(visibleSteps, running);
+  const fileSummary = buildActivityFileSummary(visibleSteps);
+  const startedAt = message.startedAt || details.startedAt || message.timestamp;
+  const endedAt = running ? now : message.completedAt || details.endedAt || message.timestamp || now;
+  const duration = !running ? formatDurationMs(message.durationMs) || formatDuration(startedAt, endedAt) : formatDuration(startedAt, endedAt);
+  const headline = failed ? '处理失败' : running ? '处理中' : '已处理';
+
+  useEffect(() => {
+    setOpen(running);
+  }, [message.id, running]);
 
   return (
     <div className="message-row is-activity">
       <div className={`message-bubble activity-bubble ${failed ? 'is-failed' : ''}`}>
-        <div className="activity-summary" role="status" aria-live="polite">
-          {running ? <Loader2 className="spin" size={15} /> : failed ? <X size={15} /> : <Check size={15} />}
-          <span>{headline}</span>
-        </div>
-        {visibleSteps.length ? (
-          <div className="activity-steps" aria-label="任务进度">
-            {visibleSteps.map((activity) => (
-              <div key={activity.id} className={`activity-step is-${activity.status || 'running'}`}>
-                <span className="activity-step-dot" />
-                <span>{activity.label}</span>
-              </div>
-            ))}
+        <button
+          type="button"
+          className="activity-summary"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span>{duration ? `${headline} ${duration}` : headline}</span>
+          <ChevronDown className={`activity-chevron ${open ? 'is-open' : ''}`} size={15} />
+        </button>
+        {open && (timeline.length || fileSummary) ? (
+          <div className="activity-timeline" aria-label="任务进度">
+            {timeline.map((item) =>
+              item.type === 'text' ? (
+                <MarkdownContent
+                  key={item.id}
+                  className="message-content activity-markdown activity-text"
+                  text={item.text}
+                />
+              ) : item.type === 'divider' ? (
+                <div key={item.id} className="activity-divider">
+                  <span>{item.text}</span>
+                </div>
+              ) : item.items.some((step) => activityDetailText(step)) ? (
+                <details key={item.id} className="activity-meta">
+                  <summary className="activity-meta-summary">
+                    {activityMetaIcon(item)}
+                    <span>{item.title}</span>
+                  </summary>
+                  <div className="activity-meta-body">
+                    {item.items.filter((step) => activityDetailText(step)).map((step) => (
+                      <div key={step.id} className="activity-meta-line">
+                        <MarkdownContent
+                          className="message-content activity-markdown activity-meta-label"
+                          text={step.label}
+                        />
+                        <MarkdownContent
+                          className="message-content activity-markdown activity-meta-detail"
+                          text={activityDetailText(step)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ) : (
+                <div key={item.id} className="activity-meta">
+                  <div className="activity-meta-summary">
+                    {activityMetaIcon(item)}
+                    <span>{item.title}</span>
+                  </div>
+                </div>
+              )
+            )}
+            {fileSummary ? <ActivityFileSummary summary={fileSummary} /> : null}
           </div>
         ) : null}
-        {message.timestamp ? <time>{formatTime(message.timestamp)}</time> : null}
       </div>
     </div>
   );
 }
 
-function GeneratedImage({ part, onPreviewImage }) {
+function activityTimeRange(steps) {
+  let startedAt = null;
+  let endedAt = null;
+
+  for (const step of steps || []) {
+    const timestamp = step.timestamp || '';
+    if (timestamp && (!startedAt || new Date(timestamp) < new Date(startedAt))) {
+      startedAt = timestamp;
+    }
+    if (timestamp && (!endedAt || new Date(timestamp) > new Date(endedAt))) {
+      endedAt = timestamp;
+    }
+  }
+
+  return { startedAt, endedAt };
+}
+
+function buildActivityTimeline(steps, running) {
+  const timeline = [];
+  let batch = [];
+  let batchIndex = 0;
+
+  function flushBatch() {
+    if (!batch.length) {
+      return;
+    }
+    timeline.push({
+      id: `meta-${batchIndex++}-${batch.map((item) => item.id).join('-')}`,
+      type: 'meta',
+      metaType: dominantActivityType(batch),
+      title: summarizeActivityBatch(batch, running),
+      items: batch
+    });
+    batch = [];
+  }
+
+  for (const step of steps || []) {
+    if (isContextCompactionActivity(step)) {
+      flushBatch();
+      timeline.push({
+        id: `divider-${step.id}`,
+        type: 'divider',
+        text: step.status === 'running' ? '正在自动压缩上下文' : '上下文已自动压缩'
+      });
+    } else if (isNarrativeActivity(step)) {
+      flushBatch();
+      timeline.push({
+        id: `text-${step.id}`,
+        type: 'text',
+        text: String(step.label || step.detail || step.content || '').trim()
+      });
+    } else {
+      batch.push(activityTimelineItem(step));
+    }
+  }
+  flushBatch();
+
+  return timeline;
+}
+
+function isContextCompactionActivity(step) {
+  const source = `${step?.kind || ''} ${step?.label || ''} ${step?.detail || ''}`.trim();
+  return step?.kind === 'context_compaction' || /自动压缩上下文|上下文已自动压缩/.test(source);
+}
+
+function isNarrativeActivity(step) {
+  const label = String(step?.label || '').trim();
+  const detail = activityDetailText(step);
+  const source = `${step?.kind || ''} ${label} ${detail}`.toLowerCase();
+  if (step?.command) {
+    return false;
+  }
+  if (step?.kind === 'agent_message' || step?.kind === 'message') {
+    return true;
+  }
+  if (/command|function_call|工具|命令|已运行|执行|编辑|修改|写入|读取|搜索|检查|查看|explore|search|read/.test(source)) {
+    return false;
+  }
+  return label.length > 26;
+}
+
+function activityTimelineItem(step) {
+  const descriptor = describeActivityStep(step);
+  return {
+    id: step.id,
+    type: descriptor.type,
+    label: descriptor.label,
+    detail: descriptor.detail,
+    count: descriptor.count,
+    unit: descriptor.unit,
+    status: step.status || 'running'
+  };
+}
+
+function describeActivityStep(step) {
+  const detail = activityDetailText(step);
+  const label = String(step?.label || '').trim();
+  const toolName = String(step?.toolName || '').trim();
+  const command = String(step?.command || '').trim();
+  const source = `${step?.kind || ''} ${toolName} ${label} ${command} ${detail} ${step?.output || ''}`.toLowerCase();
+  const fileRefs = extractFileRefs([command, detail, step?.output, fileChangeText(step)].filter(Boolean).join('\n'));
+  const count = Math.max(1, fileRefs.size || (Array.isArray(step?.fileChanges) ? step.fileChanges.length : 0));
+
+  if (step?.kind === 'file_change' || Array.isArray(step?.fileChanges) && step.fileChanges.length) {
+    return {
+      type: 'edit',
+      label: compactActivityText(label || '编辑文件'),
+      detail: detail || compactActivityText(fileChangeText(step)),
+      count,
+      unit: 'file'
+    };
+  }
+
+  if (step?.kind === 'web_search' || /web_search|网页搜索|搜索完成|正在搜索/.test(source)) {
+    return {
+      type: 'web_search',
+      label: compactActivityText(label || '网页搜索'),
+      detail,
+      count: 1,
+      unit: 'time'
+    };
+  }
+
+  const commandKind = classifyCommandIntent(
+    command || (step?.kind === 'command_execution' ? detail : ''),
+    Boolean(command) || step?.kind === 'command_execution'
+  );
+  if (commandKind) {
+    const type =
+      commandKind === 'search'
+        ? 'search'
+        : commandKind === 'read' || commandKind === 'inspect'
+          ? 'explore'
+          : commandKind === 'edit'
+            ? 'edit'
+            : 'command';
+    return {
+      type,
+      label: compactActivityText(label || commandActivityLabel(commandKind)),
+      detail: compactActivityText(command || detail),
+      count: type === 'command' ? 1 : count,
+      unit: type === 'command' ? 'command' : type === 'search' ? 'time' : 'file'
+    };
+  }
+
+  if (/web_search|搜索|查找|search/.test(source)) {
+    return {
+      type: 'search',
+      label: compactActivityText(label || '搜索'),
+      detail,
+      count: 1,
+      unit: 'time'
+    };
+  }
+
+  if (/browser_|浏览器|截图|点击|导航|navigate|screenshot|click|type/.test(source)) {
+    return {
+      type: 'browser',
+      label: compactActivityText(label || browserActivityLabel(toolName || source)),
+      detail,
+      count: 1,
+      unit: 'action'
+    };
+  }
+
+  if (/编辑|修改|写入|替换|创建|删除|updated|deleted|apply_patch/.test(source)) {
+    return {
+      type: 'edit',
+      label: compactActivityText(label || '编辑文件'),
+      detail,
+      count,
+      unit: 'file'
+    };
+  }
+
+  if (/读取|查看|检查|探索|read|list|inspect|load_workspace_dependencies|view_image/.test(source)) {
+    return {
+      type: 'explore',
+      label: compactActivityText(label || '探索文件'),
+      detail,
+      count,
+      unit: 'file'
+    };
+  }
+
+  if (/todo_list|计划/.test(source)) {
+    return {
+      type: 'plan',
+      label: compactActivityText(label || '更新计划'),
+      detail,
+      count: 1,
+      unit: 'step'
+    };
+  }
+
+  return {
+    type: 'tool',
+    label: compactActivityText(label || (toolName ? `调用 ${toolName}` : '调用工具')),
+    detail,
+    count: 1,
+    unit: 'step'
+  };
+}
+
+function dominantActivityType(items) {
+  if (items.some((item) => item.type === 'command')) {
+    return 'command';
+  }
+  if (items.some((item) => item.type === 'edit')) {
+    return 'edit';
+  }
+  if (items.some((item) => item.type === 'search')) {
+    return 'search';
+  }
+  if (items.some((item) => item.type === 'web_search')) {
+    return 'web_search';
+  }
+  if (items.some((item) => item.type === 'browser')) {
+    return 'browser';
+  }
+  if (items.some((item) => item.type === 'explore')) {
+    return 'explore';
+  }
+  return items[0]?.type || 'tool';
+}
+
+function summarizeActivityBatch(items, running) {
+  const activeItem = items.length === 1 && running && items[0]?.status === 'running' ? items[0] : null;
+  if (activeItem?.type === 'command' && activeItem.detail) {
+    return `正在运行 ${conciseActivityDetail(activeItem.detail)}`;
+  }
+  if ((activeItem?.type === 'search' || activeItem?.type === 'web_search') && activeItem.detail) {
+    return `正在搜索 ${conciseActivityDetail(activeItem.detail)}`;
+  }
+  if ((activeItem?.type === 'explore' || activeItem?.type === 'browser' || activeItem?.type === 'tool') && activeItem.detail) {
+    return `${activeItem.label || '正在处理'} ${conciseActivityDetail(activeItem.detail)}`;
+  }
+
+  const order = [];
+  const groups = items.reduce((acc, item) => {
+    const key = item.type || 'tool';
+    if (!acc[key]) {
+      acc[key] = { steps: 0, count: 0, failed: 0, running: false, unit: item.unit || 'step' };
+      order.push(key);
+    }
+    acc[key].steps += 1;
+    acc[key].count += Number(item.count) || 1;
+    acc[key].failed += item.status === 'failed' ? Number(item.count) || 1 : 0;
+    acc[key].running = acc[key].running || item.status === 'running';
+    return acc;
+  }, {});
+
+  function groupText(key, group) {
+    const active = running && group.running;
+    const doneCount = Math.max(0, group.count - group.failed);
+    const failedOnly = group.failed && !doneCount && !active;
+    if (key === 'search') {
+      return failedOnly ? `搜索失败 ${group.failed} 次` : `${active ? '正在搜索' : '已搜索'} ${doneCount || group.count} 次`;
+    }
+    if (key === 'web_search') {
+      return failedOnly ? `网页搜索失败 ${group.failed} 次` : `${active ? '正在搜索网页' : '已搜索网页'} ${doneCount || group.count} 次`;
+    }
+    if (key === 'explore') {
+      return failedOnly ? `探索失败 ${group.failed} 次` : `${active ? '正在探索' : '已探索'} ${doneCount || group.count} 个文件`;
+    }
+    if (key === 'edit') {
+      return failedOnly ? `编辑失败 ${group.failed} 个文件` : `${active ? '正在编辑' : '已编辑'} ${doneCount || group.count} 个文件`;
+    }
+    if (key === 'command') {
+      return failedOnly ? `${group.failed} 条命令失败` : `${active ? '正在运行' : '已运行'} ${doneCount || group.count} 条命令`;
+    }
+    if (key === 'browser') {
+      return failedOnly ? `浏览器操作失败 ${group.failed} 次` : `${active ? '正在操作浏览器' : '已操作浏览器'} ${doneCount || group.count} 次`;
+    }
+    if (key === 'plan') {
+      return failedOnly ? '计划更新失败' : active ? '正在更新计划' : '已更新计划';
+    }
+    if (key === 'tool') {
+      return failedOnly ? `工具调用失败 ${group.failed} 个` : `${active ? '正在调用' : '已调用'} ${doneCount || group.count} 个工具`;
+    }
+    return '';
+  }
+
+  const parts = [];
+  for (const key of order) {
+    const text = groupText(key, groups[key]);
+    if (text) {
+      parts.push(text);
+    }
+  }
+  return parts.join('，') || '已处理';
+}
+
+function activityMetaIcon(item) {
+  if (item.metaType === 'command') {
+    return <Terminal size={13} />;
+  }
+  if (item.metaType === 'edit') {
+    return <Pencil size={13} />;
+  }
+  if (item.metaType === 'search' || item.metaType === 'web_search') {
+    return <Search size={13} />;
+  }
+  return <FileText size={13} />;
+}
+
+function activityDetailText(activity) {
+  const label = String(activity?.label || '').trim();
+  const detail = String(activity?.command || activity?.detail || activity?.error || '').trim();
+  if (!detail || detail === label || isGenericActivityLabel(detail)) {
+    return '';
+  }
+  return detail;
+}
+
+function fileChangeText(step) {
+  return Array.isArray(step?.fileChanges)
+    ? step.fileChanges.map((change) => `${change.kind || 'update'} ${change.path || ''}`.trim()).filter(Boolean).join('\n')
+    : '';
+}
+
+function buildActivityFileSummary(steps) {
+  const files = new Map();
+  for (const step of steps || []) {
+    if (!Array.isArray(step?.fileChanges)) {
+      continue;
+    }
+    for (const change of step.fileChanges) {
+      const rawPath = String(change?.path || '').trim();
+      if (!rawPath) {
+        continue;
+      }
+      const existing = files.get(rawPath) || {
+        path: rawPath,
+        label: compactActivityPath(rawPath),
+        additions: 0,
+        deletions: 0,
+        kind: change?.kind || 'update'
+      };
+      const stats = diffStatsFromUnifiedDiff(change?.unifiedDiff || change?.unified_diff || change?.diff || '');
+      existing.additions += Number(change?.additions) || stats.additions;
+      existing.deletions += Number(change?.deletions) || stats.deletions;
+      existing.kind = change?.kind || existing.kind;
+      files.set(rawPath, existing);
+    }
+  }
+  const items = [...files.values()];
+  if (!items.length) {
+    return null;
+  }
+  return {
+    files: items,
+    additions: items.reduce((total, item) => total + item.additions, 0),
+    deletions: items.reduce((total, item) => total + item.deletions, 0)
+  };
+}
+
+function diffStatsFromUnifiedDiff(unifiedDiff = '') {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of String(unifiedDiff || '').split(/\r?\n/)) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue;
+    }
+    if (line.startsWith('+')) {
+      additions += 1;
+    } else if (line.startsWith('-')) {
+      deletions += 1;
+    }
+  }
+  return { additions, deletions };
+}
+
+function compactActivityPath(value) {
+  const normalized = String(value || '').replaceAll('\\', '/');
+  const marker = '/CodexMobile/';
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex >= 0) {
+    return normalized.slice(markerIndex + marker.length);
+  }
+  if (normalized.startsWith('/')) {
+    const parts = normalized.split('/').filter(Boolean);
+    return parts.length > 3 ? parts.slice(-3).join('/') : parts.join('/');
+  }
+  return normalized;
+}
+
+function ActivityFileSummary({ summary }) {
+  return (
+    <div className="activity-file-summary">
+      <div className="activity-file-summary-head">
+        <span>{summary.files.length} 个文件已更改</span>
+        {summary.additions ? <strong className="is-added">+{summary.additions}</strong> : null}
+        {summary.deletions ? <strong className="is-deleted">-{summary.deletions}</strong> : null}
+      </div>
+      <div className="activity-file-list">
+        {summary.files.map((file) => (
+          <details key={file.path} className="activity-file-item">
+            <summary>
+              <span>{file.label}</span>
+              {file.additions ? <strong className="is-added">+{file.additions}</strong> : null}
+              {file.deletions ? <strong className="is-deleted">-{file.deletions}</strong> : null}
+            </summary>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function classifyCommandIntent(value, assumeCommand = false) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) {
+    return '';
+  }
+  const lower = text.toLowerCase();
+  if (/\b(apply_patch|perl\s+-0pi|python\b.*\bwrite_text|node\b.*\bwritefile|cat\s+>)/.test(lower)) {
+    return 'edit';
+  }
+  if (/\b(rg|grep|findstr|select-string)\b/.test(lower)) {
+    return 'search';
+  }
+  if (/\b(sed|cat|nl|head|tail|less|more|awk|jq|wc|ls|find|fd|tree)\b/.test(lower)) {
+    return 'read';
+  }
+  if (/\bgit\s+(status|diff|show|log|ls-files|branch|rev-parse)\b/.test(lower)) {
+    return 'inspect';
+  }
+  if (/\b(lsof|curl|ps|pwd|date|which|node\s+--check|tsc|eslint|biome|prettier|npm\s+run\s+build|npm\s+run\s+smoke|npm\s+run\s+test|pnpm|yarn|bun|pytest|vitest|jest|kill|sleep|npm\s+run\s+start|npm\s+run\s+start:bg|node\s+)/.test(lower)) {
+    return 'command';
+  }
+  return assumeCommand ? 'command' : '';
+}
+
+function commandActivityLabel(kind) {
+  if (kind === 'search') {
+    return '搜索代码';
+  }
+  if (kind === 'read' || kind === 'inspect') {
+    return '探索文件';
+  }
+  if (kind === 'edit') {
+    return '编辑文件';
+  }
+  return '运行命令';
+}
+
+function browserActivityLabel(toolName) {
+  const text = String(toolName || '').toLowerCase();
+  if (/screenshot/.test(text)) {
+    return '截取浏览器';
+  }
+  if (/navigate/.test(text)) {
+    return '打开页面';
+  }
+  if (/click|type|press/.test(text)) {
+    return '操作页面';
+  }
+  return '操作浏览器';
+}
+
+function extractFileRefs(value) {
+  const refs = new Set();
+  const text = String(value || '');
+  const pattern = /(?:^|[\s"'`(])((?:\.{1,2}|~|\/)?[\w@.+\-~\u4e00-\u9fff]+(?:\/[\w@.+\- \u4e00-\u9fff]+)+\.(?:jsx?|tsx?|css|scss|json|md|mjs|cjs|html|yml|yaml|toml|py|sh|sql|swift|kt|java|go|rs|rb|php|txt|log)|[\w@.+\-~\u4e00-\u9fff]+\.(?:jsx?|tsx?|css|scss|json|md|mjs|cjs|html|yml|yaml|toml|py|sh|sql|swift|kt|java|go|rs|rb|php|txt|log))/g;
+  for (const match of text.matchAll(pattern)) {
+    const candidate = match[1]?.replace(/[,:;.)\]]+$/g, '');
+    if (candidate && !candidate.startsWith('http')) {
+      refs.add(candidate);
+    }
+  }
+  return refs;
+}
+
+function GeneratedImage({ part, onPreviewImage, compact = false }) {
   const [loadState, setLoadState] = useState('loading');
   const [retryKey, setRetryKey] = useState(0);
-  const src = imageUrlWithRetry(part.url, retryKey);
+  const resolved = useResolvedImageSource(part.url, retryKey);
+  const src = resolved.src;
+
+  useEffect(() => {
+    setLoadState(resolved.error ? 'failed' : resolved.cached ? 'loaded' : 'loading');
+  }, [resolved.cached, resolved.error, src]);
 
   function retry(event) {
     event.stopPropagation();
@@ -1397,19 +2407,21 @@ function GeneratedImage({ part, onPreviewImage }) {
   return (
     <button
       type="button"
-      className={`message-image-link ${loadState === 'failed' ? 'is-failed' : ''}`}
-      onClick={() => (loadState === 'failed' ? setRetryKey(Date.now()) : onPreviewImage(part))}
+      className={`message-image-link ${compact ? 'is-thumbnail' : ''} ${loadState === 'failed' ? 'is-failed' : ''}`}
+      onClick={() => (loadState === 'failed' ? setRetryKey(Date.now()) : onPreviewImage?.(part))}
       aria-label="预览图片"
     >
-      <img
-        className="message-image"
-        src={src}
-        alt={part.alt}
-        loading="eager"
-        decoding="async"
-        onLoad={() => setLoadState('loaded')}
-        onError={() => setLoadState('failed')}
-      />
+      {src ? (
+        <img
+          className="message-image"
+          src={src}
+          alt={part.alt}
+          loading="eager"
+          decoding="async"
+          onLoad={() => setLoadState('loaded')}
+          onError={() => setLoadState('failed')}
+        />
+      ) : null}
       {loadState === 'failed' ? (
         <span className="image-error">
           图片加载失败
@@ -1420,20 +2432,43 @@ function GeneratedImage({ part, onPreviewImage }) {
   );
 }
 
+function UserImageStrip({ images, onPreviewImage }) {
+  if (!images?.length) {
+    return null;
+  }
+  return (
+    <div className="message-image-strip" aria-label="图片附件">
+      {images.map((image, index) => (
+        <GeneratedImage
+          key={`${image.url}-${index}`}
+          part={image}
+          onPreviewImage={onPreviewImage}
+          compact
+        />
+      ))}
+    </div>
+  );
+}
+
 function ImagePreviewModal({ image, onClose }) {
   const [loadState, setLoadState] = useState('loading');
   const [retryKey, setRetryKey] = useState(0);
+  const resolved = useResolvedImageSource(image?.url, retryKey);
 
   useEffect(() => {
     setLoadState('loading');
     setRetryKey(0);
   }, [image?.url]);
 
+  useEffect(() => {
+    setLoadState(resolved.error ? 'failed' : 'loading');
+  }, [resolved.error, resolved.src]);
+
   if (!image) {
     return null;
   }
 
-  const src = imageUrlWithRetry(image.url, retryKey);
+  const src = resolved.src;
 
   return (
     <div className="image-lightbox" role="dialog" aria-modal="true" onClick={onClose}>
@@ -1443,12 +2478,14 @@ function ImagePreviewModal({ image, onClose }) {
         </button>
       </div>
       <div className="lightbox-stage" onClick={(event) => event.stopPropagation()}>
-        <img
-          src={src}
-          alt={image.alt || '生成图片'}
-          onLoad={() => setLoadState('loaded')}
-          onError={() => setLoadState('failed')}
-        />
+        {src ? (
+          <img
+            src={src}
+            alt={image.alt || '生成图片'}
+            onLoad={() => setLoadState('loaded')}
+            onError={() => setLoadState('failed')}
+          />
+        ) : null}
       </div>
       {loadState === 'failed' ? (
         <div className="lightbox-actions" onClick={(event) => event.stopPropagation()}>
@@ -1468,41 +2505,100 @@ function ImagePreviewModal({ image, onClose }) {
   );
 }
 
-function MessageContent({ content, onPreviewImage }) {
-  const text = String(content || '');
-  const parts = [];
-  const pattern = /!\[([^\]]*)\]\((\/generated\/[^)\s]+)\)/g;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = pattern.exec(text))) {
-    if (match.index > lastIndex) {
-      parts.push({ type: 'text', value: text.slice(lastIndex, match.index) });
-    }
-    parts.push({ type: 'image', alt: match[1] || '生成图片', url: match[2] });
-    lastIndex = match.index + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push({ type: 'text', value: text.slice(lastIndex) });
-  }
-
-  if (!parts.length) {
-    return <div className="message-content">{renderInlineText(text, 'message-root')}</div>;
-  }
-
-  const rendered = [];
-  parts.forEach((part, index) => {
-    if (part.type === 'image') {
-      rendered.push(<GeneratedImage key={`${part.url}-${index}`} part={part} onPreviewImage={onPreviewImage} />);
-      return;
-    }
-    rendered.push(...renderInlineText(part.value, `message-${index}`));
-  });
+function MarkdownContent({ text, onPreviewImage, className = 'message-content' }) {
+  const value = String(text || '');
 
   return (
-    <div className="message-content">
-      {rendered}
+    <div className={className}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        skipHtml
+        urlTransform={markdownUrlTransform}
+        components={{
+          a({ node, href, children, ...props }) {
+            const safeHref = normalizeInlineHref(href);
+            if (!safeHref) {
+              return <span {...props}>{children}</span>;
+            }
+            return (
+              <a href={safeHref} target="_blank" rel="noreferrer noopener" {...props}>
+                {children}
+              </a>
+            );
+          },
+          img({ node, src, alt }) {
+            if (!src) {
+              return null;
+            }
+            return <GeneratedImage part={{ type: 'image', url: src, alt: alt || '图片' }} onPreviewImage={onPreviewImage} />;
+          },
+          table({ node, children, ...props }) {
+            return (
+              <div className="markdown-table-wrap">
+                <table {...props}>{children}</table>
+              </div>
+            );
+          },
+          pre({ node, children }) {
+            return <>{children}</>;
+          },
+          code({ node, className, children, ...props }) {
+            const language = String(className || '').match(/language-([\w-]+)/)?.[1] || '';
+            const isBlock = Boolean(language) || node?.position?.start?.line !== node?.position?.end?.line;
+            if (!isBlock) {
+              return (
+                <code className={className} {...props}>
+                  {children}
+                </code>
+              );
+            }
+            return <CodeBlock language={language || 'text'} code={String(children).replace(/\n$/, '')} />;
+          }
+        }}
+      >
+        {value}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function MessageContent({ content, onPreviewImage }) {
+  return <MarkdownContent text={content} onPreviewImage={onPreviewImage} />;
+}
+
+function CodeBlock({ language, code }) {
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+  }, []);
+
+  async function handleCopy() {
+    const ok = await copyTextToClipboard(code);
+    if (!ok) {
+      return;
+    }
+    setCopied(true);
+    if (copiedTimerRef.current) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+    copiedTimerRef.current = window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  return (
+    <div className="markdown-code-block">
+      <div className="markdown-code-head">
+        <span>{language}</span>
+        <button type="button" onClick={handleCopy} aria-label="复制代码">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </button>
+      </div>
+      <pre>
+        <code className={`language-${language}`}>{code}</code>
+      </pre>
     </div>
   );
 }
@@ -1512,15 +2608,26 @@ function normalizeInlineHref(value) {
   if (!raw) {
     return '';
   }
-  if (/^https?:\/\//i.test(raw) || /^mailto:/i.test(raw)) {
+  if (/^https?:\/\//i.test(raw) || /^mailto:/i.test(raw) || raw.startsWith('/') || raw.startsWith('#')) {
     return raw;
   }
   return `https://${raw}`;
 }
 
+function markdownUrlTransform(url, key) {
+  const raw = String(url || '').trim();
+  if (key === 'src' && /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(raw)) {
+    return raw;
+  }
+  if (key === 'src' && isLocalImageSource(raw)) {
+    return raw;
+  }
+  return defaultUrlTransform(raw);
+}
+
 function renderInlineText(text, keyPrefix) {
   const value = String(text || '');
-  const pattern = /\[([^\]]+)\]\(((?:https?:\/\/|www\.)[^\s)]+)\)|((?:https?:\/\/|www\.)[^\s<>()]+)/gi;
+  const pattern = /(`([^`]+)`)|(\*\*([^*]+)\*\*)|(__([^_]+)__)|\[([^\]]+)\]\(((?:https?:\/\/|www\.|mailto:|\/)[^\s)]*)\)|((?:https?:\/\/|www\.)[^\s<>()]+)/gi;
   const nodes = [];
   let lastIndex = 0;
   let match;
@@ -1531,18 +2638,22 @@ function renderInlineText(text, keyPrefix) {
       nodes.push(<span key={`${keyPrefix}-text-${partIndex++}`}>{value.slice(lastIndex, match.index)}</span>);
     }
 
-    if (match[1] && match[2]) {
-      const href = normalizeInlineHref(match[2]);
+    if (match[2]) {
+      nodes.push(<code key={`${keyPrefix}-code-${partIndex++}`}>{match[2]}</code>);
+    } else if (match[4] || match[6]) {
+      nodes.push(<strong key={`${keyPrefix}-strong-${partIndex++}`}>{match[4] || match[6]}</strong>);
+    } else if (match[7] && match[8]) {
+      const href = normalizeInlineHref(match[8]);
       nodes.push(
         <a key={`${keyPrefix}-link-${partIndex++}`} href={href} target="_blank" rel="noreferrer noopener">
-          {match[1]}
+          {match[7]}
         </a>
       );
-    } else if (match[3]) {
-      const href = normalizeInlineHref(match[3]);
+    } else if (match[9]) {
+      const href = normalizeInlineHref(match[9]);
       nodes.push(
         <a key={`${keyPrefix}-link-${partIndex++}`} href={href} target="_blank" rel="noreferrer noopener">
-          {match[3]}
+          {match[9]}
         </a>
       );
     }
@@ -1557,7 +2668,199 @@ function renderInlineText(text, keyPrefix) {
   return nodes.length ? nodes : [<span key={`${keyPrefix}-text-0`}>{value}</span>];
 }
 
-function ChatMessage({ message, onPreviewImage, onDeleteMessage }) {
+function renderInlineWithBreaks(text, keyPrefix) {
+  return String(text || '')
+    .split('\n')
+    .flatMap((line, index, lines) => {
+      const nodes = renderInlineText(line, `${keyPrefix}-line-${index}`);
+      if (index < lines.length - 1) {
+        nodes.push(<br key={`${keyPrefix}-br-${index}`} />);
+      }
+      return nodes;
+    });
+}
+
+function markdownImageFromLine(line) {
+  const match = String(line || '').trim().match(/^!\[([^\]]*)\]\((?:<([^>]*)>|([^)]*?))\)$/);
+  if (!match) {
+    return null;
+  }
+  const url = String(match[2] || match[3] || '').trim();
+  if (!url) {
+    return null;
+  }
+  return { type: 'image', alt: match[1] || '图片', url };
+}
+
+function splitMessageImages(content) {
+  const textLines = [];
+  const images = [];
+  for (const line of String(content || '').replace(/\r\n?/g, '\n').split('\n')) {
+    const image = markdownImageFromLine(line);
+    if (image) {
+      images.push(image);
+    } else {
+      textLines.push(line);
+    }
+  }
+  return {
+    text: textLines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    images
+  };
+}
+
+function isListLine(line) {
+  return /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line);
+}
+
+function isBlockStarter(line, nextLine) {
+  return (
+    /^```/.test(line) ||
+    /^#{1,6}\s+/.test(line) ||
+    /^>\s?/.test(line) ||
+    isListLine(line) ||
+    Boolean(markdownImageFromLine(line)) ||
+    (line.includes('|') && isTableSeparator(nextLine || ''))
+  );
+}
+
+function isTableSeparator(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line || ''));
+}
+
+function splitTableRow(line) {
+  return String(line || '')
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownBlocks(content, onPreviewImage) {
+  const lines = String(content || '').replace(/\r\n?/g, '\n').split('\n');
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^```([^\s`]*)?.*$/);
+    if (fence) {
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push(
+        <pre key={`code-${blocks.length}`}>
+          <code className={fence[1] ? `language-${fence[1]}` : undefined}>{codeLines.join('\n')}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const image = markdownImageFromLine(line);
+    if (image) {
+      blocks.push(<GeneratedImage key={`image-${blocks.length}-${image.url}`} part={image} onPreviewImage={onPreviewImage} />);
+      index += 1;
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length + 2, 6);
+      const HeadingTag = `h${level}`;
+      blocks.push(<HeadingTag key={`heading-${blocks.length}`}>{renderInlineWithBreaks(heading[2], `heading-${blocks.length}`)}</HeadingTag>);
+      index += 1;
+      continue;
+    }
+
+    if (line.includes('|') && isTableSeparator(lines[index + 1] || '')) {
+      const headers = splitTableRow(line);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      blocks.push(
+        <div className="markdown-table-wrap" key={`table-${blocks.length}`}>
+          <table>
+            <thead>
+              <tr>
+                {headers.map((cell, cellIndex) => (
+                  <th key={`head-${cellIndex}`}>{renderInlineWithBreaks(cell, `table-${blocks.length}-head-${cellIndex}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`row-${rowIndex}`}>
+                  {headers.map((_, cellIndex) => (
+                    <td key={`cell-${rowIndex}-${cellIndex}`}>
+                      {renderInlineWithBreaks(row[cellIndex] || '', `table-${blocks.length}-cell-${rowIndex}-${cellIndex}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ''));
+        index += 1;
+      }
+      blocks.push(<blockquote key={`quote-${blocks.length}`}>{renderInlineWithBreaks(quoteLines.join('\n'), `quote-${blocks.length}`)}</blockquote>);
+      continue;
+    }
+
+    if (isListLine(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const ListTag = ordered ? 'ol' : 'ul';
+      const items = [];
+      while (index < lines.length && isListLine(lines[index]) && /^\s*\d+[.)]\s+/.test(lines[index]) === ordered) {
+        items.push(lines[index].replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/, ''));
+        index += 1;
+      }
+      blocks.push(
+        <ListTag key={`list-${blocks.length}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`item-${itemIndex}`}>{renderInlineWithBreaks(item, `list-${blocks.length}-item-${itemIndex}`)}</li>
+          ))}
+        </ListTag>
+      );
+      continue;
+    }
+
+    const paragraph = [line];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isBlockStarter(lines[index], lines[index + 1])) {
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(<p key={`paragraph-${blocks.length}`}>{renderInlineWithBreaks(paragraph.join('\n'), `paragraph-${blocks.length}`)}</p>);
+  }
+
+  return blocks.length ? blocks : null;
+}
+
+function ChatMessage({ message, now, onPreviewImage, onDeleteMessage }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
 
@@ -1568,10 +2871,12 @@ function ChatMessage({ message, onPreviewImage, onDeleteMessage }) {
   }, []);
 
   if (message.role === 'activity') {
-    return <ActivityMessage message={message} />;
+    return <ActivityMessage message={message} now={now} />;
   }
   const isUser = message.role === 'user';
   const canAct = message.role === 'user' || message.role === 'assistant';
+  const userMedia = isUser ? splitMessageImages(message.content) : { text: message.content, images: [] };
+  const visibleContent = isUser ? userMedia.text : message.content;
 
   async function handleCopy() {
     const copiedText = await copyTextToClipboard(message.content);
@@ -1587,12 +2892,15 @@ function ChatMessage({ message, onPreviewImage, onDeleteMessage }) {
   }
 
   return (
-    <div className={`message-row ${isUser ? 'is-user' : ''}`}>
+    <div className={`message-row ${isUser ? 'is-user' : 'is-assistant'}`}>
       <div className="message-stack">
-        <div className="message-bubble">
-          <MessageContent content={message.content} onPreviewImage={onPreviewImage} />
-          {message.timestamp ? <time>{formatTime(message.timestamp)}</time> : null}
-        </div>
+        {isUser ? <UserImageStrip images={userMedia.images} onPreviewImage={onPreviewImage} /> : null}
+        {visibleContent ? (
+          <div className="message-bubble">
+            <MessageContent content={visibleContent} onPreviewImage={onPreviewImage} />
+            {message.timestamp ? <time>{formatTime(message.timestamp)}</time> : null}
+          </div>
+        ) : null}
         {canAct ? (
           <div className="message-actions" aria-label="消息操作">
             <button type="button" className="message-action" onClick={handleCopy}>
@@ -1610,12 +2918,56 @@ function ChatMessage({ message, onPreviewImage, onDeleteMessage }) {
   );
 }
 
-function ChatPane({ messages, selectedSession, running, onPreviewImage, onDeleteMessage }) {
-  const bottomRef = useRef(null);
+function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onDeleteMessage }) {
+  const paneRef = useRef(null);
+  const contentRef = useRef(null);
+  const bottomPinnedRef = useRef(true);
+
+  const scrollToBottom = useCallback((behavior = 'auto') => {
+    const pane = paneRef.current;
+    if (!pane) {
+      return;
+    }
+    pane.scrollTo({ top: pane.scrollHeight, behavior });
+  }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, running]);
+    const pane = paneRef.current;
+    if (!pane) {
+      return undefined;
+    }
+
+    function updatePinnedState() {
+      const distance = pane.scrollHeight - pane.scrollTop - pane.clientHeight;
+      bottomPinnedRef.current = distance < 96;
+    }
+
+    updatePinnedState();
+    pane.addEventListener('scroll', updatePinnedState, { passive: true });
+    return () => pane.removeEventListener('scroll', updatePinnedState);
+  }, []);
+
+  useEffect(() => {
+    if (!bottomPinnedRef.current && !running) {
+      return undefined;
+    }
+    const frame = requestAnimationFrame(() => scrollToBottom('auto'));
+    return () => cancelAnimationFrame(frame);
+  }, [messages, running, scrollToBottom]);
+
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane || typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+    const observer = new ResizeObserver(() => {
+      if (bottomPinnedRef.current || running) {
+        scrollToBottom('auto');
+      }
+    });
+    observer.observe(contentRef.current || pane);
+    return () => observer.disconnect();
+  }, [running, scrollToBottom]);
 
   if (!messages.length) {
     return (
@@ -1630,16 +2982,18 @@ function ChatPane({ messages, selectedSession, running, onPreviewImage, onDelete
   }
 
   return (
-    <section className="chat-pane">
-      {messages.map((message) => (
-        <ChatMessage
-          key={message.id}
-          message={message}
-          onPreviewImage={onPreviewImage}
-          onDeleteMessage={onDeleteMessage}
-        />
-      ))}
-      <div ref={bottomRef} />
+    <section className="chat-pane" ref={paneRef}>
+      <div className="chat-content" ref={contentRef}>
+        {messages.map((message) => (
+          <ChatMessage
+            key={message.id}
+            message={message}
+            now={now}
+            onPreviewImage={onPreviewImage}
+            onDeleteMessage={onDeleteMessage}
+          />
+        ))}
+      </div>
     </section>
   );
 }
@@ -1737,6 +3091,57 @@ function VoiceDialogPanel({
   );
 }
 
+function ContextStatusDetails({ contextStatus }) {
+  const context = normalizeContextStatus(contextStatus);
+  const usedPercent = numberOrNull(context.percent);
+  const remainingPercent = usedPercent === null ? null : Math.max(0, Math.round((100 - usedPercent) * 10) / 10);
+  const inputTokens = context.inputTokens;
+  const contextWindow = context.contextWindow;
+  const compact = context.autoCompact || {};
+  const compactText = compact.detected
+    ? 'Codex 已自动压缩背景信息'
+    : 'Codex 自动压缩其背景信息';
+
+  return (
+    <>
+      <div className="context-popover-title">背景信息窗口：</div>
+      <div>
+        {usedPercent !== null && remainingPercent !== null
+          ? `${usedPercent}% 已用（剩余 ${remainingPercent}%）`
+          : '正在同步背景信息窗口'}
+      </div>
+      <div>
+        已用 {formatTokenCount(inputTokens)} 标记，共 {formatTokenCount(contextWindow)}
+      </div>
+      <div>{compactText}</div>
+    </>
+  );
+}
+
+function ContextStatusButton({ contextStatus, open, onToggle }) {
+  const context = normalizeContextStatus(contextStatus);
+  const usedPercent = numberOrNull(context.percent);
+  const inputTokens = context.inputTokens;
+  const contextWindow = context.contextWindow;
+  const compact = context.autoCompact || {};
+  const hasWindow = Boolean(inputTokens && contextWindow);
+
+  return (
+    <div className="context-status-wrap">
+      <button
+        type="button"
+        className={`context-status-button ${compact.detected ? 'is-compacted' : ''} ${hasWindow ? 'has-window' : ''}`}
+        onClick={onToggle}
+        aria-label="查看背景信息窗口"
+        aria-expanded={open}
+      >
+        <span className="context-status-dot" aria-hidden="true" />
+        <span>{usedPercent !== null ? `${Math.round(usedPercent)}%` : '--'}</span>
+      </button>
+    </div>
+  );
+}
+
 function Composer({
   input,
   setInput,
@@ -1756,7 +3161,9 @@ function Composer({
   uploading,
   onVoiceSubmit,
   onOpenVoiceDialog,
-  voiceDialogActive
+  voiceDialogActive,
+  contextStatus,
+  runStatus
 }) {
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -2065,6 +3472,21 @@ function Composer({
           <span>{voiceError || (voiceSending ? '正在发送...' : voiceTranscribing ? '正在转写...' : '正在录音...')}</span>
         </div>
       ) : null}
+      {openMenu === 'context' ? (
+        <div className="context-popover" role="status">
+          <ContextStatusDetails contextStatus={contextStatus} />
+        </div>
+      ) : null}
+      {runStatus ? (
+        <div className="composer-run-status" role="status" aria-live="polite">
+          <span className="composer-run-dot" />
+          <span className="composer-run-main">
+            <strong>Codex 正在处理</strong>
+            <small>{runStatus.label}</small>
+          </span>
+          {runStatus.duration ? <span className="composer-run-time">{runStatus.duration}</span> : null}
+        </div>
+      ) : null}
       <div className="composer">
         {attachments.length ? (
           <div className="attachment-tray">
@@ -2098,6 +3520,11 @@ function Composer({
             </button>
           </div>
           <div className="control-right">
+            <ContextStatusButton
+              contextStatus={contextStatus}
+              open={openMenu === 'context'}
+              onToggle={() => toggleMenu('context')}
+            />
             <button type="button" className="model-select" onClick={() => toggleMenu('model')}>
               {shortModelName(selectedModelLabel)} {reasoningLabel(selectedReasoningEffort)}
               <ChevronDown size={15} />
@@ -2132,6 +3559,7 @@ function Composer({
 
 export default function App() {
   const [status, setStatus] = useState(DEFAULT_STATUS);
+  const [contextStatus, setContextStatus] = useState(() => normalizeContextStatus(DEFAULT_STATUS.context));
   const [authenticated, setAuthenticated] = useState(Boolean(getToken()));
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [projects, setProjects] = useState([]);
@@ -2141,6 +3569,8 @@ export default function App() {
   const [loadingProjectId, setLoadingProjectId] = useState(null);
   const [selectedSession, setSelectedSession] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [activityClockNow, setActivityClockNow] = useState(() => Date.now());
+  const [completedSessionIds, setCompletedSessionIds] = useState({});
   const [previewImage, setPreviewImage] = useState(null);
   const [docsOpen, setDocsOpen] = useState(false);
   const [docsBusy, setDocsBusy] = useState(false);
@@ -2148,7 +3578,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
-  const [permissionMode, setPermissionMode] = useState('default');
+  const [permissionMode, setPermissionMode] = useState(DEFAULT_PERMISSION_MODE);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_STATUS.model);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState(() => {
     const defaultVersion = localStorage.getItem('codexmobile.reasoningDefaultVersion');
@@ -2160,6 +3590,7 @@ export default function App() {
     return localStorage.getItem('codexmobile.reasoningEffort') || DEFAULT_REASONING_EFFORT;
   });
   const [runningById, setRunningById] = useState({});
+  const [threadRuntimeById, setThreadRuntimeById] = useState({});
   const [theme, setTheme] = useState(() =>
     localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'
   );
@@ -2172,6 +3603,7 @@ export default function App() {
   const lastLocalRunAtRef = useRef(0);
   const activePollsRef = useRef(new Set());
   const turnRefreshTimersRef = useRef(new Map());
+  const sessionLivePollRef = useRef(false);
   const voiceDialogRecorderRef = useRef(null);
   const voiceDialogChunksRef = useRef([]);
   const voiceDialogStreamRef = useRef(null);
@@ -2256,9 +3688,29 @@ export default function App() {
     };
   }, []);
 
-  const running =
-    hasRunningKey(runningById, selectedRunKeys(selectedSession)) ||
-    messages.some((message) => message.role === 'activity' && (message.status === 'running' || message.status === 'queued'));
+  const running = hasRunningKey(runningById, selectedRunKeys(selectedSession));
+  const hasRunningActivity = useMemo(
+    () =>
+      messages.some(
+        (message) =>
+          message.role === 'activity' &&
+          (message.status === 'running' || message.status === 'queued')
+      ),
+    [messages]
+  );
+  const composerRunStatus = useMemo(
+    () => buildComposerRunStatus(messages, running, activityClockNow),
+    [messages, running, activityClockNow]
+  );
+
+  useEffect(() => {
+    if (!running && !hasRunningActivity) {
+      return undefined;
+    }
+    setActivityClockNow(Date.now());
+    const timer = window.setInterval(() => setActivityClockNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running, hasRunningActivity]);
 
   function setVoiceDialogMode(next) {
     voiceDialogStateRef.current = next;
@@ -3187,8 +4639,30 @@ export default function App() {
     setVoiceDialogMode('idle');
   }
 
+  function runtimeKeysForPayload(payload) {
+    const keys = new Set(payloadRunKeys(payload));
+    const current = selectedSessionRef.current;
+    if (current) {
+      const sameProject = !payload?.projectId || !current.projectId || payload.projectId === current.projectId;
+      const matchesCurrent =
+        keys.has(current.id) ||
+        keys.has(current.turnId) ||
+        (payload?.turnId && current.turnId === payload.turnId) ||
+        (current.draft && sameProject);
+      if (matchesCurrent) {
+        if (current.id) {
+          keys.add(current.id);
+        }
+        if (current.turnId) {
+          keys.add(current.turnId);
+        }
+      }
+    }
+    return Array.from(keys).filter(Boolean);
+  }
+
   function markRun(payload) {
-    const keys = payloadRunKeys(payload);
+    const keys = runtimeKeysForPayload(payload);
     if (!keys.length) {
       return;
     }
@@ -3201,10 +4675,20 @@ export default function App() {
       runningByIdRef.current = next;
       return next;
     });
+    setThreadRuntimeById((current) => {
+      const next = { ...current };
+      for (const key of keys) {
+        next[key] = {
+          status: 'running',
+          updatedAt: payload.timestamp || payload.startedAt || new Date().toISOString()
+        };
+      }
+      return next;
+    });
   }
 
   function clearRun(payload) {
-    const keys = payloadRunKeys(payload);
+    const keys = runtimeKeysForPayload(payload);
     if (!keys.length) {
       return;
     }
@@ -3216,15 +4700,88 @@ export default function App() {
       runningByIdRef.current = next;
       return next;
     });
+    setThreadRuntimeById((current) => {
+      const next = { ...current };
+      for (const key of keys) {
+        if (next[key]?.status === 'running') {
+          delete next[key];
+        }
+      }
+      return next;
+    });
+  }
+
+  function markSessionCompleteNotice(payload) {
+    const ids = runtimeKeysForPayload(payload).filter((id) => !isDraftSession(id));
+    if (!ids.length) {
+      return;
+    }
+    setCompletedSessionIds((current) => {
+      const next = { ...current };
+      for (const id of ids) {
+        next[id] = true;
+      }
+      return next;
+    });
+    setThreadRuntimeById((current) => {
+      const next = { ...current };
+      for (const id of ids) {
+        next[id] = {
+          status: 'completed',
+          updatedAt: payload.completedAt || payload.timestamp || new Date().toISOString()
+        };
+      }
+      return next;
+    });
+  }
+
+  function clearSessionCompleteNotice(sessionId) {
+    if (!sessionId) {
+      return;
+    }
+    setCompletedSessionIds((current) => {
+      if (!current[sessionId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setThreadRuntimeById((current) => {
+      if (current[sessionId]?.status !== 'completed') {
+        return current;
+      }
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
   }
 
   function syncActiveRunsFromStatus(nextStatus) {
     const activeRuns = Array.isArray(nextStatus?.activeRuns) ? nextStatus.activeRuns : [];
+    const shouldPreserveLocalRuns =
+      activePollsRef.current.size > 0 ||
+      turnRefreshTimersRef.current.size > 0 ||
+      Date.now() - lastLocalRunAtRef.current < 15000;
 
     if (!activeRuns.length) {
+      if (!shouldPreserveLocalRuns) {
+        setRunningById(() => {
+          runningByIdRef.current = {};
+          return {};
+        });
+        setThreadRuntimeById((current) => {
+          const next = { ...current };
+          for (const [key, value] of Object.entries(next)) {
+            if (value?.status === 'running') {
+              delete next[key];
+            }
+          }
+          return next;
+        });
+      }
       setMessages((current) => {
-        const hasRecentLocalRun = Date.now() - lastLocalRunAtRef.current < 15000;
-        if (activePollsRef.current.size || turnRefreshTimersRef.current.size || hasRecentLocalRun) {
+        if (shouldPreserveLocalRuns) {
           return current;
         }
         return current.filter(
@@ -3235,18 +4792,23 @@ export default function App() {
     }
 
     const nextRunning = {};
+    const nextRuntime = {};
     for (const run of activeRuns) {
       for (const key of payloadRunKeys(run)) {
         nextRunning[key] = true;
+        nextRuntime[key] = {
+          status: 'running',
+          updatedAt: run.startedAt || new Date().toISOString()
+        };
       }
     }
-    const shouldPreserveLocalRuns =
-      activePollsRef.current.size > 0 ||
-      turnRefreshTimersRef.current.size > 0 ||
-      Date.now() - lastLocalRunAtRef.current < 15000;
     setRunningById((current) => {
       const next = shouldPreserveLocalRuns ? { ...current, ...nextRunning } : nextRunning;
       runningByIdRef.current = next;
+      return next;
+    });
+    setThreadRuntimeById((current) => {
+      const next = shouldPreserveLocalRuns ? { ...current, ...nextRuntime } : nextRuntime;
       return next;
     });
   }
@@ -3276,9 +4838,10 @@ export default function App() {
       return false;
     }
     try {
-      const data = await apiFetch(`/api/sessions/${encodeURIComponent(payload.sessionId)}/messages?limit=120`);
+      const data = await apiFetch(sessionMessagesApiPath(payload.sessionId));
       if (data.messages?.length && hasVisibleAssistantForTurn(data.messages, payload)) {
-        setMessages(data.messages);
+        setContextStatus((current) => mergeContextStatus(current, data.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+        setMessages((current) => mergeLoadedMessagesPreservingActivity(current, data.messages, payload));
         return true;
       }
     } catch {
@@ -3307,16 +4870,18 @@ export default function App() {
     if (!payload?.turnId) {
       return;
     }
+    const completedAt = payload.completedAt || payload.timestamp || new Date().toISOString();
     setMessages((current) => {
       if (hasAssistantMessageForTurn(current, payload)) {
-        return removeActivityMessagesForTurn(current, payload);
+        return completeActivityMessagesForTurn(current, { ...payload, completedAt });
       }
       return upsertStatusMessage(current, {
         ...payload,
         kind: 'turn',
-        status: 'running',
-        label: '正在思考中',
-        detail
+        status: 'completed',
+        label: '任务已完成',
+        detail,
+        completedAt
       });
     });
   }
@@ -3356,6 +4921,45 @@ export default function App() {
   useEffect(() => {
     selectedSessionRef.current = selectedSession;
   }, [selectedSession]);
+
+  useEffect(() => {
+    if (!authenticated || !selectedSession?.id || isDraftSession(selectedSession)) {
+      return undefined;
+    }
+
+    const sessionId = selectedSession.id;
+    let stopped = false;
+    async function pollSelectedSession() {
+      if (stopped || sessionLivePollRef.current) {
+        return;
+      }
+      if (hasRunningKey(runningByIdRef.current || {}, selectedRunKeys(selectedSessionRef.current || selectedSession))) {
+        return;
+      }
+      sessionLivePollRef.current = true;
+      try {
+        const data = await apiFetch(sessionMessagesApiPath(sessionId));
+        if (!stopped && selectedSessionRef.current?.id === sessionId && Array.isArray(data.messages)) {
+          setContextStatus((current) => mergeContextStatus(current, data.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+          setMessages((current) =>
+            messageStreamSignature(current) === messageStreamSignature(data.messages) ? current : data.messages
+          );
+        }
+      } catch {
+        // Keep the currently rendered conversation if a transient poll fails.
+      } finally {
+        sessionLivePollRef.current = false;
+      }
+    }
+
+    const intervalMs = hasRunningActivity || running ? 700 : 1600;
+    const timer = window.setInterval(pollSelectedSession, intervalMs);
+    pollSelectedSession();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [authenticated, selectedSession?.id, hasRunningActivity, running]);
 
   useEffect(() => () => closeVoiceDialog(), []);
 
@@ -3451,40 +5055,95 @@ export default function App() {
     return data;
   }, []);
 
-  const loadSessions = useCallback(async (project, chooseLatest = true) => {
+  const loadSessions = useCallback(async (project, options = true) => {
+    const settings =
+      typeof options === 'boolean'
+        ? { chooseLatest: options, preserveSelection: false }
+        : {
+          chooseLatest: options?.chooseLatest ?? true,
+          preserveSelection: Boolean(options?.preserveSelection)
+        };
     if (!project) {
+      selectedSessionRef.current = null;
       setSelectedSession(null);
       setMessages([]);
+      setContextStatus(emptyContextStatus());
       return;
     }
     setLoadingProjectId(project.id);
     try {
       const data = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}/sessions`);
-      const nextSessions = data.sessions || [];
+      const apiSessions = data.sessions || [];
+      const currentSession = selectedSessionRef.current;
+      const preserveCurrent =
+        settings.preserveSelection &&
+        currentSession?.projectId === project.id &&
+        (isDraftSession(currentSession) || apiSessions.some((session) => session.id === currentSession.id));
+      const nextSessions =
+        preserveCurrent && isDraftSession(currentSession)
+          ? [currentSession, ...apiSessions.filter((session) => session.id !== currentSession.id)]
+          : apiSessions;
       setSessionsByProject((current) => ({ ...current, [project.id]: nextSessions }));
-      if (chooseLatest) {
+
+      if (preserveCurrent) {
+        if (isDraftSession(currentSession)) {
+          selectedSessionRef.current = currentSession;
+          setSelectedSession(currentSession);
+          setMessages([]);
+          setContextStatus(emptyContextStatus());
+          return;
+        }
+        const refreshed = nextSessions.find((session) => session.id === currentSession.id);
+        if (refreshed) {
+          setSelectedSession((current) => (current?.id === refreshed.id ? { ...current, ...refreshed } : current));
+          setContextStatus(normalizeContextStatus(refreshed.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+          const messageData = await apiFetch(sessionMessagesApiPath(refreshed.id));
+          if (selectedSessionRef.current?.id === refreshed.id) {
+            setMessages(messageData.messages || []);
+            setContextStatus(
+              normalizeContextStatus(messageData.context || refreshed.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context)
+            );
+          }
+          return;
+        }
+      }
+
+      if (settings.chooseLatest) {
         const next = nextSessions[0] || null;
+        selectedSessionRef.current = next;
         setSelectedSession(next);
         if (next) {
-          const messageData = await apiFetch(`/api/sessions/${encodeURIComponent(next.id)}/messages?limit=120`);
-          setMessages(messageData.messages || []);
+          setContextStatus(normalizeContextStatus(next.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+          const messageData = await apiFetch(sessionMessagesApiPath(next.id));
+          if (selectedSessionRef.current?.id === next.id) {
+            setMessages(messageData.messages || []);
+            setContextStatus(normalizeContextStatus(messageData.context || next.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+          }
         } else {
           setMessages([]);
+          setContextStatus(emptyContextStatus());
         }
       } else {
+        selectedSessionRef.current = null;
         setSelectedSession(null);
         setMessages([]);
+        setContextStatus(emptyContextStatus());
       }
     } finally {
       setLoadingProjectId((current) => (current === project.id ? null : current));
     }
   }, []);
 
-  const loadProjects = useCallback(async () => {
+  const loadProjects = useCallback(async (options = {}) => {
+    const preserveSelection = Boolean(options?.preserveSelection);
     const data = await apiFetch('/api/projects');
     const list = data.projects || [];
     setProjects(list);
+    const currentProject = selectedProjectRef.current;
     const preferred =
+      (preserveSelection && currentProject
+        ? list.find((project) => project.id === currentProject.id)
+        : null) ||
       list.find((project) => project.name.toLowerCase() === 'codexmobile') ||
       list.find((project) => project.path.toLowerCase().includes('codexmobile')) ||
       list[0] ||
@@ -3493,7 +5152,10 @@ export default function App() {
     if (preferred) {
       setExpandedProjectIds((current) => ({ ...current, [preferred.id]: true }));
     }
-    await loadSessions(preferred);
+    await loadSessions(preferred, {
+      chooseLatest: !preserveSelection || !selectedSessionRef.current,
+      preserveSelection
+    });
   }, [loadSessions]);
 
   const bootstrap = useCallback(async () => {
@@ -3505,7 +5167,7 @@ export default function App() {
         apiFetch('/api/sync', { method: 'POST' })
           .then(async () => {
             await loadStatus();
-            await loadProjects();
+            await loadProjects({ preserveSelection: true });
           })
           .catch(() => null)
           .finally(() => setSyncing(false));
@@ -3570,6 +5232,7 @@ export default function App() {
           id: payload.sessionId,
           projectId,
           title: currentSession?.title || '新对话',
+          turnId: payload.turnId || currentSession?.turnId || null,
           updatedAt: new Date().toISOString(),
           draft: false
         };
@@ -3626,23 +5289,12 @@ export default function App() {
         if (!payloadMatchesCurrentConversation(payload)) {
           return;
         }
-        if (payload.phase === 'commentary' || payload.kind === 'agent_message') {
+        if (payload.phase === 'commentary') {
           setMessages((current) =>
             upsertStatusMessage(current, {
               ...payload,
               kind: payload.kind || 'agent_message',
-              label: briefActivityLabel(payload.content),
-              status: payload.status || 'running'
-            })
-          );
-          return;
-        }
-        if (!payload.done) {
-          setMessages((current) =>
-            upsertStatusMessage(current, {
-              ...payload,
-              kind: payload.kind || 'message',
-              label: '正在整理回复',
+              label: String(payload.content || '').trim(),
               status: payload.status || 'running'
             })
           );
@@ -3675,12 +5327,24 @@ export default function App() {
         setMessages((current) => upsertActivityMessage(current, payload));
         return;
       }
+      if (payload.type === 'context-status-update') {
+        markRun(payload);
+        if (payloadMatchesCurrentConversation(payload)) {
+          setContextStatus((current) => mergeContextStatus(current, payload, DEFAULT_STATUS.context));
+        }
+        return;
+      }
       if (payload.type === 'chat-complete' || payload.type === 'chat-error' || payload.type === 'chat-aborted') {
-      if (!payloadMatchesCurrentConversation(payload)) {
+        if (!payloadMatchesCurrentConversation(payload)) {
           clearRun(payload);
           return;
         }
         if (payload.type === 'chat-complete') {
+          if (payload.context) {
+            setContextStatus((current) => mergeContextStatus(current, payload.context, DEFAULT_STATUS.context));
+          }
+          markSessionCompleteNotice(payload);
+          clearRun(payload);
           markTurnCompleted(payload);
           scheduleTurnRefresh(payload);
           return;
@@ -3712,7 +5376,14 @@ export default function App() {
         if (project?.id) {
           apiFetch(`/api/projects/${encodeURIComponent(project.id)}/sessions`)
             .then((data) => {
-              setSessionsByProject((current) => ({ ...current, [project.id]: data.sessions || [] }));
+              const nextSessions = data.sessions || [];
+              setSessionsByProject((current) => ({ ...current, [project.id]: nextSessions }));
+              const currentSession = selectedSessionRef.current;
+              const refreshedSession = nextSessions.find((session) => session.id === currentSession?.id);
+              if (refreshedSession) {
+                setSelectedSession((current) => (current?.id === refreshedSession.id ? { ...current, ...refreshedSession } : current));
+                setContextStatus(normalizeContextStatus(refreshedSession.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+              }
             })
             .catch(() => null);
         }
@@ -3737,7 +5408,7 @@ export default function App() {
     try {
       await apiFetch('/api/sync', { method: 'POST' });
       await loadStatus();
-      await loadProjects();
+      await loadProjects({ preserveSelection: true });
     } finally {
       setSyncing(false);
     }
@@ -3760,6 +5431,7 @@ export default function App() {
     if (projectChanged) {
       setSelectedSession(null);
       setMessages([]);
+      setContextStatus(emptyContextStatus());
     }
     if (!sessionsByProject[project.id]) {
       await loadSessions(project, false);
@@ -3767,14 +5439,23 @@ export default function App() {
   }
 
   async function handleSelectSession(session) {
+    clearSessionCompleteNotice(session?.id);
+    selectedSessionRef.current = session;
     setSelectedSession(session);
+    const requestedSessionId = session?.id || null;
     if (isDraftSession(session)) {
       setMessages([]);
+      setContextStatus(emptyContextStatus());
       setDrawerOpen(false);
       return;
     }
-    const data = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/messages?limit=120`);
+    setContextStatus(normalizeContextStatus(session?.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+    const data = await apiFetch(sessionMessagesApiPath(session.id));
+    if (selectedSessionRef.current?.id !== requestedSessionId) {
+      return;
+    }
     setMessages(data.messages || []);
+    setContextStatus(normalizeContextStatus(data.context || session.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
     setDrawerOpen(false);
   }
 
@@ -3927,6 +5608,7 @@ export default function App() {
     const draft = createDraftSession(project);
     setSelectedProject(project);
     setSelectedSession(draft);
+    setContextStatus(emptyContextStatus());
     setExpandedProjectIds((current) => ({ ...current, [project.id]: true }));
     setSessionsByProject((current) => upsertSessionInProject(current, project.id, draft));
     setMessages([]);
@@ -3995,6 +5677,7 @@ export default function App() {
       id: realSessionId,
       projectId,
       title: currentSession?.title || '新对话',
+      turnId: turn.turnId || currentSession?.turnId || null,
       updatedAt: turn.completedAt || turn.updatedAt || new Date().toISOString(),
       draft: false
     };
@@ -4018,6 +5701,9 @@ export default function App() {
           : message
       )
     );
+    if (turn.status === 'running' || turn.status === 'queued') {
+      markRun({ turnId: turn.turnId, sessionId: realSessionId, previousSessionId: previousSessionId || optimisticSessionId });
+    }
     return realSessionId;
   }
 
@@ -4035,9 +5721,16 @@ export default function App() {
     ) {
       return false;
     }
-    const data = await apiFetch(`/api/sessions/${encodeURIComponent(realSessionId)}/messages?limit=120`);
+    const data = await apiFetch(sessionMessagesApiPath(realSessionId));
     if (data.messages?.length && hasVisibleAssistantForTurn(data.messages, { turnId })) {
-      setMessages(data.messages);
+      setContextStatus((current) => mergeContextStatus(current, data.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+      setMessages((currentMessages) =>
+        mergeLoadedMessagesPreservingActivity(currentMessages, data.messages, {
+          sessionId: realSessionId,
+          previousSessionId,
+          turnId
+        })
+      );
       return true;
     }
     return false;
@@ -4096,8 +5789,14 @@ export default function App() {
             sessionId: realSessionId || optimisticSessionId,
             turnId,
             previousSessionId,
+            startedAt: turn.startedAt || '',
+            completedAt: turn.completedAt || turn.updatedAt || '',
             detail: turn.detail || ''
           };
+          if (turn.context) {
+            setContextStatus((current) => mergeContextStatus(current, turn.context, DEFAULT_STATUS.context));
+          }
+          markSessionCompleteNotice(terminalPayload);
           markTurnCompleted(terminalPayload);
           const loaded = await loadTurnMessages(realSessionId, turnId, optimisticSessionId, previousSessionId);
           if (loaded) {
@@ -4107,6 +5806,8 @@ export default function App() {
               sessionId: realSessionId || optimisticSessionId,
               turnId,
               previousSessionId,
+              startedAt: turn.startedAt || '',
+              completedAt: turn.completedAt || turn.updatedAt || '',
               hadAssistantText: turn.hadAssistantText || Boolean(turn.assistantPreview),
               usage: turn.usage || null
             });
@@ -4162,14 +5863,15 @@ export default function App() {
         ? { ...current, turnId, ...(initialTitle ? { title: initialTitle, titleLocked: true } : {}) }
         : current
     );
-    if (initialTitle) {
-      setSessionsByProject((current) => ({
-        ...current,
-        [project.id]: (current[project.id] || []).map((item) =>
-          item.id === sessionForTurn.id ? { ...item, title: initialTitle, titleLocked: true } : item
-        )
-      }));
-    }
+    setSessionsByProject((current) => ({
+      ...current,
+      [project.id]: (current[project.id] || []).map((item) =>
+        item.id === sessionForTurn.id
+          ? { ...item, turnId, ...(initialTitle ? { title: initialTitle, titleLocked: true } : {}) }
+          : item
+      )
+    }));
+    const submittedAt = new Date().toISOString();
     setMessages((current) =>
       upsertStatusMessage(
         [
@@ -4178,7 +5880,7 @@ export default function App() {
             id: `local-${Date.now()}`,
             role: 'user',
             content: displayMessage,
-            timestamp: new Date().toISOString(),
+            timestamp: submittedAt,
             sessionId: optimisticSessionId,
             turnId
           }
@@ -4189,7 +5891,8 @@ export default function App() {
           kind: 'reasoning',
           status: 'running',
           label: '正在思考中',
-          timestamp: new Date().toISOString()
+          timestamp: submittedAt,
+          startedAt: submittedAt
         }
       )
     );
@@ -4542,6 +6245,15 @@ export default function App() {
   }
 
   const shellClass = useMemo(() => (drawerOpen ? 'app-shell drawer-active' : 'app-shell'), [drawerOpen]);
+  const visibleContextStatus = useMemo(
+    () => {
+      if (!selectedSession || isDraftSession(selectedSession)) {
+        return emptyContextStatus();
+      }
+      return normalizeContextStatus(contextStatus || selectedSession.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context);
+    },
+    [contextStatus, selectedSession]
+  );
 
   if (!authenticated) {
     return <PairingScreen onPaired={bootstrap} />;
@@ -4564,6 +6276,9 @@ export default function App() {
         expandedProjectIds={expandedProjectIds}
         sessionsByProject={sessionsByProject}
         loadingProjectId={loadingProjectId}
+        runningById={runningById}
+        threadRuntimeById={threadRuntimeById}
+        completedSessionIds={completedSessionIds}
         onToggleProject={handleToggleProject}
         onSelectSession={handleSelectSession}
         onRenameSession={handleRenameSession}
@@ -4590,6 +6305,7 @@ export default function App() {
         messages={messages}
         selectedSession={selectedSession}
         running={running}
+        now={activityClockNow}
         onPreviewImage={setPreviewImage}
         onDeleteMessage={handleDeleteMessage}
       />
@@ -4628,6 +6344,8 @@ export default function App() {
         onVoiceSubmit={handleVoiceSubmit}
         onOpenVoiceDialog={openVoiceDialog}
         voiceDialogActive={voiceDialogOpen}
+        contextStatus={visibleContextStatus}
+        runStatus={composerRunStatus}
       />
       <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />
     </div>

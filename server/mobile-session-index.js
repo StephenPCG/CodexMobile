@@ -24,7 +24,7 @@ async function readIndexFile() {
 async function writeIndexFile(sessions) {
   await fs.mkdir(STATE_DIR, { recursive: true });
   const trimmed = sessions
-    .filter((session) => session?.id && session?.projectPath)
+    .filter((session) => session?.id && (session?.projectPath || session?.projectless))
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0))
     .slice(0, MAX_SESSIONS);
   await fs.writeFile(
@@ -72,8 +72,8 @@ export async function deleteMobileSession(sessionId) {
   return true;
 }
 
-export async function registerMobileSession({ id, projectPath, title, summary, updatedAt, messages }) {
-  if (!id || !projectPath || String(id).startsWith('draft-') || String(id).startsWith('codex-')) {
+export async function registerMobileSession({ id, projectPath, projectless = false, title, summary, updatedAt, messages }) {
+  if (!id || (!projectPath && !projectless) || String(id).startsWith('draft-') || String(id).startsWith('codex-')) {
     return null;
   }
 
@@ -84,7 +84,8 @@ export async function registerMobileSession({ id, projectPath, title, summary, u
   const next = {
     ...(existing || {}),
     id,
-    projectPath: path.resolve(projectPath),
+    projectPath: projectPath ? path.resolve(projectPath) : existing?.projectPath || null,
+    projectless: Boolean(projectless || existing?.projectless),
     title: existing?.title || fallbackTitle(title, summary),
     titleLocked: true,
     summary: summary || title || existing?.summary || 'CodexMobile 对话',
@@ -119,9 +120,9 @@ export async function registerMobileSession({ id, projectPath, title, summary, u
   return next;
 }
 
-export async function renameMobileSession({ id, projectPath, title, updatedAt }) {
+export async function renameMobileSession({ id, projectPath, projectless = false, title, updatedAt }) {
   const sessionId = String(id || '').trim();
-  if (!sessionId || !projectPath || sessionId.startsWith('draft-')) {
+  if (!sessionId || (!projectPath && !projectless) || sessionId.startsWith('draft-')) {
     return null;
   }
 
@@ -131,7 +132,8 @@ export async function renameMobileSession({ id, projectPath, title, updatedAt })
   const next = {
     ...(existing || {}),
     id: sessionId,
-    projectPath: path.resolve(projectPath),
+    projectPath: projectPath ? path.resolve(projectPath) : existing?.projectPath || null,
+    projectless: Boolean(projectless || existing?.projectless),
     title: fallbackTitle(title),
     titleLocked: true,
     summary: existing?.summary,

@@ -294,7 +294,7 @@ function emitStatus(emit, { sessionId, turnId, kind, status = 'running', label, 
   });
 }
 
-async function appendMobileMessages({ sessionId, projectPath, title, summary, updatedAt, messages }) {
+async function appendMobileMessages({ sessionId, projectPath, projectless = false, title, summary, updatedAt, messages }) {
   const existingMessages = await readMobileSessionMessages(sessionId);
   const merged = [...existingMessages];
   for (const message of messages) {
@@ -305,6 +305,7 @@ async function appendMobileMessages({ sessionId, projectPath, title, summary, up
   await registerMobileSession({
     id: sessionId,
     projectPath,
+    projectless,
     title,
     summary,
     updatedAt,
@@ -316,6 +317,7 @@ export async function runImageTurn({
   sessionId,
   previousSessionId,
   projectPath,
+  projectless = false,
   message,
   attachments = [],
   config,
@@ -357,6 +359,7 @@ export async function runImageTurn({
     await appendMobileMessages({
       sessionId: finalSessionId,
       projectPath,
+      projectless,
       title: message.slice(0, 52) || 'Image task',
       summary: message || 'Image task',
       updatedAt: startedAt,
@@ -501,6 +504,7 @@ export async function runImageTurn({
       await registerMobileSession({
         id: finalSessionId,
         projectPath,
+        projectless,
         title: message.slice(0, 52) || '图片生成',
         summary: message || '图片生成',
         updatedAt: completedAt,
@@ -539,6 +543,7 @@ export async function runImageTurn({
       await appendMobileMessages({
         sessionId: finalSessionId,
         projectPath,
+        projectless,
         title: message.slice(0, 52) || 'Image task',
         summary: message || 'Image task',
         updatedAt: failedAt,
