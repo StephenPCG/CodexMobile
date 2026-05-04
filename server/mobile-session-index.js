@@ -81,11 +81,12 @@ export async function registerMobileSession({ id, projectPath, projectless = fal
   const sessions = await readIndexFile();
   const existingIndex = sessions.findIndex((session) => session.id === id);
   const existing = existingIndex >= 0 ? sessions[existingIndex] : null;
+  const nextProjectPath = projectPath ? path.resolve(projectPath) : existing?.projectPath || null;
   const next = {
     ...(existing || {}),
     id,
-    projectPath: projectPath ? path.resolve(projectPath) : existing?.projectPath || null,
-    projectless: Boolean(projectless || existing?.projectless),
+    projectPath: nextProjectPath,
+    projectless: projectPath ? Boolean(projectless) : Boolean(projectless || existing?.projectless),
     title: existing?.title || fallbackTitle(title, summary),
     titleLocked: true,
     summary: summary || title || existing?.summary || 'CodexMobile 对话',
@@ -129,11 +130,12 @@ export async function renameMobileSession({ id, projectPath, projectless = false
   const sessions = await readIndexFile();
   const existingIndex = sessions.findIndex((session) => session.id === sessionId);
   const existing = existingIndex >= 0 ? sessions[existingIndex] : null;
+  const nextProjectPath = projectPath ? path.resolve(projectPath) : existing?.projectPath || null;
   const next = {
     ...(existing || {}),
     id: sessionId,
-    projectPath: projectPath ? path.resolve(projectPath) : existing?.projectPath || null,
-    projectless: Boolean(projectless || existing?.projectless),
+    projectPath: nextProjectPath,
+    projectless: projectPath ? Boolean(projectless) : Boolean(projectless || existing?.projectless),
     title: fallbackTitle(title),
     titleLocked: true,
     summary: existing?.summary,

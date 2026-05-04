@@ -104,7 +104,7 @@ function statusLabel(kind, status = 'running') {
     file_change: done ? '文件已修改' : failed ? '文件修改失败' : '正在修改文件',
     mcp_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
     dynamic_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
-    web_search: done ? '搜索完成' : failed ? '搜索失败' : '正在搜索',
+    web_search: done ? '网页搜索完成' : failed ? '网页搜索失败' : '正在搜索网页',
     plan: done ? '计划已更新' : '正在规划',
     todo_list: done ? '计划已更新' : '正在规划',
     image_generation_call: done ? '图片生成完成' : failed ? '图片生成失败' : '正在生成图片',
@@ -197,7 +197,45 @@ function normalizeFileChanges(item) {
   });
 }
 
-function emitStatus(emit, { sessionId, turnId, kind, status = 'running', label, detail = '' }) {
+function maybeIsoFromTimeValue(value) {
+  if (typeof value === 'string' && value.trim() && !/^\d+(\.\d+)?$/.test(value.trim())) {
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+  }
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  const millis = seconds > 10_000_000_000 ? seconds : seconds * 1000;
+  return new Date(millis).toISOString();
+}
+
+function turnTimingPayload(turn, { fallbackStartedAt = null, fallbackCompletedAt = null } = {}) {
+  const startedAt = maybeIsoFromTimeValue(turn?.startedAt) || fallbackStartedAt || null;
+  const completedAt = maybeIsoFromTimeValue(turn?.completedAt) || fallbackCompletedAt || null;
+  let durationMs = positiveNumber(turn?.durationMs);
+  if (!durationMs && startedAt && completedAt) {
+    const startMs = new Date(startedAt).getTime();
+    const endMs = new Date(completedAt).getTime();
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+      durationMs = endMs - startMs;
+    }
+  }
+  return { startedAt, completedAt, durationMs };
+}
+
+function emitStatus(emit, {
+  sessionId,
+  turnId,
+  kind,
+  status = 'running',
+  label,
+  detail = '',
+  startedAt = null,
+  completedAt = null,
+  durationMs = null,
+  timestamp = null
+}) {
   emit({
     type: 'status-update',
     sessionId,
@@ -206,7 +244,10 @@ function emitStatus(emit, { sessionId, turnId, kind, status = 'running', label, 
     status,
     label: label || statusLabel(kind, status),
     detail,
-    timestamp: new Date().toISOString()
+    timestamp: timestamp || completedAt || startedAt || new Date().toISOString(),
+    startedAt,
+    completedAt,
+    durationMs
   });
 }
 
@@ -312,6 +353,7 @@ function emitActivity(emit, { sessionId, turnId, messageId, item, kind, status }
     detail,
     command: item?.command || '',
     output: item?.aggregated_output || item?.aggregatedOutput || item?.output || '',
+    exitCode: item?.exitCode ?? item?.exit_code ?? null,
     fileChanges: normalizeFileChanges(item),
     toolName: item?.tool || item?.name || '',
     error: item?.error?.message || item?.message || '',
@@ -677,8 +719,20 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
         emitAppServerNotification(appMessage, currentSessionId || sessionId || draftSessionId, turnId, emit, state);
         if (appMessage.method === 'turn/completed') {
           state.usage = params.turn || null;
-          emitStatus(emit, { sessionId: currentSessionId, turnId, kind: 'turn', status: 'completed', label: '任务已完成' });
-          emit({ type: 'turn-complete', sessionId: currentSessionId, turnId, usage: state.usage });
+          const timing = turnTimingPayload(state.usage, {
+            fallbackStartedAt: run.startedAt,
+            fallbackCompletedAt: new Date().toISOString()
+          });
+          emitStatus(emit, {
+            sessionId: currentSessionId,
+            turnId,
+            kind: 'turn',
+            status: 'completed',
+            label: '任务已完成',
+            ...timing,
+            timestamp: timing.completedAt
+          });
+          emit({ type: 'turn-complete', sessionId: currentSessionId, turnId, usage: state.usage, ...timing });
           completionResolve(params.turn || {});
         } else if (appMessage.method === 'error' && !params.willRetry) {
           completionReject(new Error(errorTextFromNotification(params)));
@@ -744,6 +798,10 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     ]);
 
     if (!state.failed) {
+      const timing = turnTimingPayload(state.usage, {
+        fallbackStartedAt: run.startedAt,
+        fallbackCompletedAt: new Date().toISOString()
+      });
       emit({
         type: 'chat-complete',
         sessionId: currentSessionId,
@@ -752,7 +810,7 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
         usage: state.usage,
         context: state.context,
         hadAssistantText: state.hadAssistantText,
-        completedAt: new Date().toISOString()
+        ...timing
       });
     }
   } catch (error) {

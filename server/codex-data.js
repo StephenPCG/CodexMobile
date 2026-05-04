@@ -1,11 +1,13 @@
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { promisify } from 'node:util';
 import { listDesktopThreads, readDesktopThread, setDesktopThreadName } from './codex-app-server.js';
-import { readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
+import { CODEX_STATE_DB, readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
 import {
   readMobileSessionIndex,
   readMobileSessionMessages,
@@ -18,6 +20,7 @@ const HIDDEN_SESSIONS_PATH = path.join(process.cwd(), '.codexmobile', 'state', '
 const DESKTOP_IMAGE_ROOT = path.join(process.cwd(), '.codexmobile', 'desktop-images');
 const PROJECTLESS_PROJECT_ID = '__codexmobile_projectless__';
 const PROJECTLESS_PROJECT_NAME = '普通对话';
+const execFileAsync = promisify(execFile);
 
 let cache = {
   syncedAt: null,
@@ -348,19 +351,63 @@ function sourceToString(source) {
   return 'unknown';
 }
 
+async function readThreadSpawnEdges() {
+  try {
+    await fs.access(CODEX_STATE_DB);
+    const query = `
+      select
+        parent_thread_id as parentSessionId,
+        child_thread_id as childSessionId,
+        status
+      from thread_spawn_edges
+    `;
+    const { stdout } = await execFileAsync('sqlite3', ['-json', CODEX_STATE_DB, query], {
+      maxBuffer: 1024 * 1024
+    });
+    const parsed = JSON.parse(stdout || '[]');
+    return Array.isArray(parsed)
+      ? parsed.filter((edge) => edge?.parentSessionId && edge?.childSessionId)
+      : [];
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to read subagent thread edges:', error.message);
+    }
+    return [];
+  }
+}
+
+function subAgentMetaFromThread(thread, spawnEdge = null) {
+  const spawn = thread?.source?.subAgent?.thread_spawn || {};
+  const parentSessionId = spawn.parent_thread_id || spawnEdge?.parentSessionId || null;
+  if (!parentSessionId && !thread?.source?.subAgent && !spawnEdge) {
+    return { parentSessionId: null, subAgent: null };
+  }
+  return {
+    parentSessionId,
+    subAgent: {
+      nickname: thread?.agentNickname || spawn.agent_nickname || null,
+      role: thread?.agentRole || spawn.agent_role || null,
+      depth: Number.isFinite(Number(spawn.depth)) ? Number(spawn.depth) : null,
+      status: spawnEdge?.status || null
+    }
+  };
+}
+
 async function sessionFromDesktopThread(
   thread,
   mobileSessionIndex,
   projectlessThreadIds,
   projectlessWorkdir,
   visibleProjectIds,
-  configContext = {}
+  configContext = {},
+  spawnEdge = null
 ) {
   if (!thread?.id) {
     return null;
   }
   const mobileSession = mobileSessionIndex.get(thread.id);
-  const explicitProjectless = projectlessThreadIds.has(thread.id) || Boolean(mobileSession?.projectless);
+  const hasDesktopCwd = typeof thread.cwd === 'string' && thread.cwd.trim();
+  const explicitProjectless = !hasDesktopCwd && (projectlessThreadIds.has(thread.id) || Boolean(mobileSession?.projectless));
   const cwd = thread.cwd || mobileSession?.projectPath || (explicitProjectless ? projectlessWorkdir : '');
   if (!cwd && !explicitProjectless) {
     return null;
@@ -376,6 +423,7 @@ async function sessionFromDesktopThread(
   const title = String(thread.name || mobileTitle || preview.slice(0, 52) || '新对话').trim();
   const mobileMessages = Array.isArray(mobileSession?.messages) ? mobileSession.messages : [];
   const contextState = await readRolloutContextState(thread.path, thread.id);
+  const subAgentMeta = subAgentMetaFromThread(thread, spawnEdge);
   return {
     id: thread.id,
     cwd: resolvedCwd,
@@ -387,6 +435,9 @@ async function sessionFromDesktopThread(
     messageCount: mobileMessages.length,
     updatedAt: isoFromEpochSeconds(thread.updatedAt) || mobileSession?.updatedAt || null,
     source: sourceToString(thread.source),
+    parentSessionId: subAgentMeta.parentSessionId,
+    isSubAgent: Boolean(subAgentMeta.parentSessionId || subAgentMeta.subAgent),
+    subAgent: subAgentMeta.subAgent,
     projectless,
     filePath: thread.path || null,
     context: publicContextState(contextState, configContext)
@@ -497,6 +548,8 @@ export async function refreshCodexCache() {
   const projectlessThreadIds = new Set(workspaceState.projectlessThreadIds || []);
   const projectlessWorkdir = projectlessWorkingDirectory(workspaceState);
   const hasProjectlessSessions = projectlessThreadIds.size > 0 || mobileSessions.some((session) => session?.projectless);
+  const spawnEdges = await readThreadSpawnEdges();
+  const spawnEdgeByChildId = new Map(spawnEdges.map((edge) => [edge.childSessionId, edge]));
 
   for (const project of visibleProjects) {
     const entry = upsertProject(projectById, project.path, project.trustLevel, project.label);
@@ -517,7 +570,8 @@ export async function refreshCodexCache() {
       projectlessThreadIds,
       projectlessWorkdir,
       visibleProjectIds,
-      config.context || {}
+      config.context || {},
+      spawnEdgeByChildId.get(thread.id) || null
     );
     if (!session || hiddenSessionIds.has(session.id)) {
       continue;
@@ -531,6 +585,47 @@ export async function refreshCodexCache() {
     addSessionToMaps(session, projectById, sessionsByProject, sessionById);
   }
 
+  for (const edge of spawnEdges) {
+    if (hiddenSessionIds.has(edge.childSessionId)) {
+      continue;
+    }
+    const existing = sessionById.get(edge.childSessionId);
+    if (existing) {
+      existing.parentSessionId = existing.parentSessionId || edge.parentSessionId;
+      existing.isSubAgent = true;
+      existing.subAgent = {
+        ...(existing.subAgent || {}),
+        status: existing.subAgent?.status || edge.status || null
+      };
+      continue;
+    }
+    let childThread = null;
+    try {
+      childThread = (await readDesktopThread(edge.childSessionId, { includeTurns: false }))?.thread || null;
+    } catch {
+      continue;
+    }
+    const childSession = await sessionFromDesktopThread(
+      childThread,
+      mobileSessionIndex,
+      projectlessThreadIds,
+      projectlessWorkdir,
+      visibleProjectIds,
+      config.context || {},
+      edge
+    );
+    if (!childSession || hiddenSessionIds.has(childSession.id)) {
+      continue;
+    }
+    if (childSession.projectless) {
+      upsertProjectlessProject(projectById, workspaceState);
+      visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
+    } else if (!visibleProjectIds.has(childSession.projectId)) {
+      continue;
+    }
+    addSessionToMaps(childSession, projectById, sessionsByProject, sessionById);
+  }
+
   for (const mobileSession of mobileSessions) {
     if (!mobileSession?.id || (!mobileSession.projectPath && !mobileSession.projectless) || sessionById.has(mobileSession.id)) {
       continue;
@@ -538,7 +633,11 @@ export async function refreshCodexCache() {
     if (hiddenSessionIds.has(mobileSession.id)) {
       continue;
     }
-    const projectId = mobileSession.projectless ? PROJECTLESS_PROJECT_ID : projectIdFor(mobileSession.projectPath);
+    const mobileProjectPath = mobileSession.projectPath ? path.resolve(mobileSession.projectPath) : '';
+    const mobileProjectId = mobileProjectPath ? projectIdFor(mobileProjectPath) : PROJECTLESS_PROJECT_ID;
+    const mobileProjectless =
+      Boolean(mobileSession.projectless && (!mobileProjectPath || isDocumentsCodexConversationPath(mobileProjectPath) || !visibleProjectIds.has(mobileProjectId)));
+    const projectId = mobileProjectless ? PROJECTLESS_PROJECT_ID : mobileProjectId;
     if (!visibleProjectIds.has(projectId)) {
       continue;
     }
@@ -572,8 +671,29 @@ export async function refreshCodexCache() {
     sessions.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
     const project = projectById.get(projectId);
     if (project) {
-      project.sessionCount = sessions.length;
+      const sessionIds = new Set(sessions.map((session) => session.id));
+      project.sessionCount = sessions.filter(
+        (session) => !session.parentSessionId || !sessionIds.has(session.parentSessionId)
+      ).length;
       project.updatedAt = sessions[0]?.updatedAt || project.updatedAt;
+    }
+  }
+
+  for (const session of sessionById.values()) {
+    session.childCount = 0;
+    session.openChildCount = 0;
+  }
+  for (const session of sessionById.values()) {
+    if (!session.parentSessionId) {
+      continue;
+    }
+    const parent = sessionById.get(session.parentSessionId);
+    if (!parent) {
+      continue;
+    }
+    parent.childCount = (parent.childCount || 0) + 1;
+    if (session.subAgent?.status === 'open') {
+      parent.openChildCount = (parent.openChildCount || 0) + 1;
     }
   }
 
@@ -618,11 +738,18 @@ export function getProject(projectId) {
 export function listProjectSessions(projectId) {
   return (cache.sessionsByProject.get(projectId) || []).map((session) => ({
     id: session.id,
+    projectId: session.projectId,
+    cwd: session.cwd,
     title: session.title,
     summary: session.summary,
     model: session.model,
     provider: session.provider,
     source: session.source,
+    parentSessionId: session.parentSessionId || null,
+    isSubAgent: Boolean(session.isSubAgent),
+    subAgent: session.subAgent || null,
+    childCount: session.childCount || 0,
+    openChildCount: session.openChildCount || 0,
     messageCount: session.messageCount,
     updatedAt: session.updatedAt,
     context: session.context || null
@@ -818,6 +945,7 @@ function upsertDesktopActivity(messages, turnId, activity, segmentIndex = 0) {
     kind: 'desktop',
     status: 'running',
     timestamp: activity.timestamp || new Date().toISOString(),
+    startedAt: activity.startedAt || activity.timestamp || null,
     activities: [activity]
   });
 }
@@ -848,6 +976,7 @@ function completeDesktopActivity(messages, turnId, finalContent = '', metadata =
       kind: 'desktop',
       status: 'running',
       timestamp: metadata.completedAt || new Date().toISOString(),
+      startedAt: metadata.startedAt || null,
       activities: []
     };
     messages.push(item);
@@ -864,6 +993,7 @@ function completeDesktopActivity(messages, turnId, finalContent = '', metadata =
   item.status = status;
   item.label = status === 'failed' ? '过程已中止' : '过程已同步';
   item.content = item.label;
+  item.startedAt = metadata.startedAt || item.startedAt || null;
   item.completedAt = metadata.completedAt || item.completedAt || null;
   item.durationMs = metadata.durationMs || item.durationMs || null;
 }
@@ -998,6 +1128,137 @@ function desktopActivityFallbackStatus(turnStatus) {
   return turnStatus === 'running' ? 'running' : turnStatus === 'failed' ? 'failed' : 'completed';
 }
 
+function agentStatusText(status = {}) {
+  if (status.completed) {
+    return '已完成';
+  }
+  if (status.failed || status.error) {
+    return '失败';
+  }
+  if (status.running || status.queued || status.pending) {
+    return '运行中';
+  }
+  return '打开';
+}
+
+function collabAgentSummary(agent) {
+  return [agent.nickname, agent.role ? `(${agent.role})` : '', agent.statusText]
+    .filter(Boolean)
+    .join(' ');
+}
+
+async function readDesktopCollabActivities(filePath) {
+  if (!filePath) {
+    return [];
+  }
+  const activitiesByTurn = new Map();
+  let currentTurnId = null;
+
+  function ensureTurn(turnId, timestamp) {
+    if (!turnId) {
+      return null;
+    }
+    if (!activitiesByTurn.has(turnId)) {
+      activitiesByTurn.set(turnId, {
+        turnId,
+        timestamp,
+        agents: new Map()
+      });
+    }
+    return activitiesByTurn.get(turnId);
+  }
+
+  try {
+    const stream = fsSync.createReadStream(filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of rl) {
+      if (!line.trim()) {
+        continue;
+      }
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = entry?.payload || {};
+      if (payload.turn_id) {
+        currentTurnId = payload.turn_id;
+      }
+      if (entry.type !== 'event_msg') {
+        continue;
+      }
+      if (payload.type === 'task_started' && payload.turn_id) {
+        currentTurnId = payload.turn_id;
+        continue;
+      }
+      if (payload.type === 'collab_agent_spawn_end') {
+        const state = ensureTurn(currentTurnId, entry.timestamp);
+        if (!state || !payload.new_thread_id) {
+          continue;
+        }
+        state.agents.set(payload.new_thread_id, {
+          threadId: payload.new_thread_id,
+          nickname: payload.new_agent_nickname || '',
+          role: payload.new_agent_role || '',
+          statusText: payload.status === 'pending_init' ? '运行中' : '打开',
+          result: '',
+          timestamp: entry.timestamp
+        });
+        continue;
+      }
+      if (payload.type === 'collab_waiting_end') {
+        const state = ensureTurn(currentTurnId, entry.timestamp);
+        if (!state) {
+          continue;
+        }
+        const statuses = Array.isArray(payload.agent_statuses) ? payload.agent_statuses : [];
+        for (const item of statuses) {
+          const threadId = item.thread_id;
+          if (!threadId) {
+            continue;
+          }
+          const status = item.status || {};
+          const previous = state.agents.get(threadId) || {};
+          state.agents.set(threadId, {
+            threadId,
+            nickname: item.agent_nickname || previous.nickname || '',
+            role: item.agent_role || previous.role || '',
+            statusText: agentStatusText(status),
+            result: status.completed || status.failed || status.error || '',
+            timestamp: entry.timestamp
+          });
+        }
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to read collab agent activity:', error.message);
+    }
+    return [];
+  }
+
+  return [...activitiesByTurn.values()]
+    .filter((state) => state.agents.size > 0)
+    .map((state) => {
+      const agents = [...state.agents.values()];
+      const running = agents.some((agent) => /运行中|打开/.test(agent.statusText));
+      const count = agents.length;
+      return {
+        turnId: state.turnId,
+        activity: {
+          id: `${state.turnId}-subagents`,
+          kind: 'subagent_activity',
+          label: `${count} 个后台智能体（使用 @ 标记智能体）`,
+          status: running ? 'running' : 'completed',
+          detail: agents.map(collabAgentSummary).join('\n'),
+          subAgents: agents,
+          timestamp: state.timestamp
+        }
+      };
+    });
+}
+
 function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatus = 'completed') {
   if (!item || item.type === 'userMessage') {
     return null;
@@ -1054,6 +1315,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
       detail: item.command || '',
       command: item.command || '',
       output: item.aggregatedOutput || '',
+      exitCode: item.exitCode ?? item.exit_code ?? null,
       timestamp
     };
   }
@@ -1099,7 +1361,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
     return {
       id: `${turnId}-web-search-${item.id || index}`,
       kind: 'web_search',
-      label: desktopActivityLabel(status, { running: '正在搜索网页', completed: '搜索完成', failed: '搜索失败' }),
+      label: desktopActivityLabel(status, { running: '正在搜索网页', completed: '网页搜索完成', failed: '网页搜索失败' }),
       status,
       detail: item.query || item.action?.query || '',
       timestamp
@@ -1149,6 +1411,7 @@ function messagesFromDesktopThread(thread, { includeActivity = false } = {}) {
         return;
       }
       completeExistingDesktopActivity(messages, turnId, finalAssistantText, {
+        startedAt,
         completedAt: metadata.completedAt || completedAt || startedAt,
         durationMs: metadata.durationMs || null
       }, status, segmentIndex);
@@ -1204,6 +1467,7 @@ function messagesFromDesktopThread(thread, { includeActivity = false } = {}) {
 
     if (includeActivity && turnStatus !== 'running') {
       completeCurrentSegment(turnStatus === 'failed' ? 'failed' : 'completed', {
+        startedAt,
         completedAt: completedAt || startedAt,
         durationMs: turn.durationMs || null
       });
@@ -1232,6 +1496,12 @@ export async function readSessionMessages(sessionId, { limit = 120, offset = nul
     throw error;
   }
   const messages = messagesFromDesktopThread(response.thread, { includeActivity });
+  if (includeActivity) {
+    const collabActivities = await readDesktopCollabActivities(response.thread.path);
+    for (const item of collabActivities) {
+      upsertDesktopActivity(messages, item.turnId, item.activity);
+    }
+  }
   messages.sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
   const contextState = await readRolloutContextState(response.thread.path, sessionId);
 

@@ -168,6 +168,16 @@ function rememberTurnEvent(payload) {
     return;
   }
 
+  if (payload.startedAt) {
+    patch.startedAt = payload.startedAt;
+  }
+  if (payload.completedAt) {
+    patch.completedAt = payload.completedAt;
+  }
+  if (payload.durationMs) {
+    patch.durationMs = payload.durationMs;
+  }
+
   rememberTurn(payload.turnId, patch);
 }
 
