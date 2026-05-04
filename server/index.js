@@ -30,6 +30,7 @@ import {
 import { getCodexQuota } from './codex-quota.js';
 import { abortCodexTurn, getActiveRuns, runCodexTurn } from './codex-runner.js';
 import { GENERATED_ROOT, isImageRequest, runImageTurn } from './image-generator.js';
+import { getLarkDocsStatus, logoutLarkCli, startLarkCliAuth } from './lark-cli.js';
 import { registerMobileSession } from './mobile-session-index.js';
 import { publicVoiceTranscriptionStatus, transcribeAudio } from './voice-transcriber.js';
 import { publicVoiceSpeechStatus, synthesizeSpeech } from './voice-speaker.js';
@@ -40,6 +41,7 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const CLIENT_DIST = path.join(ROOT_DIR, 'client', 'dist');
 const UPLOAD_ROOT = path.join(ROOT_DIR, '.codexmobile', 'uploads');
 const IMAGE_PROMPT_STATE = path.join(ROOT_DIR, '.codexmobile', 'state', 'image-prompts.json');
+const FEISHU_AUTH_STATE = path.join(ROOT_DIR, '.codexmobile', 'state', 'feishu-auth.json');
 const PORT = Number(process.env.PORT || 3321);
 const HOST = process.env.HOST || '0.0.0.0';
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3443);
@@ -47,10 +49,15 @@ const HTTPS_PFX_PATH = process.env.HTTPS_PFX_PATH || path.join(ROOT_DIR, '.codex
 const HTTPS_ROOT_CA_PATH = process.env.HTTPS_ROOT_CA_PATH || path.join(ROOT_DIR, '.codexmobile', 'tls', 'codexmobile-root-ca.cer');
 const HTTPS_PFX_PASSPHRASE = process.env.HTTPS_PFX_PASSPHRASE || 'codexmobile-local-https';
 const PUBLIC_URL = process.env.CODEXMOBILE_PUBLIC_URL || '';
+const FEISHU_APP_ID = String(process.env.CODEXMOBILE_FEISHU_APP_ID || '').trim();
+const FEISHU_APP_SECRET = String(process.env.CODEXMOBILE_FEISHU_APP_SECRET || '').trim();
+const FEISHU_REDIRECT_URI = String(process.env.CODEXMOBILE_FEISHU_REDIRECT_URI || '').trim();
+const FEISHU_DOCS_HOME_URL = process.env.CODEXMOBILE_FEISHU_DOCS_URL || 'https://docs.feishu.cn/';
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_VOICE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REASONING_EFFORT = 'xhigh';
+const FEISHU_AUTH_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 
 const mimeTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -82,6 +89,7 @@ const conversationQueues = new Map();
 const sessionQueueKeys = new Map();
 const recentImagePromptsByProject = new Map();
 const activeImageRuns = new Map();
+let feishuAuthState = { token: null, pendingStates: {} };
 const MAX_RECENT_TURNS = 80;
 
 function rememberTurn(turnId, patch) {
@@ -219,6 +227,216 @@ function sendJson(res, status, payload) {
     'cache-control': 'no-store'
   });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, status, html) {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store'
+  });
+  res.end(html);
+}
+
+function htmlEscape(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function loadFeishuAuthState() {
+  try {
+    const raw = await fs.readFile(FEISHU_AUTH_STATE, 'utf8');
+    const parsed = JSON.parse(raw);
+    feishuAuthState = {
+      token: parsed?.token && typeof parsed.token === 'object' ? parsed.token : null,
+      pendingStates: parsed?.pendingStates && typeof parsed.pendingStates === 'object' ? parsed.pendingStates : {}
+    };
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[feishu] Failed to read auth state:', error.message);
+    }
+    feishuAuthState = { token: null, pendingStates: {} };
+  }
+}
+
+async function saveFeishuAuthState() {
+  await fs.mkdir(path.dirname(FEISHU_AUTH_STATE), { recursive: true });
+  await fs.writeFile(FEISHU_AUTH_STATE, JSON.stringify(feishuAuthState, null, 2), 'utf8');
+}
+
+function cleanupFeishuPendingStates() {
+  const now = Date.now();
+  const nextStates = {};
+  for (const [state, payload] of Object.entries(feishuAuthState.pendingStates || {})) {
+    const createdAt = Number(payload?.createdAt || 0);
+    if (createdAt && now - createdAt <= FEISHU_AUTH_STATE_MAX_AGE_MS) {
+      nextStates[state] = payload;
+    }
+  }
+  feishuAuthState.pendingStates = nextStates;
+}
+
+function requestOrigin(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const proto = forwardedProto || (req.socket.encrypted ? 'https' : 'http');
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `127.0.0.1:${PORT}`;
+  return `${proto}://${String(host).split(',')[0].trim()}`;
+}
+
+function feishuRedirectUri(req) {
+  if (FEISHU_REDIRECT_URI) {
+    return FEISHU_REDIRECT_URI;
+  }
+  const base = PUBLIC_URL || requestOrigin(req);
+  return new URL('/api/feishu/auth/callback', base.endsWith('/') ? base : `${base}/`).toString();
+}
+
+function feishuConfigured() {
+  return Boolean(FEISHU_APP_ID && FEISHU_APP_SECRET);
+}
+
+function feishuTokenValid() {
+  const expiresAt = Number(feishuAuthState.token?.expiresAt || 0);
+  return Boolean(feishuAuthState.token?.accessToken && expiresAt && expiresAt > Date.now() + 60_000);
+}
+
+function feishuUserSummary() {
+  const user = feishuAuthState.token?.user || {};
+  const name = user.name || user.enName || user.email || user.enterpriseEmail || user.openId || '';
+  return name ? {
+    name,
+    email: user.email || user.enterpriseEmail || '',
+    openId: user.openId || ''
+  } : null;
+}
+
+async function publicDocsStatus(authenticated) {
+  try {
+    return await getLarkDocsStatus({ authenticated });
+  } catch (error) {
+    return {
+      provider: 'feishu',
+      integration: 'lark-cli',
+      label: '飞书文档',
+      configured: feishuConfigured(),
+      connected: authenticated ? feishuTokenValid() : false,
+      user: authenticated ? feishuUserSummary() : null,
+      homeUrl: FEISHU_DOCS_HOME_URL,
+      cliInstalled: false,
+      skillsInstalled: false,
+      capabilities: [],
+      codexEnabled: false,
+      error: error.message || 'lark-cli status failed'
+    };
+  }
+}
+
+async function feishuJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      accept: 'application/json',
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
+      ...(options.headers || {})
+    }
+  });
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text.slice(0, 1000) };
+  }
+  if (!response.ok || Number(data.code || 0) !== 0) {
+    const error = new Error(data.msg || data.message || `Feishu API request failed: ${response.status}`);
+    error.statusCode = response.status;
+    error.response = data;
+    throw error;
+  }
+  return data;
+}
+
+async function getFeishuAppAccessToken() {
+  if (!feishuConfigured()) {
+    const error = new Error('Feishu app credentials are not configured');
+    error.statusCode = 400;
+    throw error;
+  }
+  const data = await feishuJson('https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal', {
+    method: 'POST',
+    body: JSON.stringify({
+      app_id: FEISHU_APP_ID,
+      app_secret: FEISHU_APP_SECRET
+    })
+  });
+  return data.app_access_token;
+}
+
+async function exchangeFeishuCode(code) {
+  const appAccessToken = await getFeishuAppAccessToken();
+  const data = await feishuJson('https://open.feishu.cn/open-apis/authen/v1/access_token', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${appAccessToken}` },
+    body: JSON.stringify({
+      grant_type: 'authorization_code',
+      code
+    })
+  });
+  const token = data.data || data;
+  const now = Date.now();
+  feishuAuthState.token = {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token || '',
+    expiresAt: now + Math.max(0, Number(token.expires_in || 0)) * 1000,
+    refreshExpiresAt: token.refresh_expires_in ? now + Number(token.refresh_expires_in) * 1000 : 0,
+    user: {
+      name: token.name || '',
+      enName: token.en_name || '',
+      email: token.email || '',
+      enterpriseEmail: token.enterprise_email || '',
+      openId: token.open_id || '',
+      unionId: token.union_id || '',
+      userId: token.user_id || '',
+      tenantKey: token.tenant_key || ''
+    },
+    updatedAt: new Date().toISOString()
+  };
+  await saveFeishuAuthState();
+  return feishuAuthState.token;
+}
+
+async function handleFeishuCallback(req, res, url) {
+  const code = String(url.searchParams.get('code') || '').trim();
+  const state = String(url.searchParams.get('state') || '').trim();
+  const error = String(url.searchParams.get('error') || '').trim();
+  cleanupFeishuPendingStates();
+  const pending = state ? feishuAuthState.pendingStates[state] : null;
+  if (!pending) {
+    sendHtml(res, 400, '<!doctype html><meta charset="utf-8"><p>飞书授权已过期，请回到 CodexMobile 重新连接。</p>');
+    return;
+  }
+  delete feishuAuthState.pendingStates[state];
+  await saveFeishuAuthState();
+  if (error) {
+    sendHtml(res, 400, `<!doctype html><meta charset="utf-8"><p>飞书授权失败：${htmlEscape(error)}</p>`);
+    return;
+  }
+  if (!code) {
+    sendHtml(res, 400, '<!doctype html><meta charset="utf-8"><p>飞书授权失败：没有收到授权码。</p>');
+    return;
+  }
+  try {
+    await exchangeFeishuCode(code);
+    const backUrl = new URL('/', pending.redirectUri).toString();
+    res.writeHead(302, { location: `${backUrl}?feishu=connected` });
+    res.end();
+  } catch (callbackError) {
+    console.warn(`[feishu] OAuth callback failed remote=${remoteAddress(req)} message=${callbackError.message}`);
+    sendHtml(res, 502, `<!doctype html><meta charset="utf-8"><p>飞书授权失败：${htmlEscape(callbackError.message)}</p>`);
+  }
 }
 
 function acceptsGzip(req) {
@@ -565,7 +783,7 @@ function broadcast(payload) {
   }
 }
 
-function publicStatus(authenticated) {
+async function publicStatus(authenticated) {
   const snapshot = getCacheSnapshot();
   const config = snapshot.config || {};
   return {
@@ -580,6 +798,7 @@ function publicStatus(authenticated) {
     voiceTranscription: publicVoiceTranscriptionStatus(config),
     voiceSpeech: publicVoiceSpeechStatus(config),
     voiceRealtime: publicVoiceRealtimeStatus(config),
+    docs: await publicDocsStatus(authenticated),
     syncedAt: snapshot.syncedAt,
     activeRuns: [...getActiveRuns(), ...getActiveImageRuns()],
     auth: {
@@ -730,7 +949,7 @@ async function handleApi(req, res, url) {
   const pathname = url.pathname;
 
   if (method === 'GET' && pathname === '/api/status') {
-    sendJson(res, 200, publicStatus(await isAuthenticated(req)));
+    sendJson(res, 200, await publicStatus(await isAuthenticated(req)));
     return;
   }
 
@@ -747,6 +966,11 @@ async function handleApi(req, res, url) {
       return;
     }
     sendJson(res, 200, paired);
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/feishu/auth/callback') {
+    await handleFeishuCallback(req, res, url);
     return;
   }
 
@@ -773,6 +997,73 @@ async function handleApi(req, res, url) {
       console.warn(`[quota] codex quota failed remote=${remoteAddress(req)} message=${error.message || 'unknown'}`);
       sendJson(res, 500, { error: 'Failed to query Codex quota' });
     }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/feishu/status') {
+    sendJson(res, 200, await publicDocsStatus(true));
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/feishu/cli/auth/start') {
+    try {
+      const auth = await startLarkCliAuth();
+      sendJson(res, 200, {
+        success: true,
+        ...auth,
+        docs: await publicDocsStatus(true)
+      });
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      console.warn(`[lark-cli] auth start failed remote=${remoteAddress(req)} message=${error.message}`);
+      sendJson(res, statusCode, { error: error.message || '飞书 CLI 授权失败' });
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/feishu/cli/auth/logout') {
+    try {
+      await logoutLarkCli();
+      sendJson(res, 200, {
+        success: true,
+        docs: await publicDocsStatus(true)
+      });
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      console.warn(`[lark-cli] auth logout failed remote=${remoteAddress(req)} message=${error.message}`);
+      sendJson(res, statusCode, { error: error.message || '断开飞书 CLI 授权失败' });
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/feishu/auth/start') {
+    if (!feishuConfigured()) {
+      sendJson(res, 400, { error: 'Feishu app credentials are not configured' });
+      return;
+    }
+    cleanupFeishuPendingStates();
+    const state = crypto.randomBytes(24).toString('base64url');
+    const redirectUri = feishuRedirectUri(req);
+    feishuAuthState.pendingStates[state] = {
+      createdAt: Date.now(),
+      redirectUri
+    };
+    await saveFeishuAuthState();
+    const authUrl = new URL('https://open.feishu.cn/open-apis/authen/v1/index');
+    authUrl.searchParams.set('app_id', FEISHU_APP_ID);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('state', state);
+    sendJson(res, 200, {
+      url: authUrl.toString(),
+      redirectUri
+    });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/feishu/auth/logout') {
+    feishuAuthState.token = null;
+    await saveFeishuAuthState();
+    sendJson(res, 200, { success: true, ...(await publicDocsStatus(true)) });
     return;
   }
 
@@ -1236,6 +1527,7 @@ async function requestHandler(req, res) {
 
 async function main() {
   const auth = await initializeAuth();
+  await loadFeishuAuthState();
   await loadRecentImagePrompts();
   await refreshCodexCache();
 
@@ -1265,10 +1557,10 @@ async function main() {
       return;
     }
 
-    wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.handleUpgrade(req, socket, head, async (ws) => {
       sockets.add(ws);
       ws.on('close', () => sockets.delete(ws));
-      ws.send(JSON.stringify({ type: 'connected', status: publicStatus(true) }));
+      ws.send(JSON.stringify({ type: 'connected', status: await publicStatus(true) }));
     });
   };
 

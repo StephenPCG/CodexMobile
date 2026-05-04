@@ -1,9 +1,15 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { buildCodexLarkCliContext } from './lark-cli.js';
+import { detectFeishuSkillKeys } from './feishu-skills.js';
 
 const activeRuns = new Map();
 const NON_ASCII_PATH_PATTERN = /[^\u0000-\u007F]/;
+const CODEXMOBILE_REPLY_INSTRUCTION = [
+  'CodexMobile iOS/PWA 回复要求：最终回复必须简短、直接。',
+  '除非用户明确要求，最终只写结果、关键链接、必要下一步；不要复述内部过程、命令日志或长篇验证细节。'
+].join('\n');
 
 async function ensureAsciiWorkingDirectory(projectPath) {
   if (process.platform !== 'win32' || !NON_ASCII_PATH_PATTERN.test(projectPath)) {
@@ -108,6 +114,16 @@ function statusLabel(kind, status = 'running') {
     error: '出现错误'
   };
   return labels[kind] || (done ? '已完成' : failed ? '失败' : '正在处理');
+}
+
+function compactStatusLabel(content, fallback = '正在处理') {
+  const label = String(content || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!label) {
+    return fallback;
+  }
+  return label.length > 68 ? `${label.slice(0, 68)}...` : label;
 }
 
 function detailFromItem(item) {
@@ -272,7 +288,21 @@ function emitCodexEvent(event, sessionId, turnId, emit, state) {
   const status = eventStatus(event, item);
   const messageId = item.id || `${turnId}-${kind}`;
 
-  if ((kind === 'message' && item.role === 'assistant') || kind === 'agent_message') {
+  if (kind === 'agent_message' || item.phase === 'commentary') {
+    const content = contentFromItem(item);
+    if (content.trim()) {
+      emitStatus(emit, {
+        sessionId,
+        turnId,
+        kind: kind === 'message' ? 'agent_message' : kind,
+        status: 'running',
+        label: compactStatusLabel(content)
+      });
+    }
+    return;
+  }
+
+  if (kind === 'message' && item.role === 'assistant') {
     const content = contentFromItem(item);
     if (content.trim()) {
       state.hadAssistantText = true;
@@ -284,6 +314,7 @@ function emitCodexEvent(event, sessionId, turnId, emit, state) {
         messageId,
         role: 'assistant',
         kind,
+        phase: item.phase || 'final_answer',
         content,
         done: done || status === 'completed'
       });
@@ -359,6 +390,14 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   const { Codex } = await import('@openai/codex-sdk');
   const workingDirectory = await ensureAsciiWorkingDirectory(projectPath);
   const { sandboxMode, approvalPolicy } = mapPermissionMode(permissionMode);
+  const feishuSkillKeys = detectFeishuSkillKeys(message);
+  const normalizedReasoningEffort = normalizeReasoningEffort(reasoningEffort);
+  const modelReasoningEffort =
+    feishuSkillKeys.length && normalizedReasoningEffort === 'xhigh' ? 'low' : normalizedReasoningEffort;
+  const larkCliContext = await buildCodexLarkCliContext(message).catch((error) => {
+    console.warn('[lark-cli] Codex context disabled:', error.message);
+    return { enabled: false, env: { ...process.env }, instruction: '' };
+  });
   const abortController = new AbortController();
   const turnId = providedTurnId || crypto.randomUUID();
   const state = { hadAssistantText: false, failed: false, usage: null };
@@ -377,14 +416,19 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   let thread = null;
 
   try {
-    const codex = new Codex({ env: { ...process.env } });
+    if (larkCliContext.enabled && larkCliContext.env) {
+      larkCliContext.env.CODEXMOBILE_TURN_ID = turnId;
+      larkCliContext.env.CODEXMOBILE_SESSION_ID = sessionId || draftSessionId || '';
+    }
+    const codex = new Codex({ env: larkCliContext.env || { ...process.env } });
     const threadOptions = {
       workingDirectory,
       skipGitRepoCheck: true,
       sandboxMode,
       approvalPolicy,
       model,
-      modelReasoningEffort: normalizeReasoningEffort(reasoningEffort)
+      modelReasoningEffort,
+      ...(larkCliContext.enabled ? { networkAccessEnabled: true } : {})
     };
 
     thread = sessionId ? codex.resumeThread(sessionId, threadOptions) : codex.startThread(threadOptions);
@@ -403,7 +447,10 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     });
     emitStatus(emit, { sessionId: currentSessionId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
 
-    const streamedTurn = await thread.runStreamed(message, { signal: abortController.signal });
+    const codexInput = [message, CODEXMOBILE_REPLY_INSTRUCTION, larkCliContext.enabled ? larkCliContext.instruction : '']
+      .filter(Boolean)
+      .join('\n\n');
+    const streamedTurn = await thread.runStreamed(codexInput, { signal: abortController.signal });
     for await (const event of streamedTurn.events) {
       const threadId = event.thread_id || event.id || event.payload?.id;
       if (event.type === 'thread.started' && threadId) {

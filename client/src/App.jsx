@@ -36,6 +36,25 @@ const DEFAULT_STATUS = {
   modelShort: '5.5 中',
   reasoningEffort: 'xhigh',
   models: [{ value: 'gpt-5.5', label: 'gpt-5.5' }],
+  docs: {
+    provider: 'feishu',
+    integration: 'lark-cli',
+    label: '飞书文档',
+    configured: false,
+    connected: false,
+    user: null,
+    homeUrl: 'https://docs.feishu.cn/',
+    cliInstalled: false,
+    skillsInstalled: false,
+    capabilities: [],
+    codexEnabled: false,
+    authorizationReady: false,
+    missingScopes: [],
+    scopeGroups: [],
+    slidesAuthorized: false,
+    sheetsAuthorized: false,
+    authPending: null
+  },
   voiceRealtime: { configured: false, model: 'qwen3.5-omni-plus-realtime', provider: '阿里百炼' },
   auth: { authenticated: false }
 };
@@ -366,26 +385,310 @@ function statusMessageId(payload) {
   return `status-${payload.turnId || payload.sessionId || 'current'}`;
 }
 
+function larkCliActivityLabel(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const lower = text.toLowerCase();
+  if (!lower.includes('lark-cli')) {
+    return '';
+  }
+
+  if (/\bauth\b/.test(lower)) {
+    return '确认飞书授权';
+  }
+
+  if (/\bsheets?\b/.test(lower)) {
+    if (/\+create|\bcreate\b/.test(lower)) {
+      return '创建表格';
+    }
+    if (/\+append|\bappend\b/.test(lower)) {
+      return '追加表格数据';
+    }
+    if (/\+write|\bwrite\b/.test(lower)) {
+      return '写入表格数据';
+    }
+    if (/\+find|\bfind\b/.test(lower)) {
+      return '查找表格内容';
+    }
+    if (/\+replace|\breplace\b/.test(lower)) {
+      return '替换表格内容';
+    }
+    if (/\+export|\bexport\b/.test(lower)) {
+      return '导出表格';
+    }
+    if (/title|rename|\bpatch\b|\bupdate\b|spreadsheet\.meta/.test(lower)) {
+      return '修改表名';
+    }
+    if (/\+read|\bread\b|\bget\b|\bmeta\b/.test(lower)) {
+      return '读取表格信息';
+    }
+    return '操作表格';
+  }
+
+  if (/\bslides?\b/.test(lower)) {
+    if (/\+create|\bcreate\b/.test(lower)) {
+      return '创建 PPT';
+    }
+    if (/\+update|\bupdate\b|\breplace\b|\bpatch\b/.test(lower)) {
+      return '修改 PPT';
+    }
+    if (/\+read|\bread\b|\bget\b|\bxml_presentations\b/.test(lower)) {
+      return '读取 PPT';
+    }
+    return '操作 PPT';
+  }
+
+  if (/\bdocs?\b/.test(lower)) {
+    if (/\+create|\bcreate\b/.test(lower)) {
+      return '创建文档';
+    }
+    if (/\+update|\bupdate\b|\bappend\b|\breplace\b|\bpatch\b/.test(lower)) {
+      return '修改文档';
+    }
+    if (/\+search|\bsearch\b/.test(lower)) {
+      return '搜索文档';
+    }
+    if (/\+fetch|\bread\b|\bget\b|\bfetch\b/.test(lower)) {
+      return '读取文档';
+    }
+    return '操作文档';
+  }
+
+  if (/\bdrive\b/.test(lower)) {
+    if (/\+import|\bimport\b/.test(lower)) {
+      return '导入文件';
+    }
+    if (/\+upload|\bupload\b/.test(lower)) {
+      return '上传文件';
+    }
+    if (/\+download|\bdownload\b/.test(lower)) {
+      return '下载文件';
+    }
+    if (/\+delete|\bdelete\b|\btrash\b/.test(lower)) {
+      return '删除文件';
+    }
+    if (/\+move|\bmove\b/.test(lower)) {
+      return '移动文件';
+    }
+    if (/title|rename|\bpatch\b|\bupdate\b/.test(lower)) {
+      return '修改文件名';
+    }
+    if (/\+search|\bsearch\b/.test(lower)) {
+      return '搜索云空间';
+    }
+    return '操作云空间';
+  }
+
+  return '';
+}
+
+function shellCommandActivityLabel(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const lower = text.toLowerCase();
+  if (!text) {
+    return '';
+  }
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?build\b|\bvite\s+build\b|\bwebpack\b|\brollup\b/.test(lower)) {
+    return '构建前端';
+  }
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?smoke\b|\bsmoke\.mjs\b/.test(lower)) {
+    return '运行冒烟检查';
+  }
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b|\bpytest\b|\bvitest\b|\bjest\b|\bmvn\b.*\btest\b|\bcargo\s+test\b/.test(lower)) {
+    return '运行测试';
+  }
+  if (/\bnode\s+--check\b|\btsc\b|\beslint\b|\bbiome\b|\bprettier\b|\bflake8\b|\bmypy\b/.test(lower)) {
+    return '检查代码';
+  }
+  if (/\bgit\s+(status|diff|show|log|ls-files)\b/.test(lower)) {
+    return '检查改动';
+  }
+  if (/\b(get-content|select-string|rg|findstr|grep)\b/.test(lower)) {
+    return /\b(select-string|rg|findstr|grep)\b/.test(lower) ? '搜索代码' : '读取文件';
+  }
+  if (/\b(get-childitem|ls|dir)\b/.test(lower)) {
+    return '查看文件';
+  }
+  if (/\b(start-process|node\s+server\/index\.js|node\s+server\\index\.js)\b/.test(lower)) {
+    return '启动服务';
+  }
+  return '';
+}
+
+function meaningfulActivityLabel(payload, rawLabel, detail) {
+  const source = [payload.command, detail, rawLabel, payload.output]
+    .filter(Boolean)
+    .join(' ');
+  const larkLabel = larkCliActivityLabel(source);
+  if (larkLabel) {
+    return larkLabel;
+  }
+  const commandLabel = shellCommandActivityLabel(payload.command || detail);
+  if (commandLabel) {
+    return commandLabel;
+  }
+
+  if (payload.kind === 'agent_message' || payload.kind === 'message' || payload.kind === 'reasoning') {
+    return briefActivityLabel(rawLabel || payload.content || detail);
+  }
+
+  if (isGenericActivityLabel(rawLabel)) {
+    return '';
+  }
+
+  return rawLabel && rawLabel.length <= 18 ? rawLabel : '';
+}
+
+function isGenericActivityLabel(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) {
+    return true;
+  }
+  return /^(正在思考中?|思考完成|正在处理|正在回复|正在整理回复|正在准备任务|正在修改并验证|正在执行命令|命令已完成|命令完成|命令执行完成|执行完成|工具调用完成|正在调用工具|工具调用失败|工具已完成|计划已更新|正在规划|任务已完成|已完成|完成|失败)$/i.test(text);
+}
+
+function activityStepFromPayload(payload, fallbackKind = 'status') {
+  const rawLabel = String(payload.label || payload.content || '').replace(/\s+/g, ' ').trim();
+  const detail = String(payload.detail || payload.error || '').replace(/\s+/g, ' ').trim();
+  const label = meaningfulActivityLabel(payload, rawLabel, detail);
+  if (!label) {
+    return null;
+  }
+  return {
+    id: payload.messageId || `${statusMessageId(payload)}-${payload.kind || fallbackKind}-${label || payload.status || 'step'}`,
+    kind: payload.kind || fallbackKind,
+    label,
+    status: payload.status || 'running',
+    detail,
+    command: payload.command || '',
+    output: payload.output || '',
+    error: payload.error || '',
+    fileChanges: payload.fileChanges || [],
+    timestamp: payload.timestamp || new Date().toISOString()
+  };
+}
+
+function briefActivityLabel(value, fallback = '正在处理') {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) {
+    return '';
+  }
+  if (/授权|登录|连接/.test(text)) {
+    return '确认授权';
+  }
+  if (/记忆|skill|技能|能力|scope|权限/i.test(text)) {
+    return '';
+  }
+  if (/搜索|查找|定位/.test(text)) {
+    return '查找文件';
+  }
+  if (/创建|新建|生成/.test(text)) {
+    return '创建文件';
+  }
+  if (/改名|重命名|修改标题|rename/i.test(text) && /验证|确认|检查|读取/.test(text)) {
+    return '修改并验证';
+  }
+  if (/改名|重命名|修改标题|rename/i.test(text)) {
+    return '修改标题';
+  }
+  if (/读取|获取|标题|内容/.test(text)) {
+    return '读取内容';
+  }
+  if (/修改|更新|写入|追加|替换|编辑/.test(text)) {
+    return '修改内容';
+  }
+  if (/上传|导入/.test(text)) {
+    return '上传文件';
+  }
+  if (/下载|导出/.test(text)) {
+    return '导出文件';
+  }
+  if (/删除|移除/.test(text)) {
+    return '删除文件';
+  }
+  if (/验证|确认|检查/.test(text)) {
+    return '验证结果';
+  }
+  if (/命令|lark-cli|PowerShell|shell|执行/i.test(text)) {
+    return '';
+  }
+  return text.length > 18 ? '' : text;
+}
+
+function mergeActivityStep(currentSteps, step) {
+  if (!step) {
+    return currentSteps || [];
+  }
+  const steps = [...(currentSteps || [])];
+  const existingIndex = steps.findIndex((item) => item.id === step.id);
+  if (existingIndex >= 0) {
+    steps[existingIndex] = { ...steps[existingIndex], ...step };
+    return steps.slice(-8);
+  }
+  const sameWorkIndex = steps.findIndex(
+    (item) =>
+      item.kind === step.kind &&
+      item.label === step.label &&
+      (item.command || '') === (step.command || '')
+  );
+  if (sameWorkIndex >= 0) {
+    steps[sameWorkIndex] = { ...steps[sameWorkIndex], ...step };
+    return steps.slice(-8);
+  }
+  const last = steps[steps.length - 1];
+  if (last && last.label === step.label && last.detail === step.detail && last.status === step.status) {
+    return steps;
+  }
+  return [...steps, step].slice(-8);
+}
+
+function isVisibleActivityStep(step, messageStatus) {
+  if (!step) {
+    return false;
+  }
+  const label = String(step.label || '').trim();
+  if (isGenericActivityLabel(label)) {
+    return false;
+  }
+  if (
+    ['reasoning', 'message', 'agent_message'].includes(step.kind) &&
+    /^(正在思考中?|正在处理|正在回复|正在整理回复)$/.test(label)
+  ) {
+    return false;
+  }
+  if (messageStatus !== 'failed' && step.kind === 'command_execution' && step.status === 'failed') {
+    return false;
+  }
+  if (messageStatus !== 'failed' && /blocked by policy|rejected/i.test(`${step.detail || ''}\n${step.output || ''}\n${step.error || ''}`)) {
+    return false;
+  }
+  return true;
+}
+
 function upsertStatusMessage(current, payload) {
   const id = statusMessageId(payload);
   const existingIndex = current.findIndex((message) => message.id === id);
   const previous = existingIndex >= 0 ? current[existingIndex] : null;
+  const normalizedPayload =
+    payload.kind === 'agent_message'
+      ? { ...payload, label: briefActivityLabel(payload.label || payload.content) }
+      : payload;
   const detail =
-    payload.kind === 'reasoning'
+    normalizedPayload.kind === 'reasoning'
       ? previous?.detail || ''
-      : payload.detail || previous?.detail || '';
+      : normalizedPayload.detail || previous?.detail || '';
+  const isTurnLevel = normalizedPayload.kind === 'turn' || normalizedPayload.kind === 'error';
   const nextMessage = {
     id,
     role: 'activity',
-    turnId: payload.turnId || previous?.turnId || null,
-    sessionId: payload.sessionId || previous?.sessionId || null,
-    content: payload.label || previous?.content || '正在处理',
-    label: payload.label || previous?.label || '正在处理',
+    turnId: normalizedPayload.turnId || previous?.turnId || null,
+    sessionId: normalizedPayload.sessionId || previous?.sessionId || null,
+    content: isTurnLevel ? (normalizedPayload.label || previous?.content || '正在处理') : (previous?.content || '正在处理'),
+    label: isTurnLevel ? (normalizedPayload.label || previous?.label || '正在处理') : (previous?.label || '正在处理'),
     detail,
-    kind: payload.kind || previous?.kind || 'turn',
-    status: payload.status || previous?.status || 'running',
-    timestamp: payload.timestamp || previous?.timestamp || new Date().toISOString(),
-    activities: previous?.activities || []
+    kind: normalizedPayload.kind || previous?.kind || 'turn',
+    status: isTurnLevel ? (normalizedPayload.status || previous?.status || 'running') : (previous?.status || 'running'),
+    timestamp: normalizedPayload.timestamp || previous?.timestamp || new Date().toISOString(),
+    activities: mergeActivityStep(previous?.activities || [], activityStepFromPayload(normalizedPayload))
   };
 
   if (existingIndex >= 0) {
@@ -400,36 +703,25 @@ function upsertActivityMessage(current, payload) {
   const id = statusMessageId(payload);
   const existingIndex = current.findIndex((message) => message.id === id);
   const previous = existingIndex >= 0 ? current[existingIndex] : null;
-  const activity = {
-    id: payload.messageId || `${id}-${payload.kind || 'activity'}`,
-    kind: payload.kind || 'activity',
-    label: payload.label || '工具调用',
-    status: payload.status || 'running',
-    detail: payload.detail || payload.command || payload.output || payload.error || '',
-    command: payload.command || '',
-    output: payload.output || '',
-    error: payload.error || '',
-    fileChanges: payload.fileChanges || [],
-    timestamp: payload.timestamp || new Date().toISOString()
-  };
-  const activities = [...(previous?.activities || [])];
-  const activityIndex = activities.findIndex((item) => item.id === activity.id);
-  if (activityIndex >= 0) {
-    activities[activityIndex] = activity;
-  } else {
-    activities.push(activity);
+  const isTurnLevel = payload.kind === 'turn' || payload.kind === 'error';
+  const activity = activityStepFromPayload(payload, 'activity');
+  if (!activity && !previous) {
+    return current;
   }
+  const activities = activity
+    ? mergeActivityStep(previous?.activities || [], activity)
+    : previous?.activities || [];
 
   const nextMessage = {
     id,
     role: 'activity',
     turnId: payload.turnId || previous?.turnId || null,
     sessionId: payload.sessionId || previous?.sessionId || null,
-    content: payload.label || previous?.content || '正在处理',
-    label: payload.label || previous?.label || '正在处理',
-    detail: payload.detail || previous?.detail || activity.detail || '',
+    content: previous?.content || '正在处理',
+    label: previous?.label || '正在处理',
+    detail: payload.detail || previous?.detail || activity?.detail || '',
     kind: payload.kind || previous?.kind || 'activity',
-    status: payload.status || previous?.status || 'running',
+    status: isTurnLevel ? (payload.status || previous?.status || 'running') : (previous?.status || 'running'),
     timestamp: previous?.timestamp || payload.timestamp || new Date().toISOString(),
     activities
   };
@@ -444,16 +736,56 @@ function upsertActivityMessage(current, payload) {
 
 function completeStatusMessage(current, payload) {
   const id = statusMessageId(payload);
-  if (hasVisibleAssistantForTurn(current, payload)) {
-    return current.filter((message) => message.id !== id);
-  }
+  return current.filter((message) => message.id !== id);
+}
 
-  return upsertStatusMessage(current, {
-    ...payload,
-    status: 'completed',
-    label: '任务已完成，未返回文本内容',
-    detail: payload.usage ? `tokens: ${JSON.stringify(payload.usage)}` : ''
+function hasAssistantMessageForTurn(messages, payload) {
+  return messages.some(
+    (message) =>
+      message.role === 'assistant' &&
+      payload?.turnId &&
+      message.turnId === payload.turnId &&
+      typeof message.content === 'string' &&
+      message.content.trim()
+  );
+}
+
+function removeActivityMessagesForTurn(messages, payload) {
+  const keys = new Set(payloadRunKeys(payload));
+  if (!keys.size) {
+    return messages;
+  }
+  return messages.filter((message) => {
+    if (message.role !== 'activity') {
+      return true;
+    }
+    return !payloadRunKeys(message).some((key) => keys.has(key));
   });
+}
+
+function upsertAssistantMessage(current, payload) {
+  const content = String(payload.content || '').trim();
+  if (!content) {
+    return current;
+  }
+  const id = payload.messageId || `assistant-${payload.turnId || Date.now()}`;
+  const nextMessage = {
+    id,
+    role: 'assistant',
+    content,
+    timestamp: new Date().toISOString(),
+    turnId: payload.turnId || null,
+    sessionId: payload.sessionId || null,
+    kind: payload.kind
+  };
+  const withoutActivity = removeActivityMessagesForTurn(current, payload);
+  const existingIndex = withoutActivity.findIndex((message) => message.id === id);
+  if (existingIndex >= 0) {
+    const next = [...withoutActivity];
+    next[existingIndex] = nextMessage;
+    return next;
+  }
+  return [...withoutActivity, nextMessage];
 }
 
 function PairingScreen({ onPaired }) {
@@ -844,7 +1176,7 @@ function Drawer({
   );
 }
 
-function TopBar({ selectedProject, connectionState, onMenu }) {
+function TopBar({ selectedProject, connectionState, onMenu, onOpenDocs }) {
   const status = CONNECTION_STATUS[connectionState] || CONNECTION_STATUS.disconnected;
   return (
     <header className="top-bar">
@@ -858,47 +1190,189 @@ function TopBar({ selectedProject, connectionState, onMenu }) {
           {status.label}
         </span>
       </div>
+      <button type="button" className="icon-button" onClick={onOpenDocs} aria-label="打开文档">
+        <FeishuLogoIcon size={23} className="top-docs-logo" />
+      </button>
     </header>
   );
 }
 
+function FeishuLogoIcon({ size = 30, className = '' }) {
+  return (
+    <svg
+      className={className}
+      width={size}
+      height={size}
+      viewBox="0 0 64 64"
+      role="img"
+      aria-label="飞书"
+    >
+      <rect x="4" y="4" width="56" height="56" rx="15" fill="#fff" />
+      <path
+        d="M24 15h16.4c2.2 0 3.4.7 4.7 2.5 4.1 5.7 6.5 12.2 7 19.6-6.4-5.5-13.3-8.5-20.4-8.7L24 15Z"
+        fill="#12C9B7"
+      />
+      <path
+        d="M14.5 25.8c7.1 7.9 15.3 13.8 24.5 17.8 7.4 3.2 14.7 2.7 21.4-1.6-5.7 9.6-14.7 15.1-27 16.4-7.1.8-13.9-.1-20.5-2.8-2.4-1-4.2-3.2-4.2-5.9V28.1c0-2.3 2.4-3.8 5.8-2.3Z"
+        fill="#3A73F6"
+      />
+      <path
+        d="M30.8 38.4c8.7-9.7 18.3-14.1 28.8-8.7-4.8 9.1-12.2 16.1-21.5 17.2-5.8.7-11.7-1-17.8-5.1 3.7-.5 7.2-1.6 10.5-3.4Z"
+        fill="#1F45A7"
+      />
+    </svg>
+  );
+}
+
+function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, onOpenHome, onOpenAuth, onRefresh }) {
+  if (!open) {
+    return null;
+  }
+
+  const cliInstalled = Boolean(docs?.cliInstalled);
+  const skillsInstalled = Boolean(docs?.skillsInstalled);
+  const configured = Boolean(docs?.configured);
+  const connected = Boolean(docs?.connected);
+  const authorizationReady = connected && Boolean(docs?.authorizationReady);
+  const missingScopes = Array.isArray(docs?.missingScopes) ? docs.missingScopes : [];
+  const needsExtraAuth = connected && (!authorizationReady || missingScopes.length > 0);
+  const slidesAuthorized = connected && Boolean(docs?.slidesAuthorized);
+  const sheetsAuthorized = connected && Boolean(docs?.sheetsAuthorized);
+  const authPending = docs?.authPending;
+  const setupItems = [
+    { id: 'cli', label: 'lark-cli', ok: cliInstalled },
+    { id: 'skills', label: '官方 skills', ok: skillsInstalled },
+    { id: 'config', label: 'App 凭证', ok: configured },
+    { id: 'auth', label: '用户授权', ok: connected },
+    { id: 'slides', label: 'PPT 权限', ok: slidesAuthorized },
+    { id: 'sheets', label: '表格权限', ok: sheetsAuthorized }
+  ];
+  const subtitle = connected
+    ? needsExtraAuth
+      ? '待补权限'
+      : ''
+    : authPending?.status === 'polling'
+      ? '等待授权'
+      : configured
+        ? '未连接'
+        : '未配置';
+  const summary = authPending?.status === 'polling'
+      ? '授权页已打开，完成后回到这里刷新状态。'
+      : connected
+        ? needsExtraAuth
+          ? '飞书账号已连接，但部分文档权限还没授权。补充授权后，Codex 可完整操作飞书文档、PPT、表格和云空间文件。'
+          : 'Codex 已可操作飞书文档、PPT、表格和云空间文件。'
+        : !cliInstalled
+          ? '本机还没有检测到 lark-cli。'
+          : !skillsInstalled
+            ? '官方文档 skills 还没有安装完整。'
+            : configured
+              ? '连接飞书账号后，Codex 才能以你的身份操作文档、PPT 和表格。'
+              : '请先在后端配置飞书 App ID 和 Secret。';
+  const canConnect = cliInstalled && skillsInstalled && configured;
+
+  return (
+    <section className="docs-panel" role="dialog" aria-modal="true" aria-label="飞书文档">
+      <header className="docs-panel-header">
+        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭文档">
+          <ChevronLeft size={22} />
+        </button>
+        <div className="docs-panel-title">
+          <strong>飞书文档</strong>
+          {subtitle ? <span>{subtitle}</span> : null}
+        </div>
+        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭文档">
+          <X size={20} />
+        </button>
+      </header>
+      <div className="docs-panel-body">
+        <div className="docs-status-state">
+          <div className="docs-status-icon">
+            <FeishuLogoIcon size={58} />
+          </div>
+          <h2>飞书文档</h2>
+          <p>{summary}</p>
+          {error ? <div className="docs-panel-error">{error}</div> : null}
+          {authPending?.verificationUrl && (!connected || needsExtraAuth) ? (
+            <div className="docs-auth-box">
+              <span>授权码 {authPending.userCode || '已生成'}</span>
+              <button type="button" onClick={() => onOpenAuth(authPending.verificationUrl)}>
+                打开授权页
+              </button>
+            </div>
+          ) : null}
+          <div className="docs-check-list">
+            {setupItems.map((item) => (
+              <div key={item.id} className={item.ok ? 'is-ok' : ''}>
+                {item.ok ? <Check size={15} /> : <X size={15} />}
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </div>
+          {needsExtraAuth && missingScopes.length ? (
+            <div className="docs-scope-hint">
+              缺少 {missingScopes.slice(0, 4).join('、')}
+            </div>
+          ) : null}
+          <div className="docs-panel-actions">
+            {connected ? (
+              <>
+                <button type="button" onClick={needsExtraAuth ? onConnect : onOpenHome} disabled={needsExtraAuth && busy}>
+                  {needsExtraAuth ? (
+                    busy ? <Loader2 className="spin" size={16} /> : <ShieldCheck size={16} />
+                  ) : (
+                    <FeishuLogoIcon size={18} />
+                  )}
+                  {needsExtraAuth ? '补充授权' : '打开飞书'}
+                </button>
+                <button type="button" onClick={onDisconnect} disabled={busy}>
+                  {busy ? <Loader2 className="spin" size={16} /> : <X size={16} />}
+                  断开
+                </button>
+                <button type="button" onClick={onRefresh} disabled={busy}>
+                  <RefreshCw size={16} />
+                  刷新
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={onConnect} disabled={!canConnect || busy}>
+                  {busy ? <Loader2 className="spin" size={16} /> : <ShieldCheck size={16} />}
+                  连接飞书
+                </button>
+                <button type="button" onClick={onRefresh} disabled={busy}>
+                  <RefreshCw size={16} />
+                  刷新
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ActivityMessage({ message }) {
-  const [expanded, setExpanded] = useState(false);
   const running = message.status === 'running' || message.status === 'queued';
   const failed = message.status === 'failed';
   const activities = message.activities || [];
-  const hasDetails = Boolean(message.detail || activities.length);
+  const visibleSteps = activities.filter((activity) => isVisibleActivityStep(activity, message.status)).slice(-4);
+  const headline = running ? '正在思考中' : message.label || message.content || '正在处理';
 
   return (
     <div className="message-row is-activity">
       <div className={`message-bubble activity-bubble ${failed ? 'is-failed' : ''}`}>
-        <button
-          type="button"
-          className="activity-summary"
-          onClick={() => hasDetails && setExpanded((current) => !current)}
-          disabled={!hasDetails}
-        >
+        <div className="activity-summary" role="status" aria-live="polite">
           {running ? <Loader2 className="spin" size={15} /> : failed ? <X size={15} /> : <Check size={15} />}
-          <span>{message.label || message.content || '正在处理'}</span>
-          {hasDetails ? <ChevronDown className={expanded ? 'is-expanded' : ''} size={15} /> : null}
-        </button>
-        {expanded && hasDetails ? (
-          <div className="activity-detail">
-            {message.detail ? <pre>{message.detail}</pre> : null}
-            {activities.map((activity) => (
-              <div key={activity.id} className="activity-item">
-                <strong>{activity.label}</strong>
-                {activity.detail ? <pre>{activity.detail}</pre> : null}
-                {activity.command ? <code>{activity.command}</code> : null}
-                {activity.output ? <pre>{activity.output}</pre> : null}
-                {activity.fileChanges?.length ? (
-                  <ul>
-                    {activity.fileChanges.map((change, index) => (
-                      <li key={`${activity.id}-${index}`}>{`${change.kind || 'update'} ${change.path}`}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                {activity.error ? <em>{activity.error}</em> : null}
+          <span>{headline}</span>
+        </div>
+        {visibleSteps.length ? (
+          <div className="activity-steps" aria-label="任务进度">
+            {visibleSteps.map((activity) => (
+              <div key={activity.id} className={`activity-step is-${activity.status || 'running'}`}>
+                <span className="activity-step-dot" />
+                <span>{activity.label}</span>
               </div>
             ))}
           </div>
@@ -1014,20 +1488,73 @@ function MessageContent({ content, onPreviewImage }) {
   }
 
   if (!parts.length) {
-    return <div className="message-content">{text}</div>;
+    return <div className="message-content">{renderInlineText(text, 'message-root')}</div>;
   }
+
+  const rendered = [];
+  parts.forEach((part, index) => {
+    if (part.type === 'image') {
+      rendered.push(<GeneratedImage key={`${part.url}-${index}`} part={part} onPreviewImage={onPreviewImage} />);
+      return;
+    }
+    rendered.push(...renderInlineText(part.value, `message-${index}`));
+  });
 
   return (
     <div className="message-content">
-      {parts.map((part, index) =>
-        part.type === 'image' ? (
-          <GeneratedImage key={`${part.url}-${index}`} part={part} onPreviewImage={onPreviewImage} />
-        ) : (
-          <span key={`text-${index}`}>{part.value}</span>
-        )
-      )}
+      {rendered}
     </div>
   );
+}
+
+function normalizeInlineHref(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  if (/^https?:\/\//i.test(raw) || /^mailto:/i.test(raw)) {
+    return raw;
+  }
+  return `https://${raw}`;
+}
+
+function renderInlineText(text, keyPrefix) {
+  const value = String(text || '');
+  const pattern = /\[([^\]]+)\]\(((?:https?:\/\/|www\.)[^\s)]+)\)|((?:https?:\/\/|www\.)[^\s<>()]+)/gi;
+  const nodes = [];
+  let lastIndex = 0;
+  let match;
+  let partIndex = 0;
+
+  while ((match = pattern.exec(value))) {
+    if (match.index > lastIndex) {
+      nodes.push(<span key={`${keyPrefix}-text-${partIndex++}`}>{value.slice(lastIndex, match.index)}</span>);
+    }
+
+    if (match[1] && match[2]) {
+      const href = normalizeInlineHref(match[2]);
+      nodes.push(
+        <a key={`${keyPrefix}-link-${partIndex++}`} href={href} target="_blank" rel="noreferrer noopener">
+          {match[1]}
+        </a>
+      );
+    } else if (match[3]) {
+      const href = normalizeInlineHref(match[3]);
+      nodes.push(
+        <a key={`${keyPrefix}-link-${partIndex++}`} href={href} target="_blank" rel="noreferrer noopener">
+          {match[3]}
+        </a>
+      );
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < value.length) {
+    nodes.push(<span key={`${keyPrefix}-text-${partIndex++}`}>{value.slice(lastIndex)}</span>);
+  }
+
+  return nodes.length ? nodes : [<span key={`${keyPrefix}-text-0`}>{value}</span>];
 }
 
 function ChatMessage({ message, onPreviewImage, onDeleteMessage }) {
@@ -1085,7 +1612,6 @@ function ChatMessage({ message, onPreviewImage, onDeleteMessage }) {
 
 function ChatPane({ messages, selectedSession, running, onPreviewImage, onDeleteMessage }) {
   const bottomRef = useRef(null);
-  const hasRunningActivity = messages.some((message) => message.role === 'activity' && message.status === 'running');
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -1113,14 +1639,6 @@ function ChatPane({ messages, selectedSession, running, onPreviewImage, onDelete
           onDeleteMessage={onDeleteMessage}
         />
       ))}
-      {running && !hasRunningActivity ? (
-        <div className="message-row is-activity">
-          <div className="message-bubble">
-            <Loader2 className="spin" size={16} />
-            正在处理
-          </div>
-        </div>
-      ) : null}
       <div ref={bottomRef} />
     </section>
   );
@@ -1624,6 +2142,9 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState(null);
   const [messages, setMessages] = useState([]);
   const [previewImage, setPreviewImage] = useState(null);
+  const [docsOpen, setDocsOpen] = useState(false);
+  const [docsBusy, setDocsBusy] = useState(false);
+  const [docsError, setDocsError] = useState('');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [uploading, setUploading] = useState(false);
@@ -1650,6 +2171,7 @@ export default function App() {
   const runningByIdRef = useRef({});
   const lastLocalRunAtRef = useRef(0);
   const activePollsRef = useRef(new Set());
+  const turnRefreshTimersRef = useRef(new Map());
   const voiceDialogRecorderRef = useRef(null);
   const voiceDialogChunksRef = useRef([]);
   const voiceDialogStreamRef = useRef(null);
@@ -2702,24 +3224,12 @@ export default function App() {
     if (!activeRuns.length) {
       setMessages((current) => {
         const hasRecentLocalRun = Date.now() - lastLocalRunAtRef.current < 15000;
-        if (activePollsRef.current.size || hasRecentLocalRun) {
+        if (activePollsRef.current.size || turnRefreshTimersRef.current.size || hasRecentLocalRun) {
           return current;
         }
-        let changed = false;
-        const next = current.map((message) => {
-          if (message.role === 'activity' && (message.status === 'running' || message.status === 'queued')) {
-            changed = true;
-            return {
-              ...message,
-              status: 'completed',
-              label: '没有正在运行的任务，请重新发送',
-              content: '没有正在运行的任务，请重新发送',
-              detail: message.detail || '后端当前没有运行中的任务'
-            };
-          }
-          return message;
-        });
-        return changed ? next : current;
+        return current.filter(
+          (message) => !(message.role === 'activity' && (message.status === 'running' || message.status === 'queued'))
+        );
       });
       return;
     }
@@ -2731,23 +3241,12 @@ export default function App() {
       }
     }
     const shouldPreserveLocalRuns =
-      activePollsRef.current.size > 0 || Date.now() - lastLocalRunAtRef.current < 15000;
+      activePollsRef.current.size > 0 ||
+      turnRefreshTimersRef.current.size > 0 ||
+      Date.now() - lastLocalRunAtRef.current < 15000;
     setRunningById((current) => {
       const next = shouldPreserveLocalRuns ? { ...current, ...nextRunning } : nextRunning;
       runningByIdRef.current = next;
-      return next;
-    });
-    setMessages((current) => {
-      let next = current;
-      for (const run of activeRuns) {
-        if (payloadMatchesCurrentConversation(run)) {
-          next = upsertStatusMessage(next, {
-            ...run,
-            status: run.status || 'running',
-            label: run.label || '正在处理'
-          });
-        }
-      }
       return next;
     });
   }
@@ -2761,20 +3260,93 @@ export default function App() {
     return keys.includes(current.id) || keys.includes(current.turnId);
   }
 
+  function clearTurnRefreshTimer(turnId) {
+    if (!turnId) {
+      return;
+    }
+    const timer = turnRefreshTimersRef.current.get(turnId);
+    if (timer) {
+      window.clearTimeout(timer);
+      turnRefreshTimersRef.current.delete(turnId);
+    }
+  }
+
   async function refreshMessagesForPayload(payload) {
     if (!payload?.sessionId || !payloadMatchesCurrentConversation(payload)) {
       return false;
     }
     try {
       const data = await apiFetch(`/api/sessions/${encodeURIComponent(payload.sessionId)}/messages?limit=120`);
-      if (data.messages?.length) {
+      if (data.messages?.length && hasVisibleAssistantForTurn(data.messages, payload)) {
         setMessages(data.messages);
-        return hasVisibleAssistantForTurn(data.messages, payload);
+        return true;
       }
     } catch {
       return false;
     }
     return false;
+  }
+
+  function finalizeTurnWithoutAssistant(payload) {
+    if (!payload?.turnId) {
+      return;
+    }
+    clearTurnRefreshTimer(payload.turnId);
+    setMessages((current) =>
+      upsertStatusMessage(current, {
+        ...payload,
+        status: 'completed',
+        label: '任务已完成',
+        detail: payload.error || payload.detail || ''
+      })
+    );
+    clearRun(payload);
+  }
+
+  function markTurnCompleted(payload, detail = '结果同步中') {
+    if (!payload?.turnId) {
+      return;
+    }
+    setMessages((current) => {
+      if (hasAssistantMessageForTurn(current, payload)) {
+        return removeActivityMessagesForTurn(current, payload);
+      }
+      return upsertStatusMessage(current, {
+        ...payload,
+        kind: 'turn',
+        status: 'running',
+        label: '正在思考中',
+        detail
+      });
+    });
+  }
+
+  function scheduleTurnRefresh(payload, attempt = 0) {
+    const turnId = payload?.turnId;
+    if (!turnId || !payload?.sessionId || !payloadMatchesCurrentConversation(payload)) {
+      return;
+    }
+    clearTurnRefreshTimer(turnId);
+    const delays = [300, 800, 1500, 2500, 4000, 6500, 10000, 15000, 22000, 30000, 30000];
+    const delay = delays[attempt];
+    if (delay === undefined) {
+      finalizeTurnWithoutAssistant(payload);
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      if (!payloadMatchesCurrentConversation(payload)) {
+        return;
+      }
+      const loaded = await refreshMessagesForPayload(payload);
+      if (loaded) {
+        clearTurnRefreshTimer(turnId);
+        clearRun(payload);
+        return;
+      }
+      scheduleTurnRefresh(payload, attempt + 1);
+    }, delay);
+    turnRefreshTimersRef.current.set(turnId, timer);
   }
 
   useEffect(() => {
@@ -2786,6 +3358,16 @@ export default function App() {
   }, [selectedSession]);
 
   useEffect(() => () => closeVoiceDialog(), []);
+
+  useEffect(
+    () => () => {
+      for (const timer of turnRefreshTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      turnRefreshTimersRef.current.clear();
+    },
+    []
+  );
 
   useEffect(() => {
     const awaiting = voiceDialogAwaitingTurnRef.current;
@@ -2978,13 +3560,6 @@ export default function App() {
         if (!selectedSessionRef.current && payload.sessionId) {
           setSelectedSession({ id: payload.sessionId, projectId: payload.projectId, title: '新对话' });
         }
-        setMessages((current) =>
-          upsertStatusMessage(current, {
-            ...payload,
-            status: 'running',
-            label: '正在思考'
-          })
-        );
         return;
       }
       if (payload.type === 'thread-started' && payload.sessionId) {
@@ -3051,24 +3626,29 @@ export default function App() {
         if (!payloadMatchesCurrentConversation(payload)) {
           return;
         }
-        setMessages((current) => {
-          const existingIndex = current.findIndex((message) => message.id === payload.messageId);
-          const nextMessage = {
-            id: payload.messageId,
-            role: 'assistant',
-            content: payload.content,
-            timestamp: new Date().toISOString(),
-            turnId: payload.turnId || null,
-            sessionId: payload.sessionId || null,
-            kind: payload.kind
-          };
-          if (existingIndex >= 0) {
-            const next = [...current];
-            next[existingIndex] = nextMessage;
-            return next;
-          }
-          return [...current, nextMessage];
-        });
+        if (payload.phase === 'commentary' || payload.kind === 'agent_message') {
+          setMessages((current) =>
+            upsertStatusMessage(current, {
+              ...payload,
+              kind: payload.kind || 'agent_message',
+              label: briefActivityLabel(payload.content),
+              status: payload.status || 'running'
+            })
+          );
+          return;
+        }
+        if (!payload.done) {
+          setMessages((current) =>
+            upsertStatusMessage(current, {
+              ...payload,
+              kind: payload.kind || 'message',
+              label: '正在整理回复',
+              status: payload.status || 'running'
+            })
+          );
+          return;
+        }
+        setMessages((current) => upsertAssistantMessage(current, payload));
         return;
       }
       if (payload.type === 'status-update') {
@@ -3076,6 +3656,10 @@ export default function App() {
           markRun(payload);
         }
         if (!payloadMatchesCurrentConversation(payload)) {
+          return;
+        }
+        if (payload.kind === 'turn' && payload.status === 'completed') {
+          markTurnCompleted(payload);
           return;
         }
         setMessages((current) => upsertStatusMessage(current, payload));
@@ -3092,31 +3676,13 @@ export default function App() {
         return;
       }
       if (payload.type === 'chat-complete' || payload.type === 'chat-error' || payload.type === 'chat-aborted') {
-        if (!payloadMatchesCurrentConversation(payload)) {
+      if (!payloadMatchesCurrentConversation(payload)) {
           clearRun(payload);
           return;
         }
         if (payload.type === 'chat-complete') {
-          if (payload.hadAssistantText) {
-            setMessages((current) =>
-              hasVisibleAssistantForTurn(current, payload)
-                ? completeStatusMessage(current, payload)
-                : upsertStatusMessage(current, {
-                    ...payload,
-                    status: 'running',
-                    label: '正在同步最终回复'
-                  })
-            );
-            refreshMessagesForPayload(payload).then((loaded) => {
-              if (!loaded) {
-                setMessages((current) => completeStatusMessage(current, payload));
-              }
-              clearRun(payload);
-            });
-            return;
-          }
-          setMessages((current) => completeStatusMessage(current, payload));
-          clearRun(payload);
+          markTurnCompleted(payload);
+          scheduleTurnRefresh(payload);
           return;
         }
         clearRun(payload);
@@ -3276,7 +3842,7 @@ export default function App() {
 
     const title = session.title || '\u5bf9\u8bdd';
     const confirmed = window.confirm(
-      `\u6c38\u4e45\u5220\u9664\u7ebf\u7a0b\u201c${title}\u201d\uff1f\u5220\u9664\u540e Codex App \u4e2d\u4e5f\u4e0d\u4f1a\u518d\u663e\u793a\u3002`
+      `\u4ece CodexMobile \u9690\u85cf\u7ebf\u7a0b\u201c${title}\u201d\uff1f\u4e0d\u4f1a\u5f71\u54cd Codex App \u7684\u539f\u59cb\u4f1a\u8bdd\u3002`
     );
     if (!confirmed) {
       return;
@@ -3470,7 +4036,7 @@ export default function App() {
       return false;
     }
     const data = await apiFetch(`/api/sessions/${encodeURIComponent(realSessionId)}/messages?limit=120`);
-    if (data.messages?.length) {
+    if (data.messages?.length && hasVisibleAssistantForTurn(data.messages, { turnId })) {
       setMessages(data.messages);
       return true;
     }
@@ -3526,33 +4092,26 @@ export default function App() {
           break;
         }
         if (turn.status === 'completed') {
+          const terminalPayload = {
+            sessionId: realSessionId || optimisticSessionId,
+            turnId,
+            previousSessionId,
+            detail: turn.detail || ''
+          };
+          markTurnCompleted(terminalPayload);
           const loaded = await loadTurnMessages(realSessionId, turnId, optimisticSessionId, previousSessionId);
-          if (!loaded) {
-            setMessages((current) =>
-              completeStatusMessage(current, {
-                type: 'chat-complete',
-                sessionId: realSessionId || optimisticSessionId,
-                turnId,
-                hadAssistantText: turn.hadAssistantText || Boolean(turn.assistantPreview),
-                usage: turn.usage || null
-              })
-            );
-          }
-          clearRun({ turnId, sessionId: realSessionId || optimisticSessionId, previousSessionId });
-          break;
-        }
-
-        if (turn.label || turn.detail) {
-          setMessages((current) =>
-            upsertStatusMessage(current, {
-              sessionId: realSessionId || turn.sessionId || optimisticSessionId,
+          if (loaded) {
+            clearRun(terminalPayload);
+          } else {
+            scheduleTurnRefresh({
+              sessionId: realSessionId || optimisticSessionId,
               turnId,
-              kind: turn.kind || 'turn',
-              status: turn.status || 'running',
-              label: turn.label || '正在思考',
-              detail: turn.detail || ''
-            })
-          );
+              previousSessionId,
+              hadAssistantText: turn.hadAssistantText || Boolean(turn.assistantPreview),
+              usage: turn.usage || null
+            });
+          }
+          break;
         }
       }
     } finally {
@@ -3629,7 +4188,7 @@ export default function App() {
           turnId,
           kind: 'reasoning',
           status: 'running',
-          label: '正在思考',
+          label: '正在思考中',
           timestamp: new Date().toISOString()
         }
       )
@@ -3732,29 +4291,17 @@ export default function App() {
         )
       }));
     }
-    setMessages((current) =>
-      upsertStatusMessage(
-        [
-          ...current,
-          {
+    setMessages((current) => [
+      ...current,
+      {
         id: `local-${Date.now()}`,
         role: 'user',
         content: displayMessage,
-            timestamp: new Date().toISOString(),
-            sessionId: optimisticSessionId,
-            turnId
-          }
-        ],
-        {
-          sessionId: optimisticSessionId,
-          turnId,
-          kind: 'reasoning',
-          status: 'running',
-          label: '正在思考',
-          timestamp: new Date().toISOString()
-        }
-      )
-    );
+        timestamp: new Date().toISOString(),
+        sessionId: optimisticSessionId,
+        turnId
+      }
+    ]);
     try {
       const result = await apiFetch('/api/chat/send', {
         method: 'POST',
@@ -3856,29 +4403,17 @@ export default function App() {
         )
       }));
     }
-    setMessages((current) =>
-      upsertStatusMessage(
-        [
-          ...current,
-          {
-            id: `local-${Date.now()}`,
-            role: 'user',
-            content: displayMessage,
-            timestamp: new Date().toISOString(),
-            sessionId: optimisticSessionId,
-            turnId
-          }
-        ],
-        {
-          sessionId: optimisticSessionId,
-          turnId,
-          kind: 'reasoning',
-          status: 'running',
-          label: '正在思考',
-          timestamp: new Date().toISOString()
-        }
-      )
-    );
+    setMessages((current) => [
+      ...current,
+      {
+        id: `local-${Date.now()}`,
+        role: 'user',
+        content: displayMessage,
+        timestamp: new Date().toISOString(),
+        sessionId: optimisticSessionId,
+        turnId
+      }
+    ]);
 
     try {
       const result = await apiFetch('/api/chat/send', {
@@ -3940,6 +4475,72 @@ export default function App() {
     clearRun({ sessionId: abortId, turnId: selectedSessionRef.current?.turnId || null });
   }
 
+  async function handleConnectDocs() {
+    if (docsBusy) {
+      return;
+    }
+    setDocsBusy(true);
+    setDocsError('');
+    try {
+      const result = await apiFetch('/api/feishu/cli/auth/start', { method: 'POST' });
+      if (result.docs) {
+        setStatus((current) => ({ ...current, docs: result.docs }));
+      }
+      if (!result.verificationUrl) {
+        throw new Error('没有收到飞书授权地址');
+      }
+      window.location.assign(result.verificationUrl);
+    } catch (error) {
+      setDocsError(error.message || '飞书连接失败');
+      setDocsBusy(false);
+    }
+  }
+
+  async function handleDisconnectDocs() {
+    if (docsBusy) {
+      return;
+    }
+    setDocsBusy(true);
+    setDocsError('');
+    try {
+      await apiFetch('/api/feishu/cli/auth/logout', { method: 'POST' });
+      await loadStatus();
+    } catch (error) {
+      setDocsError(error.message || '断开飞书失败');
+    } finally {
+      setDocsBusy(false);
+    }
+  }
+
+  async function handleRefreshDocs() {
+    if (docsBusy) {
+      return;
+    }
+    setDocsBusy(true);
+    setDocsError('');
+    try {
+      await loadStatus();
+    } catch (error) {
+      setDocsError(error.message || '刷新飞书状态失败');
+    } finally {
+      setDocsBusy(false);
+    }
+  }
+
+  function handleOpenDocsHome() {
+    const docsUrl = String(status.docs?.homeUrl || 'https://docs.feishu.cn/').trim();
+    if (docsUrl) {
+      window.location.assign(docsUrl);
+    }
+  }
+
+  function handleOpenDocsAuth(url) {
+    const authUrl = String(url || '').trim();
+    if (authUrl) {
+      window.location.assign(authUrl);
+    }
+  }
+
   const shellClass = useMemo(() => (drawerOpen ? 'app-shell drawer-active' : 'app-shell'), [drawerOpen]);
 
   if (!authenticated) {
@@ -3948,7 +4549,12 @@ export default function App() {
 
   return (
     <div className={shellClass}>
-      <TopBar selectedProject={selectedProject} connectionState={connectionState} onMenu={() => setDrawerOpen(true)} />
+      <TopBar
+        selectedProject={selectedProject}
+        connectionState={connectionState}
+        onMenu={() => setDrawerOpen(true)}
+        onOpenDocs={() => setDocsOpen(true)}
+      />
       <Drawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -3967,6 +4573,18 @@ export default function App() {
         syncing={syncing}
         theme={theme}
         setTheme={setTheme}
+      />
+      <DocsPanel
+        open={docsOpen}
+        docs={status.docs}
+        busy={docsBusy}
+        error={docsError}
+        onClose={() => setDocsOpen(false)}
+        onConnect={handleConnectDocs}
+        onDisconnect={handleDisconnectDocs}
+        onOpenHome={handleOpenDocsHome}
+        onOpenAuth={handleOpenDocsAuth}
+        onRefresh={handleRefreshDocs}
       />
       <ChatPane
         messages={messages}

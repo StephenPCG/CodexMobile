@@ -8,6 +8,12 @@ coverage/
 
 # Local runtime state, uploads, generated files, pairing tokens, logs
 .codexmobile/
+.tmp*
+.tmp*/
+_tmp*
+output/
+NUL
+Microsoft/
 *.log
 npm-debug.log*
 yarn-debug.log*

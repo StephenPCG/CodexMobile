@@ -6,7 +6,6 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { CODEX_SESSION_INDEX, CODEX_SESSIONS_DIR, readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
 import {
-  deleteMobileSession,
   readMobileSessionIndex,
   readMobileSessionMessages,
   readMobileSessions,
@@ -14,6 +13,7 @@ import {
 } from './mobile-session-index.js';
 
 const DELETED_MESSAGES_PATH = path.join(process.cwd(), '.codexmobile', 'state', 'deleted-messages.json');
+const HIDDEN_SESSIONS_PATH = path.join(process.cwd(), '.codexmobile', 'state', 'hidden-sessions.json');
 
 let cache = {
   syncedAt: null,
@@ -25,6 +25,10 @@ let cache = {
 };
 
 function emptyDeletedMessagesState() {
+  return { version: 1, sessions: {} };
+}
+
+function emptyHiddenSessionsState() {
   return { version: 1, sessions: {} };
 }
 
@@ -53,6 +57,58 @@ async function writeDeletedMessagesState(state) {
     JSON.stringify({ version: 1, sessions: state.sessions || {} }, null, 2),
     'utf8'
   );
+}
+
+async function readHiddenSessionsState() {
+  try {
+    const raw = await fs.readFile(HIDDEN_SESSIONS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      version: 1,
+      sessions: parsed && typeof parsed.sessions === 'object' && !Array.isArray(parsed.sessions)
+        ? parsed.sessions
+        : {}
+    };
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to read hidden session state:', error.message);
+    }
+    return emptyHiddenSessionsState();
+  }
+}
+
+async function writeHiddenSessionsState(state) {
+  await fs.mkdir(path.dirname(HIDDEN_SESSIONS_PATH), { recursive: true });
+  await fs.writeFile(
+    HIDDEN_SESSIONS_PATH,
+    JSON.stringify({ version: 1, sessions: state.sessions || {} }, null, 2),
+    'utf8'
+  );
+}
+
+async function readHiddenSessionIds() {
+  const state = await readHiddenSessionsState();
+  return new Set(Object.keys(state.sessions || {}));
+}
+
+async function hideSessionInMobile(session) {
+  const id = String(session?.id || '').trim();
+  if (!id) {
+    const error = new Error('Session id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const state = await readHiddenSessionsState();
+  const existing = state.sessions[id];
+  state.sessions[id] = {
+    hiddenAt: existing?.hiddenAt || new Date().toISOString(),
+    projectId: session.projectId || existing?.projectId || null,
+    projectPath: session.cwd || existing?.projectPath || null,
+    title: session.title || existing?.title || null
+  };
+  await writeHiddenSessionsState(state);
+  return { sessionId: id, hiddenAt: state.sessions[id].hiddenAt };
 }
 
 async function readDeletedMessageIds(sessionId) {
@@ -86,11 +142,6 @@ function projectIdFor(projectPath) {
 function displayNameFor(projectPath) {
   const parsed = path.parse(projectPath);
   return path.basename(projectPath) || parsed.root || projectPath;
-}
-
-function isInsideDirectory(filePath, rootDir) {
-  const relative = path.relative(path.resolve(rootDir), path.resolve(filePath));
-  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 function toPublicProject(entry) {
@@ -154,38 +205,6 @@ async function readSessionNameIndex() {
   return index;
 }
 
-async function deleteSessionNameIndexRows(sessionId) {
-  try {
-    const raw = await fs.readFile(CODEX_SESSION_INDEX, 'utf8');
-    const nextLines = [];
-    let changed = false;
-    for (const line of raw.split(/\r?\n/)) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const item = JSON.parse(line);
-        if (item?.id === sessionId) {
-          changed = true;
-          continue;
-        }
-      } catch {
-        // Preserve malformed rows.
-      }
-      nextLines.push(line);
-    }
-    if (changed) {
-      await fs.writeFile(CODEX_SESSION_INDEX, nextLines.length ? `${nextLines.join('\n')}\n` : '', 'utf8');
-    }
-    return changed;
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      return false;
-    }
-    throw error;
-  }
-}
-
 async function renameSessionNameIndexRow(sessionId, title, updatedAt) {
   try {
     const raw = await fs.readFile(CODEX_SESSION_INDEX, 'utf8');
@@ -240,8 +259,29 @@ function isVisibleUserMessage(payload) {
     payload?.type === 'user_message' &&
     (!payload.kind || payload.kind === 'plain') &&
     typeof payload.message === 'string' &&
-    payload.message.trim().length > 0
+    sanitizeVisibleUserMessage(payload.message).trim().length > 0
   );
+}
+
+const INTERNAL_PROMPT_MARKERS = [
+  'CodexMobile iOS/PWA 回复要求：',
+  'CodexMobile 已接入飞书官方 lark-cli。',
+  'CodexMobile 已接入飞书官方 lark-cli'
+];
+
+function sanitizeVisibleUserMessage(message) {
+  const value = String(message || '').trim();
+  if (!value) {
+    return '';
+  }
+  let cutAt = value.length;
+  for (const marker of INTERNAL_PROMPT_MARKERS) {
+    const index = value.indexOf(marker);
+    if (index > 0) {
+      cutAt = Math.min(cutAt, index);
+    }
+  }
+  return value.slice(0, cutAt).trim() || value;
 }
 
 function extractContent(content) {
@@ -294,7 +334,7 @@ async function parseSessionMetadata(filePath, sessionIndex, mobileSessionIndex) 
       }
       if (entry.type === 'event_msg' && isVisibleUserMessage(entry.payload)) {
         messageCount += 1;
-        lastUserMessage = entry.payload.message;
+        lastUserMessage = sanitizeVisibleUserMessage(entry.payload.message);
       }
       if (entry.type === 'response_item' && entry.payload?.type === 'message' && entry.payload.role === 'assistant') {
         messageCount += 1;
@@ -309,10 +349,7 @@ async function parseSessionMetadata(filePath, sessionIndex, mobileSessionIndex) 
   }
   const indexedSession = sessionIndex.get(meta.id);
   const mobileSession = mobileSessionIndex.get(meta.id);
-  if (!indexedSession && !mobileSession) {
-    return null;
-  }
-  const indexEntry = indexedSession || mobileSession;
+  const indexEntry = indexedSession || mobileSession || {};
   const mobileMessages = Array.isArray(mobileSession?.messages) ? mobileSession.messages : [];
   const mobileUpdatedAt = mobileSession?.updatedAt || null;
   const updatedAt =
@@ -330,7 +367,7 @@ async function parseSessionMetadata(filePath, sessionIndex, mobileSessionIndex) 
     provider: meta.provider,
     messageCount: messageCount + mobileMessages.length,
     updatedAt,
-    source: indexedSession ? 'codex-app' : 'codexmobile',
+    source: 'codex-app',
     filePath
   };
 }
@@ -369,6 +406,7 @@ export async function refreshCodexCache() {
   const sessionIndex = await readSessionNameIndex();
   const mobileSessionIndex = await readMobileSessionIndex();
   const mobileSessions = await readMobileSessions();
+  const hiddenSessionIds = await readHiddenSessionIds();
   const projectById = new Map();
   const sessionsByProject = new Map();
   const sessionById = new Map();
@@ -397,6 +435,9 @@ export async function refreshCodexCache() {
     if (!session) {
       continue;
     }
+    if (hiddenSessionIds.has(session.id)) {
+      continue;
+    }
     if (!visibleProjectIds.has(session.projectId)) {
       continue;
     }
@@ -413,6 +454,9 @@ export async function refreshCodexCache() {
 
   for (const mobileSession of mobileSessions) {
     if (!mobileSession?.id || !mobileSession.projectPath || sessionById.has(mobileSession.id)) {
+      continue;
+    }
+    if (hiddenSessionIds.has(mobileSession.id)) {
       continue;
     }
     const projectId = projectIdFor(mobileSession.projectPath);
@@ -552,37 +596,16 @@ export async function deleteSession(sessionId, projectId) {
     throw error;
   }
 
-  let deletedFile = false;
-  let deletedIndexRows = false;
-  if (session.filePath) {
-    if (!isInsideDirectory(session.filePath, CODEX_SESSIONS_DIR)) {
-      const error = new Error('Refusing to delete session outside Codex sessions directory');
-      error.statusCode = 500;
-      throw error;
-    }
-    try {
-      await fs.unlink(session.filePath);
-      deletedFile = true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-    }
-    try {
-      deletedIndexRows = await deleteSessionNameIndexRows(sessionId);
-    } catch (error) {
-      console.warn('[sessions] Failed to remove session index rows:', error.message);
-    }
-  }
-
-  const deletedMobileRecord = await deleteMobileSession(sessionId);
+  const hidden = await hideSessionInMobile(session);
 
   return {
     deletedSessionId: sessionId,
     projectId: session.projectId,
-    deletedFile,
-    deletedIndexRows,
-    deletedMobileRecord
+    hiddenOnly: true,
+    hiddenAt: hidden.hiddenAt,
+    deletedFile: false,
+    deletedIndexRows: false,
+    deletedMobileRecord: false
   };
 }
 
@@ -658,12 +681,17 @@ export async function readSessionMessages(sessionId, { limit = 120, offset = nul
         messages.push({
           id: `${entry.timestamp || messages.length}-user`,
           role: 'user',
-          content: entry.payload.message,
+          content: sanitizeVisibleUserMessage(entry.payload.message),
           timestamp
         });
       }
 
-      if (entry.type === 'response_item' && entry.payload?.type === 'message' && entry.payload.role === 'assistant') {
+      if (
+        entry.type === 'response_item' &&
+        entry.payload?.type === 'message' &&
+        entry.payload.role === 'assistant' &&
+        entry.payload.phase !== 'commentary'
+      ) {
         const content = extractContent(entry.payload.content);
         if (content.trim()) {
           messages.push({
