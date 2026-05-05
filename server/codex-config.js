@@ -9,6 +9,14 @@ export const CODEX_MODELS_CACHE_PATH = path.join(CODEX_HOME, 'models_cache.json'
 export const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
 export const CODEX_SESSION_INDEX = path.join(CODEX_HOME, 'session_index.jsonl');
 export const CODEX_STATE_DB = path.join(CODEX_HOME, 'state_5.sqlite');
+const DEFAULT_SKILL_ROOTS = [
+  path.join(process.cwd(), 'skills'),
+  path.join(CODEX_HOME, 'skills'),
+  path.join(os.homedir(), '.agents', 'skills'),
+  path.join(os.homedir(), 'Library', 'Mobile Documents', 'com~apple~CloudDocs', 'agent-skills', 'skills'),
+  path.join(CODEX_HOME, 'plugins', 'cache', 'openai-bundled'),
+  path.join(CODEX_HOME, 'plugins', 'cache', 'openai-curated')
+];
 
 function stripQuotes(value) {
   const trimmed = String(value || '').trim();
@@ -47,6 +55,97 @@ function publicModel(entry) {
 function numberOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function firstFrontmatterValue(raw, key) {
+  const text = String(raw || '');
+  if (!text.startsWith('---')) {
+    return '';
+  }
+  const end = text.indexOf('\n---', 3);
+  if (end === -1) {
+    return '';
+  }
+  const frontmatter = text.slice(3, end);
+  const match = frontmatter.match(new RegExp(`^${key}\\s*:\\s*(.+)$`, 'mi'));
+  return stripQuotes(match?.[1] || '').trim();
+}
+
+function skillNameFromPath(skillPath) {
+  return path.basename(path.dirname(skillPath));
+}
+
+function skillRoots() {
+  const extra = String(process.env.CODEXMOBILE_SKILL_ROOTS || process.env.CODEXMOBILE_SKILLS_DIR || '')
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...extra, ...DEFAULT_SKILL_ROOTS];
+}
+
+async function findSkillFiles(root, { maxDepth = 6, maxFiles = 500 } = {}) {
+  const found = [];
+  async function walk(dir, depth) {
+    if (found.length >= maxFiles || depth > maxDepth) {
+      return;
+    }
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.warn('[config] Failed to scan skill root:', dir, error.message);
+      }
+      return;
+    }
+
+    if (entries.some((entry) => entry.isFile() && entry.name === 'SKILL.md')) {
+      found.push(path.join(dir, 'SKILL.md'));
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name === '.git') {
+        continue;
+      }
+      await walk(path.join(dir, entry.name), depth + 1);
+      if (found.length >= maxFiles) {
+        return;
+      }
+    }
+  }
+
+  await walk(root, 0);
+  return found;
+}
+
+export async function readCodexSkills() {
+  const skills = new Map();
+
+  for (const root of skillRoots()) {
+    const files = await findSkillFiles(root);
+    for (const skillPath of files) {
+      try {
+        const raw = await fs.readFile(skillPath, 'utf8');
+        const name = firstFrontmatterValue(raw, 'name') || skillNameFromPath(skillPath);
+        const description = firstFrontmatterValue(raw, 'description');
+        if (!skills.has(name)) {
+          skills.set(name, {
+            name,
+            label: name,
+            description,
+            path: skillPath
+          });
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          console.warn('[config] Failed to read skill:', skillPath, error.message);
+        }
+      }
+    }
+  }
+
+  return [...skills.values()].sort((a, b) => a.label.localeCompare(b.label, 'zh-Hans-CN'));
 }
 
 function contextWindowFromModel(entry) {
@@ -155,6 +254,7 @@ export async function readCodexConfig() {
     modelAutoCompactTokenLimit: null,
     baseUrl: null,
     models: [{ value: 'gpt-5.5', label: 'gpt-5.5' }],
+    skills: [],
     projects: [],
     context: {
       modelContextWindow: null,
@@ -174,6 +274,7 @@ export async function readCodexConfig() {
       console.warn('[config] Failed to read Codex config:', error.message);
     }
     fallback.models = await readCodexModels(fallback.model);
+    fallback.skills = await readCodexSkills();
     return fallback;
   }
 
@@ -258,6 +359,7 @@ export async function readCodexConfig() {
   config.modelShort = shortModelName(config.model);
   config.baseUrl = providerBaseUrls.get(config.provider) || (config.provider === 'cliproxyapi' ? 'http://127.0.0.1:8317/v1' : null);
   config.models = await readCodexModels(config.model);
+  config.skills = await readCodexSkills();
   const modelContext = await readCodexModelContext(config.model);
   const modelContextWindow =
     config.modelContextWindow ||

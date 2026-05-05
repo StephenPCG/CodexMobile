@@ -1,7 +1,11 @@
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
+import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
+import tls from 'node:tls';
 
 const DEFAULT_CLIPROXY_CONFIG = process.platform === 'win32'
   ? 'D:\\CLIProxyAPI\\config.yaml'
@@ -9,9 +13,13 @@ const DEFAULT_CLIPROXY_CONFIG = process.platform === 'win32'
 const DEFAULT_AUTH_DIR = path.join(os.homedir(), '.cli-proxy-api');
 const DEFAULT_CODEX_AUTH_PATH = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'auth.json');
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
-const REQUEST_TIMEOUT_MS = 18_000;
-const MANAGEMENT_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = Number(process.env.CODEXMOBILE_QUOTA_REQUEST_TIMEOUT_MS || 8_000);
+const MANAGEMENT_TIMEOUT_MS = Number(process.env.CODEXMOBILE_QUOTA_MANAGEMENT_TIMEOUT_MS || 2_500);
+const STALE_QUOTA_TTL_MS = Number(process.env.CODEXMOBILE_QUOTA_STALE_TTL_MS || 30 * 60_000);
 const FIXED_PAIRING_CODE_FILE = path.join(process.cwd(), '.codexmobile', 'state', 'pairing-code.txt');
+let lastSuccessfulQuota = null;
+let cachedQuotaProxyUrl = null;
+let quotaProxyResolved = false;
 
 function stripQuotes(value) {
   const trimmed = String(value || '').trim();
@@ -398,22 +406,193 @@ async function readJsonFile(filePath) {
   return JSON.parse(raw);
 }
 
+function isNetworkTimeout(error) {
+  return (
+    error?.name === 'AbortError' ||
+    error?.cause?.code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    error?.code === 'UND_ERR_CONNECT_TIMEOUT'
+  );
+}
+
+function isConnectionRefused(error) {
+  return error?.cause?.code === 'ECONNREFUSED' || error?.code === 'ECONNREFUSED';
+}
+
 function safeErrorMessage(error) {
   const status = error?.statusCode || error?.status;
   if (status) {
+    if (status === 401 || status === 403) {
+      return '凭证已过期，请重新登录 Codex';
+    }
+    if (status === 429) {
+      return '额度接口限流，稍后重试';
+    }
     return `HTTP ${status}`;
   }
-  if (error?.name === 'AbortError') {
-    return '请求超时';
+  if (isNetworkTimeout(error)) {
+    return '网络超时，稍后重试';
+  }
+  if (isConnectionRefused(error)) {
+    return '本地代理或管理服务未启动';
+  }
+  if (error?.message === 'fetch failed') {
+    return '网络连接失败';
   }
   return '查询失败';
+}
+
+function normalizeProxyUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw || /^(0|false|none|direct|off)$/i.test(raw)) {
+    return '';
+  }
+  const withProtocol = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`;
+  try {
+    const parsed = new URL(withProtocol);
+    if (!parsed.hostname) {
+      return '';
+    }
+    if (parsed.protocol !== 'http:') {
+      return '';
+    }
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function proxyUrlFromScutilOutput(raw) {
+  const text = String(raw || '');
+  if (!/HTTPSEnable\s*:\s*1\b/.test(text)) {
+    return '';
+  }
+  const host = text.match(/HTTPSProxy\s*:\s*(.+)/)?.[1]?.trim();
+  const port = Number(text.match(/HTTPSPort\s*:\s*(\d+)/)?.[1]);
+  if (!host || !Number.isFinite(port) || port <= 0) {
+    return '';
+  }
+  return normalizeProxyUrl(`http://${host}:${port}`);
+}
+
+function resolveQuotaProxyUrl() {
+  if (quotaProxyResolved) {
+    return cachedQuotaProxyUrl;
+  }
+  quotaProxyResolved = true;
+
+  const explicit = normalizeProxyUrl(
+    process.env.CODEXMOBILE_QUOTA_PROXY_URL ||
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy
+  );
+  if (explicit || /^(0|false|none|direct|off)$/i.test(String(process.env.CODEXMOBILE_QUOTA_PROXY_URL || '').trim())) {
+    cachedQuotaProxyUrl = explicit;
+    return cachedQuotaProxyUrl;
+  }
+
+  if (process.platform === 'darwin') {
+    const result = spawnSync('scutil', ['--proxy'], { encoding: 'utf8' });
+    if (result.status === 0) {
+      cachedQuotaProxyUrl = proxyUrlFromScutilOutput(result.stdout);
+      return cachedQuotaProxyUrl;
+    }
+  }
+
+  cachedQuotaProxyUrl = '';
+  return cachedQuotaProxyUrl;
+}
+
+function createHttpsProxyAgent(proxyUrl) {
+  const proxy = new URL(proxyUrl);
+  const agent = new https.Agent();
+  agent.createConnection = function createProxyConnection(options, callback) {
+    const targetHost = options.host || options.hostname;
+    const targetPort = options.port || 443;
+    const connectReq = http.request({
+      host: proxy.hostname,
+      port: proxy.port || 80,
+      method: 'CONNECT',
+      path: `${targetHost}:${targetPort}`,
+      headers: {
+        Host: `${targetHost}:${targetPort}`
+      }
+    });
+
+    connectReq.once('connect', (res, socket, head) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        const error = new Error(`Proxy CONNECT HTTP ${res.statusCode || 'unknown'}`);
+        error.statusCode = res.statusCode || 502;
+        callback(error);
+        return;
+      }
+      if (head?.length) {
+        socket.unshift(head);
+      }
+      const tlsSocket = tls.connect({
+        socket,
+        servername: options.servername || targetHost
+      });
+      tlsSocket.once('secureConnect', () => callback(null, tlsSocket));
+      tlsSocket.once('error', callback);
+    });
+    connectReq.once('error', callback);
+    connectReq.end();
+  };
+  return agent;
+}
+
+function requestText(url, { method = 'GET', headers = {}, signal, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  return new Promise((resolve, reject) => {
+    const proxyUrl = resolveQuotaProxyUrl();
+    const target = new URL(url);
+    const agent = proxyUrl ? createHttpsProxyAgent(proxyUrl) : undefined;
+    const req = https.request(target, {
+      method,
+      headers,
+      agent,
+      timeout: timeoutMs
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.once('end', () => {
+        agent?.destroy();
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode || 0,
+          text: Buffer.concat(chunks).toString('utf8')
+        });
+      });
+    });
+
+    const abort = () => {
+      const error = new Error('This operation was aborted');
+      error.name = 'AbortError';
+      agent?.destroy();
+      req.destroy(error);
+    };
+
+    req.once('timeout', abort);
+    req.once('error', (error) => {
+      agent?.destroy();
+      reject(error);
+    });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    req.end();
+  });
 }
 
 async function requestCodexUsage(credential) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(CODEX_USAGE_URL, {
+    const response = await requestText(CODEX_USAGE_URL, {
       method: 'GET',
       signal: controller.signal,
       headers: {
@@ -423,10 +602,9 @@ async function requestCodexUsage(credential) {
         'User-Agent': 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal'
       }
     });
-    const text = await response.text();
     let body = null;
     try {
-      body = text ? JSON.parse(text) : null;
+      body = response.text ? JSON.parse(response.text) : null;
     } catch {
       body = null;
     }
@@ -680,7 +858,7 @@ export async function getCodexQuota() {
   try {
     const managed = await getCodexQuotaFromManagement();
     if (managed) {
-      return managed;
+      return finalizeQuotaResult(managed);
     }
   } catch (error) {
     console.warn(`[quota] CLIProxyAPI management quota fallback: ${safeErrorMessage(error)}`);
@@ -721,9 +899,67 @@ export async function getCodexQuota() {
     accounts.push(codexAuthAccount);
   }
 
-  return {
+  return finalizeQuotaResult({
     provider: 'codex',
     source: accounts.length ? 'local-auth' : 'none',
     accounts
+  });
+}
+
+function hasFreshQuota(result) {
+  return (result?.accounts || []).some((account) =>
+    account?.status === 'ok' && Array.isArray(account.windows) && account.windows.length
+  );
+}
+
+function canUseStaleQuota(result) {
+  const accounts = result?.accounts || [];
+  return accounts.length > 0 && accounts.every((account) => account?.status === 'failed');
+}
+
+function staleQuotaResult(reason) {
+  if (!lastSuccessfulQuota) {
+    return null;
+  }
+  const ageMs = Date.now() - lastSuccessfulQuota.savedAt;
+  if (ageMs > STALE_QUOTA_TTL_MS) {
+    return null;
+  }
+  return {
+    ...lastSuccessfulQuota.result,
+    source: `${lastSuccessfulQuota.result.source}-cache`,
+    stale: true,
+    staleReason: reason || '实时查询失败，显示最近一次成功结果',
+    staleSavedAt: new Date(lastSuccessfulQuota.savedAt).toISOString()
   };
 }
+
+function finalizeQuotaResult(result) {
+  const fetchedAt = new Date().toISOString();
+  const normalized = { ...result, fetchedAt, stale: false };
+  if (hasFreshQuota(normalized)) {
+    lastSuccessfulQuota = {
+      savedAt: Date.now(),
+      result: normalized
+    };
+    return normalized;
+  }
+  if (canUseStaleQuota(normalized)) {
+    const reason = normalized.accounts.find((account) => account?.error)?.error;
+    const stale = staleQuotaResult(reason);
+    if (stale) {
+      return stale;
+    }
+  }
+  return normalized;
+}
+
+export const quotaTestHooks = {
+  normalizeProxyUrl,
+  proxyUrlFromScutilOutput,
+  safeErrorMessage,
+  finalizeQuotaResult,
+  resetQuotaCache() {
+    lastSuccessfulQuota = null;
+  }
+};

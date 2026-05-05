@@ -31,11 +31,14 @@ import {
 import { getCodexQuota } from './codex-quota.js';
 import { abortCodexTurn, getActiveRuns, runCodexTurn } from './codex-runner.js';
 import { GENERATED_ROOT, isImageRequest, runImageTurn } from './image-generator.js';
+import { useLegacyImageGenerator } from './codex-native-images.js';
 import { getLarkDocsStatus, logoutLarkCli, startLarkCliAuth } from './lark-cli.js';
 import { registerMobileSession } from './mobile-session-index.js';
 import { publicVoiceTranscriptionStatus, transcribeAudio } from './voice-transcriber.js';
 import { publicVoiceSpeechStatus, synthesizeSpeech } from './voice-speaker.js';
 import { publicVoiceRealtimeStatus, startVoiceRealtimeProxy } from './realtime-voice.js';
+import { maybeAutoNameSession } from './session-title-generator.js';
+import { provisionalSessionTitle } from '../shared/session-title.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -184,6 +187,42 @@ function rememberTurnEvent(payload) {
 function fallbackModels(config) {
   const model = config.model || 'gpt-5.5';
   return [{ value: model, label: model }];
+}
+
+function normalizeSelectedSkills(value, availableSkills = []) {
+  const requested = Array.isArray(value) ? value : [];
+  if (!requested.length || !Array.isArray(availableSkills) || !availableSkills.length) {
+    return [];
+  }
+
+  const byPath = new Map();
+  const byName = new Map();
+  for (const skill of availableSkills) {
+    if (skill?.path) {
+      byPath.set(String(skill.path), skill);
+    }
+    if (skill?.name) {
+      byName.set(String(skill.name), skill);
+    }
+  }
+
+  const selected = [];
+  const seen = new Set();
+  for (const item of requested) {
+    const pathValue = typeof item === 'string' ? item : item?.path;
+    const nameValue = typeof item === 'string' ? item : item?.name;
+    const skill = byPath.get(String(pathValue || '')) || byName.get(String(nameValue || ''));
+    if (!skill?.path || seen.has(skill.path)) {
+      continue;
+    }
+    seen.add(skill.path);
+    selected.push({
+      type: 'skill',
+      name: skill.name || skill.label || path.basename(path.dirname(skill.path)),
+      path: skill.path
+    });
+  }
+  return selected.slice(0, 8);
 }
 
 function getActiveImageRuns() {
@@ -756,16 +795,51 @@ function normalizeAttachments(value) {
     }));
 }
 
+function markdownImageDestination(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  if (/[\s<>()]/.test(raw)) {
+    return `<${raw.replace(/>/g, '%3E')}>`;
+  }
+  return raw;
+}
+
+function markdownImageAlt(value) {
+  return String(value || '图片').replace(/[\[\]\n\r]/g, '').trim() || '图片';
+}
+
+function imageAttachmentMarkdown(attachment) {
+  const destination = markdownImageDestination(attachment.path);
+  if (!destination) {
+    return '';
+  }
+  return `![${markdownImageAlt(attachment.name)}](${destination})`;
+}
+
+function withImageAttachmentPreviews(message, attachments) {
+  const imageLines = attachments
+    .filter((attachment) => attachment.kind === 'image')
+    .map(imageAttachmentMarkdown)
+    .filter(Boolean);
+  return [message, imageLines.join('\n')].filter(Boolean).join('\n\n');
+}
+
 function withAttachmentReferences(message, attachments) {
   if (!attachments.length) {
     return message;
   }
 
-  const lines = attachments.map((attachment) => {
+  const imageMessage = withImageAttachmentPreviews(message, attachments);
+  const fileLines = attachments.filter((attachment) => attachment.kind !== 'image').map((attachment) => {
     const type = attachment.kind === 'image' ? '图片' : '文件';
     return `- ${type}: ${attachment.name} (${attachment.path})`;
   });
-  return `${message}\n\n附件路径:\n${lines.join('\n')}`;
+  if (!fileLines.length) {
+    return imageMessage;
+  }
+  return `${imageMessage}\n\n附件路径:\n${fileLines.join('\n')}`;
 }
 
 async function loadRecentImagePrompts() {
@@ -874,6 +948,7 @@ async function publicStatus(authenticated) {
     model: config.model || 'gpt-5.5',
     modelShort: config.modelShort || '5.5 中',
     models: config.models?.length ? config.models : fallbackModels(config),
+    skills: Array.isArray(config.skills) ? config.skills : [],
     context: config.context || null,
     reasoningEffort: DEFAULT_REASONING_EFFORT,
     voiceTranscription: publicVoiceTranscriptionStatus(config),
@@ -924,6 +999,40 @@ function emitJobEvent(job, payload) {
   const enriched = { projectId: job.project.id, ...payload };
   rememberTurnEvent(enriched);
   broadcast(enriched);
+}
+
+async function autoNameCompletedSession({ sessionId, turnId, userMessage }) {
+  if (!sessionId || !turnId) {
+    return;
+  }
+  const turn = recentTurns.get(turnId) || {};
+  const assistantMessage = turn.assistantPreview || '';
+  if (!String(userMessage || assistantMessage || '').trim()) {
+    return;
+  }
+
+  await refreshCodexCache();
+  const session = getSession(sessionId);
+  if (!session || session.titleLocked) {
+    return;
+  }
+
+  const renamed = await maybeAutoNameSession({
+    session,
+    userMessage,
+    assistantMessage,
+    renameSessionImpl: renameSession
+  });
+  if (renamed) {
+    const snapshot = await refreshCodexCache();
+    broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
+  }
+}
+
+function scheduleAutoNameCompletedSession(payload) {
+  autoNameCompletedSession(payload).catch((error) => {
+    console.warn('[title] auto naming failed:', error.message);
+  });
 }
 
 function enqueueChatJob(job) {
@@ -978,6 +1087,8 @@ function runNextQueuedChat(queueKey) {
       draftSessionId: job.draftSessionId,
       projectPath: job.project.path,
       message: job.codexMessage,
+      attachments: job.attachments,
+      selectedSkills: job.selectedSkills,
       model: job.model,
       reasoningEffort: job.reasoningEffort,
       permissionMode: job.permissionMode,
@@ -1001,8 +1112,9 @@ function runNextQueuedChat(queueKey) {
         id: finalSessionId,
         projectPath: job.project.path,
         projectless: job.project.projectless,
-        title: job.displayMessage.slice(0, 52),
+        title: provisionalSessionTitle(job.displayMessage),
         summary: job.displayMessage,
+        titleLocked: false,
         updatedAt: new Date().toISOString()
       });
     }
@@ -1011,6 +1123,13 @@ function runNextQueuedChat(queueKey) {
       sessionId: finalSessionId || sessionId || job.selectedSessionId || job.draftSessionId || null,
       previousSessionId: job.draftSessionId || job.selectedSessionId || null
     });
+    if (job.draftSessionId) {
+      scheduleAutoNameCompletedSession({
+        sessionId: finalSessionId || sessionId || job.selectedSessionId || null,
+        turnId: job.turnId,
+        userMessage: job.displayMessage
+      });
+    }
   }).finally(async () => {
     try {
       const snapshot = await refreshCodexCache();
@@ -1184,7 +1303,7 @@ async function handleApi(req, res, url) {
     }
 
     try {
-      const renamed = await renameSession(session.id, project.id, title);
+      const renamed = await renameSession(session.id, project.id, title, { auto: Boolean(body.auto) });
       const snapshot = await refreshCodexCache();
       broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
       sendJson(res, 200, { success: true, session: renamed });
@@ -1219,8 +1338,8 @@ async function handleApi(req, res, url) {
       sendJson(res, 200, { success: true, ...deleted });
     } catch (error) {
       const statusCode = error.statusCode || 500;
-      console.warn(`[sessions] delete failed session=${sessionId} project=${projectId}: ${error.message}`);
-      sendJson(res, statusCode, { error: statusCode === 409 ? error.message : 'Failed to delete session' });
+      console.warn(`[sessions] archive failed session=${sessionId} project=${projectId}: ${error.message}`);
+      sendJson(res, statusCode, { error: statusCode === 409 ? error.message : 'Failed to archive session' });
     }
     return;
   }
@@ -1345,11 +1464,16 @@ async function handleApi(req, res, url) {
       : (requestedSessionId && !isDraftSession && !mobileOnlySession ? requestedSessionId : null);
     const turnId = String(body.clientTurnId || '').trim() || crypto.randomUUID();
     const config = getCacheSnapshot().config || {};
+    const selectedSkills = normalizeSelectedSkills(body.selectedSkills, config.skills);
     const displayMessage = message || '请查看附件。';
+    const visibleMessage = withImageAttachmentPreviews(displayMessage, attachments);
     const codexMessage = withAttachmentReferences(displayMessage, attachments);
-    const imagePrompt = isImageRequest(displayMessage, attachments)
-      ? displayMessage
-      : resolveContinuationImagePrompt(project.id, displayMessage);
+    const legacyImageRoute = useLegacyImageGenerator();
+    const imagePrompt = legacyImageRoute
+      ? (isImageRequest(displayMessage, attachments)
+        ? displayMessage
+        : resolveContinuationImagePrompt(project.id, displayMessage))
+      : null;
     const conversationSessionId = selectedSessionId || mobileOnlySession?.id || draftSessionId || null;
     rememberTurn(turnId, {
       projectId: project.id,
@@ -1370,7 +1494,7 @@ async function handleApi(req, res, url) {
       message: {
         id: `local-${Date.now()}`,
         role: 'user',
-        content: displayMessage,
+        content: visibleMessage,
         timestamp: new Date().toISOString()
       }
     });
@@ -1479,6 +1603,8 @@ async function handleApi(req, res, url) {
       turnId,
       codexMessage,
       displayMessage,
+      attachments,
+      selectedSkills,
       model: session?.model || body.model || config.model || 'gpt-5.5',
       reasoningEffort: body.reasoningEffort || DEFAULT_REASONING_EFFORT,
       permissionMode: body.permissionMode || 'bypassPermissions'

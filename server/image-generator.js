@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readMobileSessionMessages, registerMobileSession } from './mobile-session-index.js';
 import { DEFAULT_OPENAI_COMPATIBLE_BASE_URL, openAICompatibleConfig } from './provider-api.js';
+import { provisionalSessionTitle } from '../shared/session-title.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -360,7 +361,7 @@ export async function runImageTurn({
       sessionId: finalSessionId,
       projectPath,
       projectless,
-      title: message.slice(0, 52) || 'Image task',
+      title: provisionalSessionTitle(message, 'Image task'),
       summary: message || 'Image task',
       updatedAt: startedAt,
       messages: [
@@ -505,7 +506,7 @@ export async function runImageTurn({
         id: finalSessionId,
         projectPath,
         projectless,
-        title: message.slice(0, 52) || '图片生成',
+        title: provisionalSessionTitle(message, '图片生成'),
         summary: message || '图片生成',
         updatedAt: completedAt,
         messages: [
@@ -544,7 +545,7 @@ export async function runImageTurn({
         sessionId: finalSessionId,
         projectPath,
         projectless,
-        title: message.slice(0, 52) || 'Image task',
+        title: provisionalSessionTitle(message, 'Image task'),
         summary: message || 'Image task',
         updatedAt: failedAt,
         messages: [

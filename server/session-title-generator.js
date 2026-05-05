@@ -1,0 +1,158 @@
+import { openAICompatibleConfig } from './provider-api.js';
+import { provisionalSessionTitle } from '../shared/session-title.js';
+
+const DEFAULT_TITLE_MODEL = 'gpt-5.4-mini';
+const TITLE_TIMEOUT_MS = Number(process.env.CODEXMOBILE_TITLE_TIMEOUT_MS || 15000);
+const MAX_TITLE_LENGTH = 22;
+
+function compactForPrompt(value, limit = 1200) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, limit);
+}
+
+function stripJsonTitle(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object' && typeof parsed.title === 'string') {
+      return parsed.title;
+    }
+  } catch {
+    // Fall through to plain text cleanup.
+  }
+  const match = text.match(/"title"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : text;
+}
+
+export function sanitizeGeneratedTitle(value) {
+  return stripJsonTitle(value)
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*]\([^)]+\)/g, '')
+    .replace(/\[\$?[^\]]+]\([^)]+\)/g, '')
+    .replace(/\[\$?[^\]]+]\s*/g, '')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/(?:^|\s)\/[^\s]+/g, ' ')
+    .replace(/^(?:标题|title)\s*[:：]\s*/i, '')
+    .replace(/^["'“”‘’「」『』]+|["'“”‘’「」『』]+$/g, '')
+    .replace(/[。.!！?？；;，,：:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_TITLE_LENGTH)
+    .trim();
+}
+
+function titlePrompt({ userMessage, assistantMessage }) {
+  return [
+    '请为这段 Codex 线程生成一个短标题。',
+    '要求：只输出 JSON，格式为 {"title":"..."}；中文优先；6 到 16 个汉字或等长短语；不要客套词、不要路径、不要 URL、不要技能名、不要标点；像任务名，不像一句话。',
+    '',
+    `用户首条消息：${compactForPrompt(userMessage)}`,
+    `助手最终答复：${compactForPrompt(assistantMessage)}`
+  ].join('\n');
+}
+
+function parseChatCompletionTitle(text) {
+  const data = JSON.parse(text || '{}');
+  const content = data?.choices?.[0]?.message?.content ||
+    data?.choices?.[0]?.text ||
+    data?.output_text ||
+    '';
+  return sanitizeGeneratedTitle(content);
+}
+
+async function requestTitle({ userMessage, assistantMessage, config, fetchImpl }) {
+  const model = process.env.CODEXMOBILE_TITLE_MODEL || DEFAULT_TITLE_MODEL;
+  const response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {})
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      max_tokens: 48,
+      messages: [
+        {
+          role: 'system',
+          content: '你是会话标题生成器。你只输出 JSON，不解释。'
+        },
+        {
+          role: 'user',
+          content: titlePrompt({ userMessage, assistantMessage })
+        }
+      ]
+    }),
+    signal: AbortSignal.timeout(TITLE_TIMEOUT_MS)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(text || `标题接口返回 ${response.status}`);
+  }
+  return parseChatCompletionTitle(text);
+}
+
+export async function generateSessionTitle({
+  userMessage,
+  assistantMessage,
+  config = null,
+  fetchImpl = fetch,
+  logger = console
+} = {}) {
+  const fallback = provisionalSessionTitle(userMessage || assistantMessage);
+  if (process.env.CODEXMOBILE_AUTO_TITLE === '0') {
+    return fallback;
+  }
+
+  try {
+    const providerConfig = config || await openAICompatibleConfig({
+      baseUrl: process.env.CODEXMOBILE_TITLE_BASE_URL,
+      apiKeys: [process.env.CODEXMOBILE_TITLE_API_KEY]
+    });
+    const apiKeys = providerConfig.apiKeys?.length ? providerConfig.apiKeys : [''];
+    for (const apiKey of apiKeys) {
+      try {
+        const title = await requestTitle({
+          userMessage,
+          assistantMessage,
+          config: { ...providerConfig, apiKey },
+          fetchImpl
+        });
+        if (title) {
+          return title;
+        }
+      } catch (error) {
+        if (apiKey === apiKeys[apiKeys.length - 1]) {
+          throw error;
+        }
+      }
+    }
+  } catch (error) {
+    logger?.warn?.('[title] model title generation failed:', error.message);
+  }
+  return fallback;
+}
+
+export async function maybeAutoNameSession({
+  session,
+  userMessage,
+  assistantMessage,
+  renameSessionImpl,
+  titleGenerator = generateSessionTitle
+} = {}) {
+  if (!session?.id || session.titleLocked || !renameSessionImpl) {
+    return null;
+  }
+  const title = await titleGenerator({ userMessage, assistantMessage });
+  const nextTitle = sanitizeGeneratedTitle(title) || provisionalSessionTitle(userMessage || assistantMessage);
+  if (!nextTitle || nextTitle === session.title) {
+    return null;
+  }
+  return renameSessionImpl(session.id, session.projectId, nextTitle, { auto: true });
+}

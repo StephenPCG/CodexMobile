@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createCodexAppServerClient } from './codex-app-server.js';
+import { buildCodexTurnInput, imageMarkdownFromCodexImageGeneration } from './codex-native-images.js';
 import { buildCodexLarkCliContext } from './lark-cli.js';
 import { detectFeishuSkillKeys } from './feishu-skills.js';
 
@@ -430,6 +431,30 @@ function normalizeAppItem(item, state = {}) {
   return copy;
 }
 
+function emitNativeImageResult(emit, { sessionId, turnId, messageId, item, status, state }) {
+  if (status !== 'completed') {
+    return false;
+  }
+  const content = imageMarkdownFromCodexImageGeneration(item);
+  if (!content) {
+    return false;
+  }
+  emit({
+    type: 'assistant-update',
+    sessionId,
+    turnId,
+    messageId: `${messageId}-result`,
+    role: 'assistant',
+    kind: 'image_generation_result',
+    phase: 'final_answer',
+    content,
+    status: 'completed',
+    done: true
+  });
+  state.hadAssistantText = true;
+  return true;
+}
+
 function tokenUsagePayload(tokenUsage = {}) {
   const last = tokenUsage.last || {};
   const total = tokenUsage.total || {};
@@ -520,6 +545,9 @@ function emitAppServerItem({ method, params }, sessionId, turnId, emit, state) {
     kind: item.type,
     status
   });
+  if (rawItem.type === 'imageGeneration') {
+    emitNativeImageResult(emit, { sessionId, turnId, messageId, item: rawItem, status, state });
+  }
 }
 
 function emitAppServerNotification(message, sessionId, turnId, emit, state) {
@@ -636,7 +664,7 @@ function abortError() {
   return error;
 }
 
-export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, model, reasoningEffort, permissionMode, turnId: providedTurnId }, emit) {
+export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, attachments = [], selectedSkills = [], model, reasoningEffort, permissionMode, turnId: providedTurnId }, emit) {
   const workingDirectory = await ensureAsciiWorkingDirectory(projectPath);
   const { sandboxMode, approvalPolicy } = mapPermissionMode(permissionMode);
   const feishuSkillKeys = detectFeishuSkillKeys(message);
@@ -768,12 +796,14 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     });
     emitStatus(emit, { sessionId: currentSessionId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
 
-    const codexInput = [message, larkCliContext.enabled ? larkCliContext.instruction : '']
-      .filter(Boolean)
-      .join('\n\n');
     const turnResponse = await client.request('turn/start', {
       threadId: currentSessionId,
-      input: [{ type: 'text', text: codexInput, text_elements: [] }],
+      input: buildCodexTurnInput({
+        message,
+        attachments,
+        selectedSkills,
+        larkInstruction: larkCliContext.enabled ? larkCliContext.instruction : ''
+      }),
       cwd: workingDirectory,
       approvalPolicy,
       sandboxPolicy: sandboxPolicyFromMode(sandboxMode, { networkAccess: larkCliContext.enabled }),

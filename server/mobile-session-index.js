@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { provisionalSessionTitle } from '../shared/session-title.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -35,7 +36,11 @@ async function writeIndexFile(sessions) {
 }
 
 function fallbackTitle(title, summary) {
-  const value = String(title || summary || '').trim();
+  return provisionalSessionTitle(title || summary);
+}
+
+function explicitTitle(title) {
+  const value = String(title || '').trim();
   return value ? value.slice(0, 52) : '新对话';
 }
 
@@ -72,7 +77,7 @@ export async function deleteMobileSession(sessionId) {
   return true;
 }
 
-export async function registerMobileSession({ id, projectPath, projectless = false, title, summary, updatedAt, messages }) {
+export async function registerMobileSession({ id, projectPath, projectless = false, title, summary, titleLocked = false, updatedAt, messages }) {
   if (!id || (!projectPath && !projectless) || String(id).startsWith('draft-') || String(id).startsWith('codex-')) {
     return null;
   }
@@ -88,7 +93,7 @@ export async function registerMobileSession({ id, projectPath, projectless = fal
     projectPath: nextProjectPath,
     projectless: projectPath ? Boolean(projectless) : Boolean(projectless || existing?.projectless),
     title: existing?.title || fallbackTitle(title, summary),
-    titleLocked: true,
+    titleLocked: Boolean(existing?.titleLocked || titleLocked),
     summary: summary || title || existing?.summary || 'CodexMobile 对话',
     updatedAt: now,
     source: existing?.source || 'codexmobile'
@@ -121,7 +126,7 @@ export async function registerMobileSession({ id, projectPath, projectless = fal
   return next;
 }
 
-export async function renameMobileSession({ id, projectPath, projectless = false, title, updatedAt }) {
+export async function renameMobileSession({ id, projectPath, projectless = false, title, titleLocked = true, updatedAt }) {
   const sessionId = String(id || '').trim();
   if (!sessionId || (!projectPath && !projectless) || sessionId.startsWith('draft-')) {
     return null;
@@ -136,8 +141,8 @@ export async function renameMobileSession({ id, projectPath, projectless = false
     id: sessionId,
     projectPath: nextProjectPath,
     projectless: projectPath ? Boolean(projectless) : Boolean(projectless || existing?.projectless),
-    title: fallbackTitle(title),
-    titleLocked: true,
+    title: explicitTitle(title),
+    titleLocked: Boolean(titleLocked),
     summary: existing?.summary,
     updatedAt: existing?.updatedAt || updatedAt || new Date().toISOString(),
     source: existing?.source || 'codexmobile'

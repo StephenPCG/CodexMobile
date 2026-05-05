@@ -2,27 +2,23 @@
 
 CodexMobile 是一个面向 iPhone 的 Codex PWA 客户端。它在电脑上启动一个轻量本地桥接服务，通过 Tailscale、局域网或其它私有网络，让手机可以访问并使用这台电脑上的 Codex 项目、会话和模型能力。
 
-这个项目适合个人使用：你可以在 iPhone 主屏像 App 一样打开它，切换 Codex 项目、查看线程、发送文字或语音消息、上传文件，并在手机上接收 Codex 的实时回复和执行状态。
+这个项目适合个人使用：你可以在 iPhone 主屏像 App 一样打开它，切换 Codex 项目、查看线程、发送文字消息、上传文件，并在手机上接收 Codex 的实时回复和执行状态。
 
 > 本项目不是公网 SaaS、多人控制台或远程桌面工具。建议只在可信私有网络中使用。
 
 ## 界面演示
 
-| 项目抽屉 | 对话与模型选择 | 语音整理交给 Codex |
+| 项目抽屉 | 对话与模型选择 | 移动端执行状态 |
 | --- | --- | --- |
-| <img src="docs/images/ios-drawer.png" width="260" alt="CodexMobile 项目抽屉" /> | <img src="docs/images/ios-chat.png" width="260" alt="CodexMobile 对话界面" /> | <img src="docs/images/voice-handoff.jpg" width="260" alt="语音对话整理任务后交给 Codex 执行" /> |
+| <img src="docs/images/ios-drawer.png" width="260" alt="CodexMobile 项目抽屉" /> | <img src="docs/images/ios-chat.png" width="260" alt="CodexMobile 对话界面" /> | <img src="docs/images/voice-handoff.jpg" width="260" alt="CodexMobile 移动端执行状态" /> |
 
 ## 功能特性
 
 - iPhone 优先的 PWA 界面，可添加到 iOS 主屏
 - 读取本机 Codex 项目和会话，支持项目切换、线程展开、重命名和删除
 - 新建对话、续聊已有线程，并通过 WebSocket 显示实时状态
-- 支持权限模式、模型选择和推理强度选择
+- 支持权限模式、模型选择、推理强度选择和 skill 选择
 - 支持图片/文件上传，文件保存在本机并将路径交给 Codex 使用
-- 支持语音输入：前端录音，后端转写后自动发送给 Codex
-- 支持实时语音对话：可以持续说想法，由 Realtime 模型即时回应
-- 支持“总结一下交给 Codex”：语音模型把口语想法整理成明确任务，确认后交给 Codex 执行
-- 支持语音朗读：优先 Edge Neural TTS，可回退 OpenAI 兼容 TTS 或 Windows 本地语音
 - 支持飞书文档、PPT、表格和云空间操作：通过本机 `lark-cli` 授权，以用户身份创建、读取和修改
 - 移动端任务进度更简洁：只显示创建文档、读取表格、验证结果等关键过程，隐藏命令生命周期噪音
 - 支持本地 SenseVoice/FunASR 中文语音识别服务
@@ -127,31 +123,6 @@ npm run start:env
 - `CODEXMOBILE_CLIPROXY_MANAGEMENT_KEY`：CLIProxyAPI 管理密钥
 
 不要提交 `.env`、`.codexmobile`、证书、日志、上传文件、生成图片或本地认证数据。
-
-## 本地中文语音识别
-
-CodexMobile 支持本地 SenseVoice/FunASR 语音识别。第一版默认使用 `iic/SenseVoiceSmall`，更适合中文、粤语、口音和短指令场景。
-
-启动本地 ASR 服务：
-
-```powershell
-npm run asr:start
-```
-
-默认接口：
-
-```text
-http://127.0.0.1:8000/v1/audio/transcriptions
-```
-
-语音数据不会保存为聊天附件。服务端只在内存中处理上传音频；如果模型推理必须落临时文件，会在请求结束后立即删除。
-
-相关配置：
-
-- `CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL`
-- `CODEXMOBILE_TRANSCRIBE_MODEL`
-- `CODEXMOBILE_ASR_DEVICE`
-- `CODEXMOBILE_ASR_PORT`
 
 ## 图片生成
 

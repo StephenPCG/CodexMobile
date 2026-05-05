@@ -11,6 +11,7 @@
     "start": "node server/index.js",
     "start:env": "node --env-file=.env server/index.js",
     "start:bg": "node scripts/start-server.mjs",
+    "pair": "node skills/codex-mobile-pairing/scripts/quick-pair.mjs",
     "asr:start": "node scripts/start-asr.mjs",
     "postinstall": "node scripts/patch-codex-sdk.mjs",
     "smoke": "node scripts/smoke.mjs"

@@ -228,6 +228,17 @@ export class CodexAppServerClient {
   }
 }
 
+function isArchivedOrDeletedDesktopThread(thread = null) {
+  if (!thread || typeof thread !== 'object') {
+    return true;
+  }
+  const status = String(thread.status || '').toLowerCase();
+  const archivedAt = String(thread.archivedAt || thread.deletedAt || thread.archived_at || thread.deleted_at || '').trim();
+  const deletedFlag = Boolean(thread.deleted) || Boolean(thread.isDeleted) || status === 'deleted' || status === 'archived';
+  const archivedFlag = Boolean(thread.archived) || Boolean(thread.isArchived) || status === 'archived';
+  return deletedFlag || archivedFlag || Boolean(archivedAt);
+}
+
 export async function createCodexAppServerClient(options = {}) {
   const client = new CodexAppServerClient(options);
   await client.initialize();
@@ -249,10 +260,11 @@ export async function listDesktopThreads({ limit = 1000, pageSize = 100 } = {}) 
         sortDirection: 'desc',
         archived: false
       }, { timeoutMs: 20_000 });
-      const data = Array.isArray(response?.data) ? response.data : [];
+      const rawData = Array.isArray(response?.data) ? response.data : [];
+      const data = rawData.filter((thread) => !isArchivedOrDeletedDesktopThread(thread));
       threads.push(...data);
       cursor = response?.nextCursor || null;
-      if (!cursor || !data.length) {
+      if (!cursor || !rawData.length) {
         break;
       }
     }
@@ -284,6 +296,19 @@ export async function setDesktopThreadName(threadId, name) {
     return await client.request('thread/name/set', {
       threadId,
       name
+    }, { timeoutMs: 20_000 });
+  } finally {
+    client.close();
+  }
+}
+
+export async function archiveDesktopThread(threadId) {
+  const client = await createCodexAppServerClient({
+    clientInfo: { name: 'CodexMobileArchive', title: null, version: '0.1.0' }
+  });
+  try {
+    return await client.request('thread/archive', {
+      threadId
     }, { timeoutMs: 20_000 });
   } finally {
     client.close();

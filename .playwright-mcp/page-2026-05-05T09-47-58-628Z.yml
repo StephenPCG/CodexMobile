@@ -1,0 +1,9 @@
+- main [ref=e3]:
+  - img [ref=e5]
+  - heading "CodexMobile" [level=1] [ref=e7]
+  - paragraph [ref=e8]: 输入电脑端启动日志里的配对码。
+  - generic [ref=e9]:
+    - textbox "6 位配对码" [ref=e10]
+    - button "连接" [disabled] [ref=e11]:
+      - img [ref=e12]
+      - text: 连接
