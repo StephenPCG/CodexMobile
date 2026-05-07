@@ -46,6 +46,7 @@ import { maybeAutoNameSession } from './session-title-generator.js';
 import { createChatService } from './chat-service.js';
 import { searchProjectFiles } from './file-search.js';
 import { htmlEscape, readBody, sendHtml, sendJson } from './http-utils.js';
+import { createPushService } from './push-service.js';
 import { createStaticService } from './static-service.js';
 import { readVoiceUpload, saveUpload } from './upload-service.js';
 
@@ -55,6 +56,7 @@ const CLIENT_DIST = path.join(ROOT_DIR, 'client', 'dist');
 const UPLOAD_ROOT = path.join(ROOT_DIR, '.codexmobile', 'uploads');
 const IMAGE_PROMPT_STATE = path.join(ROOT_DIR, '.codexmobile', 'state', 'image-prompts.json');
 const FEISHU_AUTH_STATE = path.join(ROOT_DIR, '.codexmobile', 'state', 'feishu-auth.json');
+const PUSH_STATE = path.join(ROOT_DIR, '.codexmobile', 'state', 'push-notifications.json');
 const PORT = Number(process.env.PORT || 3321);
 const HOST = process.env.HOST || '0.0.0.0';
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3443);
@@ -66,6 +68,7 @@ const FEISHU_APP_ID = String(process.env.CODEXMOBILE_FEISHU_APP_ID || '').trim()
 const FEISHU_APP_SECRET = String(process.env.CODEXMOBILE_FEISHU_APP_SECRET || '').trim();
 const FEISHU_REDIRECT_URI = String(process.env.CODEXMOBILE_FEISHU_REDIRECT_URI || '').trim();
 const FEISHU_DOCS_HOME_URL = process.env.CODEXMOBILE_FEISHU_DOCS_URL || 'https://docs.feishu.cn/';
+const PUSH_SUBJECT = String(process.env.CODEXMOBILE_PUSH_SUBJECT || PUBLIC_URL || 'mailto:codexmobile@localhost').trim();
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_VOICE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REASONING_EFFORT = 'xhigh';
@@ -80,6 +83,10 @@ const staticService = createStaticService({
   httpsRootCaPath: HTTPS_ROOT_CA_PATH
 });
 const gitService = createGitService({ getProject });
+const pushService = createPushService({
+  statePath: PUSH_STATE,
+  subject: PUSH_SUBJECT
+});
 let statusConfigFallback = null;
 
 async function getStatusConfigFallback() {
@@ -318,6 +325,9 @@ function broadcast(payload) {
       socket.send(serialized);
     }
   }
+  pushService.notifyForPayload(payload).catch((error) => {
+    console.warn('[push] Notification dispatch failed:', error.message);
+  });
 }
 
 function sendGitError(res, error, fallback = 'Git operation failed') {
@@ -460,6 +470,42 @@ async function handleApi(req, res, url) {
       broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
     }
     sendJson(res, 200, { success: !timedOut && !result.error, pending: timedOut, error: result.error?.message || null, ...snapshot });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/notifications/public-key') {
+    sendJson(res, 200, await pushService.publicStatus());
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/notifications/subscribe') {
+    try {
+      const body = await readBody(req);
+      const result = await pushService.subscribe(body.subscription || body);
+      await pushService.sendNotification({
+        level: 'success',
+        title: '完成通知已开启',
+        body: 'CodexMobile 后台通知已经接通。',
+        tag: 'codexmobile-notifications-enabled'
+      });
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      const statusCode = error.statusCode || 500;
+      console.warn(`[push] subscribe failed remote=${remoteAddress(req)} message=${error.message}`);
+      sendJson(res, statusCode, { error: error.message || 'Failed to subscribe push notification' });
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/notifications/unsubscribe') {
+    try {
+      const body = await readBody(req);
+      const endpoint = body.endpoint || body.subscription?.endpoint;
+      sendJson(res, 200, { success: true, ...(await pushService.unsubscribe(endpoint)) });
+    } catch (error) {
+      const statusCode = error.statusCode || 500;
+      sendJson(res, statusCode, { error: error.message || 'Failed to unsubscribe push notification' });
+    }
     return;
   }
 

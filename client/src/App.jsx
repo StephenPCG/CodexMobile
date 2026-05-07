@@ -57,13 +57,17 @@ import {
 import { connectionRecoveryState } from './connection-recovery.js';
 import {
   browserNotificationPermission,
-  browserNotificationsSupported,
   isStandalonePwa,
   notificationFromPayload,
   notificationPreferenceEnabled,
   setNotificationPreferenceEnabled,
   shouldUseWebNotification
 } from './notification-events.js';
+import {
+  browserPushSupported,
+  notificationEnablementMessage,
+  registerWebPush
+} from './web-push-client.js';
 import {
   applySessionRenameToProjectSessions,
   desktopThreadHasAssistantAfterLocalSend,
@@ -1955,7 +1959,7 @@ function TopBar({
                 <FeishuLogoIcon size={18} className="top-docs-logo" />
                 <span>飞书文档</span>
               </button>
-              <button type="button" role="menuitem" onClick={handleEnableNotifications} disabled={!notificationSupported || notificationEnabled}>
+              <button type="button" role="menuitem" onClick={handleEnableNotifications}>
                 <Bell size={16} />
                 <span>{notificationEnabled ? '完成通知已开启' : '开启完成通知'}</span>
               </button>
@@ -7431,6 +7435,9 @@ export default function App() {
     if (!notification) {
       return;
     }
+    if (browserPushSupported()) {
+      return;
+    }
     if (!shouldUseWebNotification({
       enabled: notificationsEnabled,
       permission: notificationPermission,
@@ -7460,23 +7467,38 @@ export default function App() {
   }
 
   async function enableNotifications() {
-    if (!browserNotificationsSupported()) {
-      showToast({ level: 'warning', title: '通知不可用', body: '当前浏览器不支持 Web Notification。' });
+    const pushSupported = browserPushSupported();
+    const standalone = isStandalonePwa();
+    const secureContext = Boolean(window.isSecureContext);
+    if (!pushSupported || !secureContext || !standalone) {
+      showToast({
+        level: 'warning',
+        title: '通知不可用',
+        body: notificationEnablementMessage({ supported: pushSupported, secureContext, standalone }),
+        durationMs: 7000
+      });
       return;
     }
     try {
-      const permission = await Notification.requestPermission();
-      setNotificationPermission(permission);
-      const enabled = permission === 'granted';
-      setNotificationsEnabled(enabled);
-      setNotificationPreferenceEnabled(enabled);
+      const result = await registerWebPush({ apiFetch });
+      setNotificationPermission(result.permission);
+      setNotificationsEnabled(true);
+      setNotificationPreferenceEnabled(true);
       showToast({
-        level: enabled ? 'success' : 'warning',
-        title: enabled ? '完成通知已开启' : '未开启通知',
-        body: enabled ? '任务完成或需要处理时会提醒你。' : '浏览器没有授予通知权限。'
+        level: 'success',
+        title: '完成通知已开启',
+        body: notificationEnablementMessage({ supported: true, secureContext: true, standalone: true })
       });
     } catch (error) {
-      showToast({ level: 'error', title: '通知开启失败', body: error.message || '无法请求通知权限。' });
+      setNotificationPermission(browserNotificationPermission());
+      setNotificationsEnabled(false);
+      setNotificationPreferenceEnabled(false);
+      showToast({
+        level: error.code === 'permission-denied' ? 'warning' : 'error',
+        title: error.code === 'permission-denied' ? '未开启通知' : '通知开启失败',
+        body: error.message || '无法请求 Web Push 通知权限。',
+        durationMs: 7000
+      });
     }
   }
 
@@ -7916,7 +7938,7 @@ export default function App() {
   const createThreadUnavailableReason =
     status.desktopBridge?.capabilities?.createThreadReason ||
     '当前桌面端还没有开放从手机新建同源对话的入口';
-  const notificationSupported = browserNotificationsSupported();
+  const notificationSupported = browserPushSupported();
   const recoveryState = connectionRecoveryState({
     authenticated,
     connectionState,
