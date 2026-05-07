@@ -111,3 +111,46 @@ export function desktopThreadHasAssistantAfterPendingSend(pending = null, loaded
   }
   return false;
 }
+
+export function applySessionRenameToProjectSessions(current = {}, payload = {}) {
+  const projectId = payload.projectId || payload.session?.projectId || '';
+  const sessionId = payload.sessionId || payload.session?.id || '';
+  const title = normalizeText(payload.title || payload.session?.title);
+  if (!projectId || !sessionId || !title) {
+    return current;
+  }
+
+  const existing = Array.isArray(current[projectId]) ? current[projectId] : [];
+  const sessionPatch = {
+    ...(payload.session || {}),
+    id: sessionId,
+    projectId,
+    title,
+    titleLocked: payload.titleLocked ?? payload.session?.titleLocked ?? true
+  };
+  if (payload.updatedAt || payload.session?.updatedAt) {
+    sessionPatch.updatedAt = payload.updatedAt || payload.session.updatedAt;
+  }
+
+  let found = false;
+  const nextSessions = existing.map((session) => {
+    if (String(session?.id || '') !== String(sessionId)) {
+      return session;
+    }
+    found = true;
+    return { ...session, ...sessionPatch };
+  });
+
+  if (!found && payload.session) {
+    nextSessions.unshift(sessionPatch);
+  }
+
+  if (!found && !payload.session) {
+    return current;
+  }
+
+  return {
+    ...current,
+    [projectId]: nextSessions
+  };
+}

@@ -2,7 +2,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  normalizeFileMentions,
   normalizeAttachments,
+  withFileMentionReferences,
   withAttachmentReferences,
   withImageAttachmentPreviews
 } from './upload-service.js';
@@ -387,13 +389,88 @@ export function createChatService({
     });
   }
 
-  function enqueueChatJob(job) {
+  function serializeQueueJob(job) {
+    return {
+      id: job.draftId || job.turnId,
+      turnId: job.turnId,
+      projectId: job.project?.id || job.projectId || null,
+      text: job.displayMessage,
+      attachments: Array.isArray(job.attachments) ? job.attachments : [],
+      selectedSkills: Array.isArray(job.selectedSkills) ? job.selectedSkills : [],
+      fileMentions: Array.isArray(job.fileMentions) ? job.fileMentions : [],
+      createdAt: job.createdAt || new Date().toISOString(),
+      sessionId: job.selectedSessionId || null,
+      draftSessionId: job.draftSessionId || null
+    };
+  }
+
+  function queueForRequest({ sessionId = '', draftSessionId = '' } = {}) {
+    const queueKey = resolveConversationKey(
+      String(sessionId || '').trim() || null,
+      String(draftSessionId || '').trim() || null
+    );
+    return { queueKey, state: getConversationQueue(queueKey) };
+  }
+
+  function listQueue(query = {}) {
+    const { state } = queueForRequest(query);
+    return {
+      drafts: state.jobs.map(serializeQueueJob),
+      running: state.running
+    };
+  }
+
+  function removeQueuedDraft(query = {}) {
+    const draftId = String(query.draftId || '').trim();
+    if (!draftId) {
+      return null;
+    }
+    const { state } = queueForRequest(query);
+    const index = state.jobs.findIndex((job) => (job.draftId || job.turnId) === draftId);
+    if (index < 0) {
+      return null;
+    }
+    const [removed] = state.jobs.splice(index, 1);
+    return serializeQueueJob(removed);
+  }
+
+  function restoreQueuedDraft(query = {}) {
+    return removeQueuedDraft(query);
+  }
+
+  async function steerQueuedDraft(query = {}) {
+    const draft = removeQueuedDraft(query);
+    if (!draft) {
+      return null;
+    }
+    const sessionId = String(query.sessionId || draft.sessionId || '').trim();
+    if (!sessionId) {
+      const error = new Error('没有可发送到当前任务的线程。');
+      error.statusCode = 409;
+      throw error;
+    }
+    return sendChat({
+      projectId: query.projectId || draft.projectId,
+      sessionId,
+      message: draft.text,
+      attachments: draft.attachments,
+      selectedSkills: draft.selectedSkills,
+      fileMentions: draft.fileMentions,
+      sendMode: 'steer'
+    });
+  }
+
+  function enqueueChatJob(job, { forceQueued = false, autoStart = true } = {}) {
     const state = getConversationQueue(job.queueKey);
     rememberConversationAlias(job.queueKey, job.selectedSessionId);
     rememberConversationAlias(job.queueKey, job.draftSessionId);
 
-    const queued = state.running || state.jobs.length > 0;
-    state.jobs.push(job);
+    const queued = forceQueued || state.running || state.jobs.length > 0;
+    state.jobs.push({
+      ...job,
+      draftId: job.draftId || job.turnId,
+      createdAt: job.createdAt || new Date().toISOString()
+    });
 
     if (queued) {
       const sessionId = state.sessionId || job.selectedSessionId || job.draftSessionId;
@@ -415,7 +492,9 @@ export function createChatService({
       });
     }
 
-    runNextQueuedChat(job.queueKey);
+    if (autoStart) {
+      runNextQueuedChat(job.queueKey);
+    }
     return queued;
   }
 
@@ -703,6 +782,7 @@ export function createChatService({
       throw error;
     }
     const attachments = normalizeAttachments(body.attachments);
+    const fileMentions = normalizeFileMentions(body.fileMentions);
     const message = String(body.message || '').trim();
     if (!message && !attachments.length) {
       const error = new Error('message or attachments are required');
@@ -724,7 +804,10 @@ export function createChatService({
     const selectedSkills = normalizeSelectedSkills(body.selectedSkills, config.skills);
     const displayMessage = message || '请查看附件。';
     const visibleMessage = withImageAttachmentPreviews(displayMessage, attachments);
-    const codexMessage = withAttachmentReferences(displayMessage, attachments);
+    const codexMessage = withFileMentionReferences(
+      withAttachmentReferences(displayMessage, attachments),
+      fileMentions
+    );
     const legacyImageRoute = useLegacyImageGenerator();
     const imagePrompt = legacyImageRoute
       ? (isImageRequest(displayMessage, attachments)
@@ -732,6 +815,39 @@ export function createChatService({
         : resolveContinuationImagePrompt(project.id, displayMessage))
       : null;
     const conversationSessionId = selectedSessionId || draftSessionId || null;
+    const queueKey = resolveConversationKey(selectedSessionId, draftSessionId, requestedSessionId);
+    const shouldHoldInLocalQueue =
+      sendMode === 'queue' &&
+      conversationSessionId &&
+      sessionHasActiveWork(conversationSessionId);
+
+    if (shouldHoldInLocalQueue) {
+      const queued = enqueueChatJob({
+        queueKey,
+        project,
+        selectedSessionId,
+        draftSessionId,
+        executionProjectPath: project.path,
+        turnId,
+        codexMessage,
+        displayMessage,
+        attachments,
+        selectedSkills,
+        fileMentions,
+        model: session?.model || body.model || config.model || 'gpt-5.5',
+        reasoningEffort: body.reasoningEffort || defaultReasoningEffort,
+        permissionMode: body.permissionMode || 'bypassPermissions'
+      }, { forceQueued: true, autoStart: false });
+      return {
+        accepted: true,
+        queued,
+        sessionId: selectedSessionId,
+        draftSessionId,
+        turnId,
+        delivery: 'queued',
+        desktopBridge: bridge
+      };
+    }
 
     if (bridge?.mode === 'desktop-ipc' && !imagePrompt) {
       if (!selectedSessionId && desktopIpcCanUseBackgroundFallback(bridge)) {
@@ -935,7 +1051,6 @@ export function createChatService({
     }
 
     console.log(`[chat] accepted codex turn=${turnId} session=${selectedSessionId || draftSessionId || ''} project=${project.name}`);
-    const queueKey = resolveConversationKey(selectedSessionId, draftSessionId, requestedSessionId);
     if (sendMode === 'interrupt' && selectedSessionId) {
       abortCodexTurn(selectedSessionId);
     }
@@ -953,6 +1068,7 @@ export function createChatService({
       displayMessage,
       attachments,
       selectedSkills,
+      fileMentions,
       model: session?.model || body.model || config.model || 'gpt-5.5',
       reasoningEffort: body.reasoningEffort || defaultReasoningEffort,
       permissionMode: body.permissionMode || 'bypassPermissions'
@@ -981,7 +1097,11 @@ export function createChatService({
       return recentTurns.get(turnId) || null;
     },
     loadRecentImagePrompts,
+    listQueue,
+    removeQueuedDraft,
+    restoreQueuedDraft,
     sendChat,
-    sessionHasActiveWork
+    sessionHasActiveWork,
+    steerQueuedDraft
   };
 }

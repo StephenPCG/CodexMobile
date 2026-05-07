@@ -29,6 +29,7 @@ import {
 import { getCodexQuota } from './codex-quota.js';
 import { readCodexConfig } from './codex-config.js';
 import { getDesktopBridgeStatus } from './codex-app-server.js';
+import { createGitService } from './git-service.js';
 import { abortCodexTurn, getActiveRuns, runCodexTurn, steerCodexTurn } from './codex-runner.js';
 import {
   interruptDesktopFollowerTurn,
@@ -43,6 +44,7 @@ import { publicVoiceSpeechStatus, synthesizeSpeech } from './voice-speaker.js';
 import { publicVoiceRealtimeStatus, startVoiceRealtimeProxy } from './realtime-voice.js';
 import { maybeAutoNameSession } from './session-title-generator.js';
 import { createChatService } from './chat-service.js';
+import { searchProjectFiles } from './file-search.js';
 import { htmlEscape, readBody, sendHtml, sendJson } from './http-utils.js';
 import { createStaticService } from './static-service.js';
 import { readVoiceUpload, saveUpload } from './upload-service.js';
@@ -77,6 +79,7 @@ const staticService = createStaticService({
   generatedRoot: GENERATED_ROOT,
   httpsRootCaPath: HTTPS_ROOT_CA_PATH
 });
+const gitService = createGitService({ getProject });
 let statusConfigFallback = null;
 
 async function getStatusConfigFallback() {
@@ -317,6 +320,11 @@ function broadcast(payload) {
   }
 }
 
+function sendGitError(res, error, fallback = 'Git operation failed') {
+  const statusCode = error.statusCode || 500;
+  sendJson(res, statusCode, { error: error.message || fallback });
+}
+
 const chatService = createChatService({
   imagePromptState: IMAGE_PROMPT_STATE,
   defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
@@ -460,6 +468,106 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (method === 'GET' && pathname === '/api/git/status') {
+    const projectId = url.searchParams.get('projectId');
+    try {
+      sendJson(res, 200, { success: true, status: await gitService.status(projectId) });
+    } catch (error) {
+      console.warn(`[git] status failed project=${projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to read Git status');
+    }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/git/diff') {
+    const projectId = url.searchParams.get('projectId');
+    try {
+      sendJson(res, 200, { success: true, diff: await gitService.diff(projectId) });
+    } catch (error) {
+      console.warn(`[git] diff failed project=${projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to read Git diff');
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/git/branch') {
+    const body = await readBody(req);
+    try {
+      const result = await gitService.createBranch(body.projectId, body.branchName);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      console.warn(`[git] branch failed project=${body.projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to create Git branch');
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/git/commit') {
+    const body = await readBody(req);
+    try {
+      const result = await gitService.commit(body.projectId, body.message);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      console.warn(`[git] commit failed project=${body.projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to commit Git changes');
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/git/push') {
+    const body = await readBody(req);
+    try {
+      const result = await gitService.push(body.projectId, {
+        remote: body.remote,
+        branch: body.branch
+      });
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      console.warn(`[git] push failed project=${body.projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to push Git branch');
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/git/pull') {
+    const body = await readBody(req);
+    try {
+      const result = await gitService.pull(body.projectId, {
+        remote: body.remote,
+        branch: body.branch
+      });
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      console.warn(`[git] pull failed project=${body.projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to pull Git branch');
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/git/sync') {
+    const body = await readBody(req);
+    try {
+      const result = await gitService.sync(body.projectId);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      console.warn(`[git] sync failed project=${body.projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to sync Git branch');
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/git/commit-push') {
+    const body = await readBody(req);
+    try {
+      const result = await gitService.commitPush(body.projectId, body.message);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      console.warn(`[git] commit-push failed project=${body.projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to commit and push Git changes');
+    }
+    return;
+  }
+
   if (method === 'GET' && pathname === '/api/quotas/codex') {
     try {
       sendJson(res, 200, await getCodexQuota());
@@ -573,6 +681,15 @@ async function handleApi(req, res, url) {
 
     try {
       const renamed = await renameSession(session.id, project.id, title, { auto: Boolean(body.auto) });
+      broadcast({
+        type: 'session-renamed',
+        projectId: project.id,
+        sessionId: renamed.id,
+        title: renamed.title,
+        titleLocked: renamed.titleLocked,
+        updatedAt: renamed.updatedAt,
+        session: renamed
+      });
       const snapshot = await refreshCodexCache();
       broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
       sendJson(res, 200, { success: true, session: renamed });
@@ -616,6 +733,54 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'chat' && parts[2] === 'turns') {
     const turnId = decodeURIComponent(parts[3]);
     sendJson(res, 200, { turn: chatService.getTurn(turnId) });
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/chat/queue') {
+    sendJson(res, 200, chatService.listQueue({
+      sessionId: url.searchParams.get('sessionId') || '',
+      draftSessionId: url.searchParams.get('draftSessionId') || ''
+    }));
+    return;
+  }
+
+  if (method === 'DELETE' && pathname === '/api/chat/queue') {
+    const body = await readBody(req);
+    const draft = chatService.removeQueuedDraft(body);
+    sendJson(res, draft ? 200 : 404, { success: Boolean(draft), draft });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/chat/queue/restore') {
+    const body = await readBody(req);
+    const draft = chatService.restoreQueuedDraft(body);
+    sendJson(res, draft ? 200 : 404, { success: Boolean(draft), draft });
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/chat/queue/steer') {
+    const body = await readBody(req);
+    try {
+      const result = await chatService.steerQueuedDraft(body);
+      sendJson(res, result ? 202 : 404, result || { error: 'Queued draft not found' });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to steer queued draft' });
+    }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/files/search') {
+    const project = getProject(url.searchParams.get('projectId') || '');
+    if (!project) {
+      sendJson(res, 404, { error: 'Project not found' });
+      return;
+    }
+    try {
+      const files = await searchProjectFiles(project, url.searchParams.get('q') || '');
+      sendJson(res, 200, { files });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to search files' });
+    }
     return;
   }
 

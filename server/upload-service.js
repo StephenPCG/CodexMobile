@@ -202,3 +202,31 @@ export function withAttachmentReferences(message, attachments) {
   }
   return [message, `附件路径:\n${fileLines.join('\n')}`].filter(Boolean).join('\n\n');
 }
+
+export function normalizeFileMentions(value) {
+  const items = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  const mentions = [];
+  for (const item of items) {
+    const pathValue = String(item?.path || '').trim();
+    if (!pathValue || seen.has(pathValue)) {
+      continue;
+    }
+    seen.add(pathValue);
+    const name = String(item?.name || item?.fileName || path.basename(pathValue)).trim() || path.basename(pathValue);
+    mentions.push({ name, path: pathValue });
+    if (mentions.length >= 12) {
+      break;
+    }
+  }
+  return mentions;
+}
+
+export function withFileMentionReferences(message, fileMentions = []) {
+  const mentions = normalizeFileMentions(fileMentions);
+  if (!mentions.length) {
+    return message;
+  }
+  const lines = mentions.map((mention) => `- 文件: ${mention.name} (${mention.path})`);
+  return [message, `引用文件路径:\n${lines.join('\n')}`].filter(Boolean).join('\n\n');
+}

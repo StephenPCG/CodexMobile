@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  normalizeFileMentions,
   normalizeAttachments,
   parseMultipartFile,
   withAttachmentReferences,
+  withFileMentionReferences,
   withImageAttachmentPreviews
 } from './upload-service.js';
 
@@ -50,5 +52,23 @@ test('normalizeAttachments keeps valid paths and splits image/file references', 
   assert.equal(
     withAttachmentReferences('看文件', attachments),
     '看文件\n\n附件路径:\n- 文件: brief.pdf (/tmp/brief.pdf)'
+  );
+});
+
+test('file mention references dedupe paths and append to the model message', () => {
+  const mentions = normalizeFileMentions([
+    { name: 'App.jsx', path: '/repo/client/src/App.jsx' },
+    { name: 'duplicate.jsx', path: '/repo/client/src/App.jsx' },
+    { path: '/repo/server/index.js' },
+    { name: 'missing-path' }
+  ]);
+
+  assert.deepEqual(mentions, [
+    { name: 'App.jsx', path: '/repo/client/src/App.jsx' },
+    { name: 'index.js', path: '/repo/server/index.js' }
+  ]);
+  assert.equal(
+    withFileMentionReferences('看这两个文件', mentions),
+    '看这两个文件\n\n引用文件路径:\n- 文件: App.jsx (/repo/client/src/App.jsx)\n- 文件: index.js (/repo/server/index.js)'
   );
 });

@@ -1,19 +1,5 @@
 import { isThinkingActivityStep } from './activity-display.js';
 
-function isNarrativeStep(step = null) {
-  const kind = String(step?.kind || '');
-  return (kind === 'agent_message' || kind === 'message') && !step?.command;
-}
-
-function findLastIndex(items, predicate) {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (predicate(items[index], index)) {
-      return index;
-    }
-  }
-  return -1;
-}
-
 export function mergeActivityStep(currentSteps, step) {
   if (!step) {
     return currentSteps || [];
@@ -29,14 +15,6 @@ export function mergeActivityStep(currentSteps, step) {
     const thinkingIndex = steps.findIndex((item) => isThinkingActivityStep(item));
     if (thinkingIndex >= 0) {
       steps[thinkingIndex] = { ...steps[thinkingIndex], ...step };
-      return steps;
-    }
-  }
-
-  if (isNarrativeStep(step)) {
-    const narrativeIndex = findLastIndex(steps, (item) => isNarrativeStep(item));
-    if (narrativeIndex >= 0) {
-      steps[narrativeIndex] = { ...steps[narrativeIndex], ...step };
       return steps;
     }
   }

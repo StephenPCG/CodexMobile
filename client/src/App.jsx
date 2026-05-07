@@ -1,6 +1,8 @@
 import {
   Archive,
+  ArrowDown,
   ArrowUp,
+  Bell,
   Bot,
   Check,
   ChevronDown,
@@ -20,6 +22,7 @@ import {
   MessageSquare,
   MessageSquarePlus,
   Monitor,
+  MoreHorizontal,
   Paperclip,
   Pencil,
   Plus,
@@ -47,6 +50,22 @@ import { isPlaceholderTimelineItem } from './activity-timeline.js';
 import { isNearChatBottom, shouldFollowChatOutput } from './chat-scroll.js';
 import { composerSendState, desktopBridgeCanCreateThread } from './send-state.js';
 import {
+  detectComposerToken,
+  filteredSlashCommands,
+  replaceComposerToken
+} from './composer-shortcuts.js';
+import { connectionRecoveryState } from './connection-recovery.js';
+import {
+  browserNotificationPermission,
+  browserNotificationsSupported,
+  isStandalonePwa,
+  notificationFromPayload,
+  notificationPreferenceEnabled,
+  setNotificationPreferenceEnabled,
+  shouldUseWebNotification
+} from './notification-events.js';
+import {
+  applySessionRenameToProjectSessions,
   desktopThreadHasAssistantAfterLocalSend,
   desktopThreadHasAssistantAfterPendingSend,
   mergeLiveSelectedThreadMessages,
@@ -1829,27 +1848,74 @@ function bridgeConnectionLabel(connectionState, desktopBridge) {
   return CONNECTION_STATUS.connected;
 }
 
-function TopBar({ selectedProject, connectionState, desktopBridge, onMenu, onOpenDocs, onGitAction, gitDisabled = false }) {
+function TopBar({
+  selectedProject,
+  selectedSession,
+  connectionState,
+  desktopBridge,
+  onMenu,
+  onOpenDocs,
+  onGitAction,
+  notificationSupported,
+  notificationEnabled,
+  onEnableNotifications,
+  gitDisabled = false
+}) {
   const status = bridgeConnectionLabel(connectionState, desktopBridge);
-  const [gitOpen, setGitOpen] = useState(false);
-  const gitMenuRef = useRef(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [copiedThreadId, setCopiedThreadId] = useState(false);
+  const menuRef = useRef(null);
+  const copiedTimerRef = useRef(null);
+  const canCopyThreadId = Boolean(selectedSession?.id && !isDraftSession(selectedSession));
 
   useEffect(() => {
-    if (!gitOpen) {
+    if (!menuOpen) {
       return undefined;
     }
-    function closeGitMenu(event) {
-      if (!gitMenuRef.current?.contains(event.target)) {
-        setGitOpen(false);
+    function closeMenu(event) {
+      if (!menuRef.current?.contains(event.target)) {
+        setMenuOpen(false);
       }
     }
-    document.addEventListener('pointerdown', closeGitMenu);
-    return () => document.removeEventListener('pointerdown', closeGitMenu);
-  }, [gitOpen]);
+    document.addEventListener('pointerdown', closeMenu);
+    return () => document.removeEventListener('pointerdown', closeMenu);
+  }, [menuOpen]);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+  }, []);
 
   function handleGitAction(action) {
-    setGitOpen(false);
+    setMenuOpen(false);
     onGitAction?.(action);
+  }
+
+  async function handleCopyThreadId() {
+    if (!canCopyThreadId) {
+      return;
+    }
+    const copied = await copyTextToClipboard(selectedSession.id);
+    if (!copied) {
+      window.alert('复制失败');
+      return;
+    }
+    setCopiedThreadId(true);
+    if (copiedTimerRef.current) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+    copiedTimerRef.current = window.setTimeout(() => setCopiedThreadId(false), 1400);
+  }
+
+  function handleOpenDocs() {
+    setMenuOpen(false);
+    onOpenDocs?.();
+  }
+
+  function handleEnableNotifications() {
+    setMenuOpen(false);
+    onEnableNotifications?.();
   }
 
   return (
@@ -1865,41 +1931,62 @@ function TopBar({ selectedProject, connectionState, desktopBridge, onMenu, onOpe
         </span>
       </div>
       <div className="top-actions">
-        <div className="git-menu-wrap" ref={gitMenuRef}>
+        <div className="top-menu-wrap" ref={menuRef}>
           <button
             type="button"
             className="icon-button"
-            onClick={() => setGitOpen((value) => !value)}
-            aria-label="Git 操作"
-            aria-expanded={gitOpen}
-            disabled={gitDisabled}
+            onClick={() => setMenuOpen((value) => !value)}
+            aria-label="更多操作"
+            aria-expanded={menuOpen}
           >
-            <GitBranch size={20} />
+            <MoreHorizontal size={22} />
           </button>
-          {gitOpen ? (
-            <div className="git-menu-popover" role="menu" aria-label="Git 操作">
-              <div className="git-menu-title">
-                <GitBranch size={16} />
-                <span>Git 操作</span>
+          {menuOpen ? (
+            <div className="top-menu-popover" role="menu" aria-label="更多操作">
+              <div className="top-menu-title">
+                <MoreHorizontal size={16} />
+                <span>更多</span>
               </div>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('commit')}>
+              <button type="button" role="menuitem" onClick={handleCopyThreadId} disabled={!canCopyThreadId}>
+                {copiedThreadId ? <Check size={16} /> : <Copy size={16} />}
+                <span>{copiedThreadId ? '已复制对话 ID' : '复制对话 ID'}</span>
+              </button>
+              <button type="button" role="menuitem" onClick={handleOpenDocs}>
+                <FeishuLogoIcon size={18} className="top-docs-logo" />
+                <span>飞书文档</span>
+              </button>
+              <button type="button" role="menuitem" onClick={handleEnableNotifications} disabled={!notificationSupported || notificationEnabled}>
+                <Bell size={16} />
+                <span>{notificationEnabled ? '完成通知已开启' : '开启完成通知'}</span>
+              </button>
+              <div className="top-menu-divider" />
+              <div className="top-menu-title">
+                <GitBranch size={16} />
+                <span>Git</span>
+              </div>
+              <button type="button" role="menuitem" onClick={() => handleGitAction('status')} disabled={gitDisabled}>
+                <GitBranch size={16} />
+                <span>Git 面板</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => handleGitAction('sync')} disabled={gitDisabled}>
+                <RefreshCw size={16} />
+                <span>同步</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => handleGitAction('commit')} disabled={gitDisabled}>
                 <GitCommitHorizontal size={16} />
                 <span>提交</span>
               </button>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('push')}>
+              <button type="button" role="menuitem" onClick={() => handleGitAction('push')} disabled={gitDisabled}>
                 <UploadCloud size={16} />
                 <span>推送</span>
               </button>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('branch')}>
+              <button type="button" role="menuitem" onClick={() => handleGitAction('branch')} disabled={gitDisabled}>
                 <GitBranch size={16} />
                 <span>创建分支</span>
               </button>
             </div>
           ) : null}
         </div>
-        <button type="button" className="icon-button" onClick={onOpenDocs} aria-label="打开文档">
-          <FeishuLogoIcon size={23} className="top-docs-logo" />
-        </button>
       </div>
     </header>
   );
@@ -2055,6 +2142,392 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
               </>
             )}
           </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function gitActionTitle(action) {
+  if (action === 'status') {
+    return 'Git 面板';
+  }
+  if (action === 'diff') {
+    return 'Git Diff';
+  }
+  if (action === 'sync') {
+    return 'Git 同步';
+  }
+  if (action === 'commit-push') {
+    return '提交并推送';
+  }
+  if (action === 'commit') {
+    return 'Git 提交';
+  }
+  if (action === 'push') {
+    return 'Git 推送';
+  }
+  if (action === 'branch') {
+    return '创建分支';
+  }
+  return 'Git';
+}
+
+function gitBranchDraft(project) {
+  const name = String(project?.name || 'changes')
+    .trim()
+    .toLowerCase()
+    .replace(/^codex\//, '')
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '');
+  return `codex/${name || 'changes'}`;
+}
+
+function gitViewFromAction(action) {
+  if (action === 'commit' || action === 'commit-push') {
+    return 'commit';
+  }
+  if (action === 'branch') {
+    return 'branch';
+  }
+  if (action === 'push' || action === 'sync') {
+    return 'sync';
+  }
+  if (action === 'diff') {
+    return 'diff';
+  }
+  return 'status';
+}
+
+function gitSafetyWarnings(status = {}) {
+  const warnings = [];
+  const files = Array.isArray(status.files) ? status.files : [];
+  if (files.length) {
+    warnings.push(`工作区有 ${files.length} 个改动文件`);
+  }
+  if (status.behind > 0) {
+    warnings.push(`落后远端 ${status.behind} 个提交，pull/sync 会先尝试快进`);
+  }
+  if (status.branch && !String(status.branch).startsWith('codex/')) {
+    warnings.push('当前不是 codex/ 分支，操作前请确认分支用途');
+  }
+  if (status.branch && !status.upstream) {
+    warnings.push('当前分支没有 upstream，push 会设置 origin upstream');
+  }
+  if (!status.clean && status.behind > 0) {
+    warnings.push('本地有改动且落后远端，pull 可能失败并保留 Git 原始输出');
+  }
+  return warnings;
+}
+
+function GitPanel({ open, action, project, onClose, onToast }) {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState('');
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  const [diff, setDiff] = useState(null);
+  const [activeView, setActiveView] = useState(() => gitViewFromAction(action));
+  const [commitMessage, setCommitMessage] = useState('');
+  const [branchName, setBranchName] = useState('');
+
+  const projectId = project?.id || '';
+  const title = gitActionTitle(activeView === 'status' ? 'status' : activeView);
+  const files = Array.isArray(status?.files) ? status.files : [];
+  const canCommit = Boolean(status?.canCommit);
+  const canPush = Boolean(status?.branch);
+  const safetyWarnings = gitSafetyWarnings(status || {});
+
+  const loadGitStatus = useCallback(async () => {
+    if (!open || !projectId) {
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const data = await apiFetch(`/api/git/status?projectId=${encodeURIComponent(projectId)}`);
+      const nextStatus = data.status || null;
+      setStatus(nextStatus);
+      setCommitMessage((current) => current || nextStatus?.defaultCommitMessage || '');
+      setBranchName((current) => current || gitBranchDraft(project));
+    } catch (loadError) {
+      setError(loadError.message || '读取 Git 状态失败');
+    } finally {
+      setBusy(false);
+    }
+  }, [open, projectId, project]);
+
+  const loadGitDiff = useCallback(async () => {
+    if (!open || !projectId) {
+      return;
+    }
+    setBusy(true);
+    setBusyAction('diff');
+    setError('');
+    try {
+      const data = await apiFetch(`/api/git/diff?projectId=${encodeURIComponent(projectId)}`);
+      setDiff(data.diff || null);
+      if (data.diff?.status) {
+        setStatus(data.diff.status);
+      }
+    } catch (loadError) {
+      setError(loadError.message || '读取 Git diff 失败');
+    } finally {
+      setBusy(false);
+      setBusyAction('');
+    }
+  }, [open, projectId]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setResult(null);
+    setDiff(null);
+    setActiveView(gitViewFromAction(action));
+    setCommitMessage('');
+    setBranchName('');
+    loadGitStatus();
+  }, [open, action, projectId, loadGitStatus]);
+
+  useEffect(() => {
+    if (open && activeView === 'diff' && !diff && !busy) {
+      loadGitDiff();
+    }
+  }, [open, activeView, diff, busy, loadGitDiff]);
+
+  if (!open) {
+    return null;
+  }
+
+  async function runGitAction(nextAction = action) {
+    if (!projectId || busy) {
+      return;
+    }
+    setBusy(true);
+    setBusyAction(nextAction);
+    setError('');
+    setResult(null);
+    onToast?.({ level: 'info', title: gitActionTitle(nextAction), body: '正在执行 Git 操作...' });
+    try {
+      let data = null;
+      if (nextAction === 'commit') {
+        data = await apiFetch('/api/git/commit', {
+          method: 'POST',
+          body: { projectId, message: commitMessage }
+        });
+      } else if (nextAction === 'commit-push') {
+        data = await apiFetch('/api/git/commit-push', {
+          method: 'POST',
+          body: { projectId, message: commitMessage }
+        });
+      } else if (nextAction === 'push') {
+        data = await apiFetch('/api/git/push', {
+          method: 'POST',
+          body: { projectId }
+        });
+      } else if (nextAction === 'pull') {
+        data = await apiFetch('/api/git/pull', {
+          method: 'POST',
+          body: { projectId }
+        });
+      } else if (nextAction === 'sync') {
+        data = await apiFetch('/api/git/sync', {
+          method: 'POST',
+          body: { projectId }
+        });
+      } else if (nextAction === 'branch') {
+        data = await apiFetch('/api/git/branch', {
+          method: 'POST',
+          body: { projectId, branchName }
+        });
+      }
+      setResult(data || {});
+      setStatus(data?.status || status);
+      if (data?.status?.defaultCommitMessage) {
+        setCommitMessage(data.status.defaultCommitMessage);
+      }
+      onToast?.({ level: 'success', title: gitActionTitle(nextAction), body: 'Git 操作已完成' });
+    } catch (runError) {
+      setError(runError.message || 'Git 操作失败');
+      onToast?.({ level: 'error', title: gitActionTitle(nextAction), body: runError.message || 'Git 操作失败' });
+    } finally {
+      setBusy(false);
+      setBusyAction('');
+    }
+  }
+
+  const commitDisabled = busy || !projectId || !canCommit || !commitMessage.trim();
+  const pushDisabled = busy || !projectId || !canPush;
+  const branchDisabled = busy || !projectId || !branchName.trim();
+
+  return (
+    <section className="docs-panel git-panel" role="dialog" aria-modal="true" aria-label={title}>
+      <header className="docs-panel-header">
+        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭 Git">
+          <ChevronLeft size={22} />
+        </button>
+        <div className="docs-panel-title">
+          <strong>{title}</strong>
+          <span>{status?.branch || project?.name || 'Git'}</span>
+        </div>
+        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭 Git">
+          <X size={20} />
+        </button>
+      </header>
+      <div className="docs-panel-body git-panel-body">
+        <div className="git-tabs" role="tablist" aria-label="Git 操作">
+          {[
+            ['status', '状态'],
+            ['diff', 'Diff'],
+            ['sync', '同步'],
+            ['commit', '提交'],
+            ['branch', '分支']
+          ].map(([view, label]) => (
+            <button
+              key={view}
+              type="button"
+              className={activeView === view ? 'is-active' : ''}
+              onClick={() => setActiveView(view)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <section className="git-status-card">
+          <div className="git-status-head">
+            <div>
+              <strong>{status?.clean ? '工作区干净' : '当前改动'}</strong>
+              <span>
+                {status?.branch || '未读取'}
+                {status?.upstream ? ` -> ${status.upstream}` : ''}
+              </span>
+            </div>
+            <button type="button" className="icon-button" onClick={loadGitStatus} disabled={busy} aria-label="刷新 Git 状态">
+              <RefreshCw size={18} />
+            </button>
+          </div>
+          <div className="git-status-metrics">
+            <span>{files.length} 个文件</span>
+            <span>ahead {status?.ahead || 0}</span>
+            <span>behind {status?.behind || 0}</span>
+          </div>
+          {files.length ? (
+            <div className="git-file-list">
+              {files.slice(0, 18).map((file) => (
+                <div key={`${file.status}:${file.path}`}>
+                  <code>{file.status}</code>
+                  <span>{file.path}</span>
+                </div>
+              ))}
+              {files.length > 18 ? <small>还有 {files.length - 18} 个文件</small> : null}
+            </div>
+          ) : null}
+          {safetyWarnings.length ? (
+            <div className="git-safety-list">
+              {safetyWarnings.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </div>
+          ) : null}
+        </section>
+
+        {activeView === 'diff' ? (
+          <section className="git-diff-card">
+            <div className="git-section-head">
+              <strong>Diff 预览</strong>
+              <button type="button" onClick={loadGitDiff} disabled={busy}>
+                {busyAction === 'diff' ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                刷新
+              </button>
+            </div>
+            {diff?.summary ? <pre className="git-diff-summary">{diff.summary}</pre> : null}
+            <pre className="git-diff-pre">{diff?.patch || (busyAction === 'diff' ? '正在读取 diff...' : '暂无 diff')}</pre>
+            {diff?.truncated ? <small className="git-diff-note">diff 太长，已截断显示。</small> : null}
+          </section>
+        ) : null}
+
+        {activeView === 'sync' ? (
+          <section className="git-action-card">
+            <div className="git-section-head">
+              <strong>同步操作</strong>
+              <span>pull 使用 --ff-only，sync 会 pull 后按需 push</span>
+            </div>
+            <div className="git-action-grid">
+              <button type="button" onClick={() => runGitAction('pull')} disabled={busy || !projectId}>
+                {busyAction === 'pull' ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                Pull
+              </button>
+              <button type="button" onClick={() => runGitAction('sync')} disabled={busy || !projectId}>
+                {busyAction === 'sync' ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                Sync
+              </button>
+              <button type="button" onClick={() => runGitAction('push')} disabled={pushDisabled}>
+                {busyAction === 'push' ? <Loader2 className="spin" size={15} /> : <UploadCloud size={15} />}
+                Push
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {activeView === 'commit' ? (
+          <label className="git-field">
+            <span>提交信息</span>
+            <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} />
+          </label>
+        ) : null}
+
+        {activeView === 'commit' ? (
+          <div className="git-action-grid">
+            <button type="button" onClick={() => runGitAction('commit')} disabled={commitDisabled}>
+              {busyAction === 'commit' ? <Loader2 className="spin" size={15} /> : <GitCommitHorizontal size={15} />}
+              提交
+            </button>
+            <button type="button" onClick={() => runGitAction('commit-push')} disabled={commitDisabled}>
+              {busyAction === 'commit-push' ? <Loader2 className="spin" size={15} /> : <UploadCloud size={15} />}
+              提交并推送
+            </button>
+          </div>
+        ) : null}
+
+        {activeView === 'branch' ? (
+          <label className="git-field">
+            <span>分支名</span>
+            <input value={branchName} onChange={(event) => setBranchName(event.target.value)} />
+          </label>
+        ) : null}
+
+        {activeView === 'branch' ? (
+          <div className="git-action-grid">
+            <button type="button" onClick={() => runGitAction('branch')} disabled={branchDisabled}>
+              {busyAction === 'branch' ? <Loader2 className="spin" size={15} /> : <GitBranch size={15} />}
+              创建分支
+            </button>
+          </div>
+        ) : null}
+
+        {error ? <div className="docs-panel-error">{error}</div> : null}
+        {result ? (
+          <div className="git-result">
+            <Check size={17} />
+            <span>
+              {action === 'commit' && result.hash ? `已提交 ${result.hash}` : null}
+              {result.hash && action !== 'commit' ? `已提交 ${result.hash}` : null}
+              {result.branch || result.pushed?.branch ? `已更新 ${result.branch || result.pushed?.branch}` : null}
+              {!result.hash && !result.branch && !result.pushed?.branch ? 'Git 操作已完成' : null}
+            </span>
+          </div>
+        ) : null}
+        {result?.output ? <pre className="git-output">{result.output}</pre> : null}
+
+        <div className="docs-panel-actions git-panel-actions">
+          <button type="button" onClick={loadGitStatus} disabled={busy}>
+            <RefreshCw size={16} />
+            刷新状态
+          </button>
+          <button type="button" onClick={onClose}>关闭</button>
         </div>
       </div>
     </section>
@@ -2233,20 +2706,14 @@ function activityTimeRange(steps) {
 function stepsForActivityTimeline(steps) {
   const items = Array.isArray(steps) ? steps : [];
   let latestThinkingIndex = -1;
-  let latestNarrativeIndex = -1;
   items.forEach((step, index) => {
     if (isThinkingActivityStep(step)) {
       latestThinkingIndex = index;
-    } else if (isNarrativeActivity(step)) {
-      latestNarrativeIndex = index;
     }
   });
   return items.filter((step, index) => {
     if (isThinkingActivityStep(step)) {
       return index === latestThinkingIndex;
-    }
-    if (isNarrativeActivity(step)) {
-      return index === latestNarrativeIndex;
     }
     return true;
   });
@@ -2808,19 +3275,6 @@ function browserActivityLabel(toolName) {
     return '操作页面';
   }
   return '操作浏览器';
-}
-
-function gitActionPrompt(action) {
-  if (action === 'commit') {
-    return '请执行 Git 提交：先检查当前仓库的 git status 和 diff，确认改动范围后生成合适的中文提交信息，并提交当前相关改动。不要推送。';
-  }
-  if (action === 'push') {
-    return '请执行 Git 推送：检查当前分支和远程状态，然后把当前分支推送到远程；如果缺少 upstream，请按当前分支设置 upstream 后推送。';
-  }
-  if (action === 'branch') {
-    return '请创建 Git 分支：基于当前工作区创建一个新分支，分支名使用 codex/ 前缀，并根据当前工作内容命名。';
-  }
-  return '';
 }
 
 function extractFileRefs(value) {
@@ -3564,6 +4018,7 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
   const contentRef = useRef(null);
   const bottomPinnedRef = useRef(true);
   const pendingInitialScrollSessionRef = useRef(null);
+  const [showScrollLatest, setShowScrollLatest] = useState(false);
   const hasMessages = messages.length > 0;
   const sessionId = selectedSession?.id || '';
 
@@ -3582,7 +4037,9 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
     }
 
     function updatePinnedState() {
-      bottomPinnedRef.current = isNearChatBottom(pane);
+      const pinned = isNearChatBottom(pane);
+      bottomPinnedRef.current = pinned;
+      setShowScrollLatest(!pinned);
     }
 
     updatePinnedState();
@@ -3597,6 +4054,7 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
     }
     const frame = requestAnimationFrame(() => {
       scrollToBottom('auto');
+      setShowScrollLatest(false);
       if (force) {
         pendingInitialScrollSessionRef.current = null;
         bottomPinnedRef.current = true;
@@ -3622,6 +4080,7 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
   useEffect(() => {
     pendingInitialScrollSessionRef.current = selectedSession?.id || null;
     bottomPinnedRef.current = true;
+    setShowScrollLatest(false);
     const frame = requestAnimationFrame(() => scrollToBottom('auto'));
     return () => cancelAnimationFrame(frame);
   }, [selectedSession?.id, scrollToBottom]);
@@ -3651,6 +4110,20 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
           />
         ))}
       </div>
+      {showScrollLatest ? (
+        <button
+          type="button"
+          className="scroll-latest-button"
+          onClick={() => {
+            scrollToBottom('smooth');
+            bottomPinnedRef.current = true;
+            setShowScrollLatest(false);
+          }}
+          aria-label="回到最新消息"
+        >
+          <ArrowDown size={16} />
+        </button>
+      ) : null}
     </section>
   );
 }
@@ -3799,9 +4272,68 @@ function ContextStatusButton({ contextStatus, open, onToggle }) {
   );
 }
 
+function ToastStack({ toasts, onDismiss }) {
+  if (!toasts.length) {
+    return null;
+  }
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((toast) => (
+        <div key={toast.id} className={`toast-item is-${toast.level || 'info'}`}>
+          <span className="toast-dot" />
+          <span>
+            <strong>{toast.title}</strong>
+            {toast.body ? <small>{toast.body}</small> : null}
+          </span>
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="关闭提醒">
+            <X size={14} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConnectionRecoveryCard({ state, onRetry, onSync, onPair, onStatus }) {
+  if (!state) {
+    return null;
+  }
+
+  function runAction(action) {
+    if (action === 'pair') {
+      onPair?.();
+    } else if (action === 'sync') {
+      onSync?.();
+    } else if (action === 'status') {
+      onStatus?.();
+    } else {
+      onRetry?.();
+    }
+  }
+
+  return (
+    <section className={`connection-recovery-card is-${state.state}`} aria-label="连接恢复">
+      <span className="connection-recovery-dot" />
+      <span className="connection-recovery-main">
+        <strong>{state.title}</strong>
+        <small>{state.detail}</small>
+      </span>
+      <button type="button" onClick={() => runAction(state.primaryAction)}>
+        {state.primaryLabel}
+      </button>
+      {state.secondaryAction ? (
+        <button type="button" onClick={() => runAction(state.secondaryAction)}>
+          {state.secondaryLabel}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
 function Composer({
   input,
   setInput,
+  selectedProject,
   selectedSession,
   onSubmit,
   running,
@@ -3814,28 +4346,59 @@ function Composer({
   skills,
   selectedSkillPaths,
   onToggleSkill,
+  onSelectSkill,
   onClearSkills,
   permissionMode,
   onSelectPermission,
   attachments,
   onUploadFiles,
   onRemoveAttachment,
+  fileMentions,
+  onAddFileMention,
+  onRemoveFileMention,
   uploading,
   contextStatus,
   runStatus,
-  desktopBridge
+  desktopBridge,
+  queueDrafts,
+  onRestoreQueueDraft,
+  onRemoveQueueDraft,
+  onSteerQueueDraft
 }) {
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
   const fileInputRef = useRef(null);
   const [openMenu, setOpenMenu] = useState(null);
   const [skillFilter, setSkillFilter] = useState('');
-  const hasInput = input.trim().length > 0 || attachments.length > 0;
+  const [cursorPosition, setCursorPosition] = useState(0);
+  const [fileSearch, setFileSearch] = useState({ query: '', loading: false, results: [] });
+  const selectedFileMentions = Array.isArray(fileMentions) ? fileMentions : [];
+  const hasInput = input.trim().length > 0 || attachments.length > 0 || selectedFileMentions.length > 0;
   const modelList = models?.length ? models : [{ value: selectedModel || 'gpt-5.5', label: selectedModel || 'gpt-5.5' }];
   const selectedModelLabel = modelList.find((model) => model.value === selectedModel)?.label || selectedModel || 'gpt-5.5';
   const skillList = Array.isArray(skills) ? skills : [];
   const selectedSkillSet = new Set(Array.isArray(selectedSkillPaths) ? selectedSkillPaths : []);
   const selectedSkills = skillList.filter((skill) => selectedSkillSet.has(skill.path));
+  const composerToken = useMemo(
+    () => detectComposerToken(input, cursorPosition || input.length),
+    [input, cursorPosition]
+  );
+  const slashMatches = composerToken?.type === 'slash'
+    ? filteredSlashCommands(composerToken.query)
+    : [];
+  const tokenSkillMatches = composerToken?.type === 'skill'
+    ? skillList
+      .filter((skill) => {
+        const query = composerToken.query.trim().toLowerCase();
+        if (!query) {
+          return true;
+        }
+        return [skill.label, skill.name, skill.description, skill.path]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(query));
+      })
+      .slice(0, 12)
+    : [];
   const sendState = composerSendState({
     running,
     hasInput,
@@ -3865,6 +4428,80 @@ function Composer({
     textarea.style.height = '0px';
     textarea.style.height = `${Math.min(textarea.scrollHeight, 132)}px`;
   }, [input]);
+
+  useEffect(() => {
+    if (composerToken?.type !== 'file' || !selectedProject?.id) {
+      setFileSearch({ query: '', loading: false, results: [] });
+      return undefined;
+    }
+
+    const query = composerToken.query || '';
+    let cancelled = false;
+    setFileSearch((current) => ({ ...current, query, loading: true }));
+    const timer = window.setTimeout(() => {
+      apiFetch(`/api/files/search?projectId=${encodeURIComponent(selectedProject.id)}&q=${encodeURIComponent(query)}`)
+        .then((result) => {
+          if (!cancelled) {
+            setFileSearch({ query, loading: false, results: Array.isArray(result.files) ? result.files : [] });
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setFileSearch({ query, loading: false, results: [] });
+          }
+        });
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [composerToken?.type, composerToken?.query, selectedProject?.id]);
+
+  function updateCursorFromTextarea() {
+    const textarea = textareaRef.current;
+    setCursorPosition(textarea?.selectionStart ?? input.length);
+  }
+
+  function replaceCurrentToken(replacement) {
+    if (!composerToken) {
+      return;
+    }
+    const next = replaceComposerToken(input, composerToken, replacement);
+    setInput(next);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      const position = Math.min(next.length, composerToken.start + String(replacement || '').length);
+      textareaRef.current?.setSelectionRange(position, position);
+      setCursorPosition(position);
+    });
+  }
+
+  function runSlashCommand(command) {
+    replaceCurrentToken(command.prompt ? `${command.prompt} ` : '');
+    if (command.action === 'open-context') {
+      setOpenMenu('context');
+    } else {
+      setOpenMenu(null);
+    }
+  }
+
+  function selectTokenSkill(skill) {
+    if (skill?.path) {
+      onSelectSkill(skill.path);
+    }
+    replaceCurrentToken('');
+    setOpenMenu(null);
+  }
+
+  function selectTokenFile(file) {
+    if (!file?.path) {
+      return;
+    }
+    onAddFileMention(file);
+    replaceCurrentToken(`@${file.relativePath || file.name} `);
+    setOpenMenu(null);
+  }
 
   function submit(event) {
     event.preventDefault();
@@ -3897,6 +4534,12 @@ function Composer({
     event.target.value = '';
     setOpenMenu(null);
   }
+
+  const tokenPanelOpen = !openMenu && composerToken && (
+    (composerToken.type === 'slash' && slashMatches.length > 0) ||
+    (composerToken.type === 'skill') ||
+    (composerToken.type === 'file')
+  );
 
   return (
     <form className="composer-wrap" onSubmit={submit}>
@@ -4031,6 +4674,66 @@ function Composer({
           <ContextStatusDetails contextStatus={contextStatus} />
         </div>
       ) : null}
+      {tokenPanelOpen ? (
+        <div className="composer-menu shortcut-menu" role="listbox">
+          {composerToken.type === 'slash' ? (
+            slashMatches.map((command) => (
+              <button key={command.id} type="button" onClick={() => runSlashCommand(command)}>
+                <Terminal size={16} />
+                <span>
+                  <strong>{command.title}</strong>
+                  <small>{command.aliases.join(' ')}</small>
+                </span>
+              </button>
+            ))
+          ) : null}
+          {composerToken.type === 'skill' ? (
+            tokenSkillMatches.length ? tokenSkillMatches.map((skill) => (
+              <button key={skill.path} type="button" onClick={() => selectTokenSkill(skill)}>
+                {selectedSkillSet.has(skill.path) ? <Check size={16} /> : <Bot size={16} />}
+                <span>
+                  <strong>{skill.label || skill.name}</strong>
+                  {skill.description ? <small>{skill.description}</small> : null}
+                </span>
+              </button>
+            )) : <div className="menu-empty">{skillList.length ? '没有匹配的 skill' : 'skill 列表还没加载'}</div>
+          ) : null}
+          {composerToken.type === 'file' ? (
+            fileSearch.loading ? (
+              <div className="menu-empty"><Loader2 className="spin" size={15} /> 正在搜索文件</div>
+            ) : fileSearch.results.length ? fileSearch.results.map((file) => (
+              <button key={file.path} type="button" onClick={() => selectTokenFile(file)}>
+                <FileText size={16} />
+                <span>
+                  <strong>{file.name}</strong>
+                  <small>{file.relativePath}</small>
+                </span>
+              </button>
+            )) : <div className="menu-empty">没有匹配的文件</div>
+          ) : null}
+        </div>
+      ) : null}
+      {queueDrafts?.length ? (
+        <div className="queued-drafts-panel" aria-label="排队消息">
+          {queueDrafts.map((draft) => (
+            <div key={draft.id} className="queued-draft-row">
+              <MessageSquarePlus size={15} />
+              <button type="button" className="queued-draft-text" onClick={() => onRestoreQueueDraft(draft.id)}>
+                <strong>{draft.text || '请查看附件。'}</strong>
+                <small>{draft.selectedSkills?.length ? `${draft.selectedSkills.length} skills` : '排队中'}</small>
+              </button>
+              <div className="queued-draft-actions">
+                <button type="button" onClick={() => onSteerQueueDraft(draft.id)} aria-label="立即发送到当前任务">
+                  <MessageSquare size={14} />
+                </button>
+                <button type="button" onClick={() => onRemoveQueueDraft(draft.id)} aria-label="删除排队消息">
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {runStatus ? (
         <div className="composer-run-status" role="status" aria-live="polite">
           <span className="composer-run-dot" />
@@ -4108,7 +4811,7 @@ function Composer({
         </div>
       ) : null}
       <div className="composer">
-        {attachments.length ? (
+        {attachments.length || selectedFileMentions.length ? (
           <div className="attachment-tray">
             {attachments.map((attachment) => (
               <span key={attachment.id} className="attachment-chip">
@@ -4120,13 +4823,27 @@ function Composer({
                 </button>
               </span>
             ))}
+            {selectedFileMentions.map((file) => (
+              <span key={file.path} className="attachment-chip file-mention-chip">
+                <FileText size={14} />
+                <span>{file.relativePath || file.name}</span>
+                <button type="button" onClick={() => onRemoveFileMention(file.path)} aria-label="移除文件引用">
+                  <Trash2 size={13} />
+                </button>
+              </span>
+            ))}
           </div>
         ) : null}
         <textarea
           ref={textareaRef}
           rows={1}
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => {
+            setInput(event.target.value);
+            setCursorPosition(event.target.selectionStart ?? event.target.value.length);
+          }}
+          onClick={updateCursorFromTextarea}
+          onKeyUp={updateCursorFromTextarea}
           onFocus={() => setOpenMenu(null)}
           placeholder="给 Codex 发送消息"
         />
@@ -4189,8 +4906,14 @@ export default function App() {
   const [docsOpen, setDocsOpen] = useState(false);
   const [docsBusy, setDocsBusy] = useState(false);
   const [docsError, setDocsError] = useState('');
+  const [gitPanel, setGitPanel] = useState({ open: false, action: 'commit' });
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState([]);
+  const [fileMentions, setFileMentions] = useState([]);
+  const [queueDrafts, setQueueDrafts] = useState([]);
+  const [toasts, setToasts] = useState([]);
+  const [notificationPermission, setNotificationPermission] = useState(() => browserNotificationPermission());
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => notificationPreferenceEnabled());
   const [uploading, setUploading] = useState(false);
   const [permissionMode, setPermissionMode] = useState(DEFAULT_PERMISSION_MODE);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_STATUS.model);
@@ -4224,6 +4947,7 @@ export default function App() {
   const sessionLivePollRef = useRef(false);
   const desktopIpcPendingRunsRef = useRef(new Map());
   const voiceDialogRecorderRef = useRef(null);
+  const toastTimersRef = useRef(new Map());
   const voiceDialogChunksRef = useRef([]);
   const voiceDialogStreamRef = useRef(null);
   const voiceDialogTimerRef = useRef(null);
@@ -4324,6 +5048,10 @@ export default function App() {
     () => buildComposerRunStatus(messages, running, activityClockNow),
     [messages, running, activityClockNow]
   );
+
+  useEffect(() => {
+    loadQueueDrafts(selectedSession).catch(() => null);
+  }, [selectedSession?.id]);
 
   useEffect(() => {
     if (!running && !hasRunningActivity) {
@@ -5654,6 +6382,16 @@ export default function App() {
     []
   );
 
+  useEffect(
+    () => () => {
+      for (const timer of toastTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      toastTimersRef.current.clear();
+    },
+    []
+  );
+
   useEffect(() => {
     const awaiting = voiceDialogAwaitingTurnRef.current;
     if (!voiceDialogOpen || !awaiting?.turnId || voiceDialogStateRef.current !== 'waiting') {
@@ -5962,6 +6700,30 @@ export default function App() {
         }
         return;
       }
+      if (payload.type === 'session-renamed') {
+        const sessionId = payload.sessionId || payload.session?.id;
+        const projectId = payload.projectId || payload.session?.projectId;
+        const title = String(payload.title || payload.session?.title || '').trim();
+        if (!sessionId || !projectId || !title) {
+          return;
+        }
+        setSessionsByProject((current) => applySessionRenameToProjectSessions(current, payload));
+        setSelectedSession((current) => {
+          if (!current || String(current.id) !== String(sessionId)) {
+            return current;
+          }
+          return {
+            ...current,
+            ...(payload.session || {}),
+            id: sessionId,
+            projectId,
+            title,
+            titleLocked: payload.titleLocked ?? payload.session?.titleLocked ?? true,
+            updatedAt: payload.updatedAt || payload.session?.updatedAt || current.updatedAt
+          };
+        });
+        return;
+      }
       if (payload.type === 'user-message') {
         if (!payloadMatchesCurrentConversation(payload)) {
           return;
@@ -6006,6 +6768,10 @@ export default function App() {
         if (payload.status === 'running' || payload.status === 'queued') {
           markRun(payload);
         }
+        notifyFromPayload(payload);
+        if (payload.status === 'queued' && payloadMatchesCurrentConversation(payload)) {
+          loadQueueDrafts(selectedSessionRef.current).catch(() => null);
+        }
         if (!payloadMatchesCurrentConversation(payload)) {
           return;
         }
@@ -6020,6 +6786,7 @@ export default function App() {
         if (payload.status === 'running' || payload.status === 'queued') {
           markRun(payload);
         }
+        notifyFromPayload(payload);
         if (!payloadMatchesCurrentConversation(payload)) {
           return;
         }
@@ -6034,6 +6801,8 @@ export default function App() {
         return;
       }
       if (payload.type === 'chat-complete' || payload.type === 'chat-error' || payload.type === 'chat-aborted') {
+        notifyFromPayload(payload);
+        loadQueueDrafts(selectedSessionRef.current).catch(() => null);
         if (!payloadMatchesCurrentConversation(payload)) {
           clearRun(payload);
           return;
@@ -6124,9 +6893,35 @@ export default function App() {
       await apiFetch('/api/sync', { method: 'POST' });
       await loadStatus();
       await loadProjects({ preserveSelection: true });
+      showToast({ level: 'success', title: '同步完成', body: '线程和状态已经刷新。' });
+    } catch (error) {
+      showToast({ level: 'error', title: '同步失败', body: error.message || '无法刷新同步。' });
     } finally {
       setSyncing(false);
     }
+  }
+
+  async function handleRetryConnection() {
+    try {
+      await loadStatus();
+      showToast({ level: 'success', title: '连接已刷新', body: '已重新读取本机服务状态。' });
+    } catch (error) {
+      showToast({ level: 'error', title: '连接失败', body: error.message || '本机服务暂时不可达。' });
+    }
+  }
+
+  function handleResetPairing() {
+    clearToken();
+    setAuthenticated(false);
+    setConnectionState('disconnected');
+  }
+
+  function handleShowConnectionStatus() {
+    showToast({
+      level: status.desktopBridge?.connected ? 'info' : 'warning',
+      title: bridgeConnectionLabel(connectionState, status.desktopBridge).label,
+      body: status.desktopBridge?.reason || status.desktopBridge?.mode || 'CodexMobile 状态已读取。'
+    });
   }
 
   async function handleToggleProject(project) {
@@ -6606,6 +7401,85 @@ export default function App() {
       }));
   }
 
+  function dismissToast(id) {
+    const timer = toastTimersRef.current.get(id);
+    if (timer) {
+      window.clearTimeout(timer);
+      toastTimersRef.current.delete(id);
+    }
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function showToast(toast) {
+    const id = toast.id || `toast-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const nextToast = {
+      id,
+      level: toast.level || 'info',
+      title: toast.title || '提醒',
+      body: toast.body || ''
+    };
+    setToasts((current) => [nextToast, ...current.filter((item) => item.id !== id)].slice(0, 4));
+    if (toastTimersRef.current.has(id)) {
+      window.clearTimeout(toastTimersRef.current.get(id));
+    }
+    const timer = window.setTimeout(() => dismissToast(id), toast.durationMs || 5200);
+    toastTimersRef.current.set(id, timer);
+    return id;
+  }
+
+  function maybeSendWebNotification(notification) {
+    if (!notification) {
+      return;
+    }
+    if (!shouldUseWebNotification({
+      enabled: notificationsEnabled,
+      permission: notificationPermission,
+      visibilityState: document.visibilityState,
+      standalone: isStandalonePwa()
+    })) {
+      return;
+    }
+    try {
+      new Notification(notification.title, {
+        body: notification.body,
+        tag: `codexmobile-${notification.title}`,
+        silent: false
+      });
+    } catch {
+      // Browser notification support varies across mobile browsers.
+    }
+  }
+
+  function notifyFromPayload(payload) {
+    const notification = notificationFromPayload(payload);
+    if (!notification) {
+      return;
+    }
+    showToast(notification);
+    maybeSendWebNotification(notification);
+  }
+
+  async function enableNotifications() {
+    if (!browserNotificationsSupported()) {
+      showToast({ level: 'warning', title: '通知不可用', body: '当前浏览器不支持 Web Notification。' });
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      const enabled = permission === 'granted';
+      setNotificationsEnabled(enabled);
+      setNotificationPreferenceEnabled(enabled);
+      showToast({
+        level: enabled ? 'success' : 'warning',
+        title: enabled ? '完成通知已开启' : '未开启通知',
+        body: enabled ? '任务完成或需要处理时会提醒你。' : '浏览器没有授予通知权限。'
+      });
+    } catch (error) {
+      showToast({ level: 'error', title: '通知开启失败', body: error.message || '无法请求通知权限。' });
+    }
+  }
+
   function toggleSelectedSkill(path) {
     const value = String(path || '').trim();
     if (!value) {
@@ -6618,21 +7492,126 @@ export default function App() {
     );
   }
 
+  function selectSkill(path) {
+    const value = String(path || '').trim();
+    if (!value) {
+      return;
+    }
+    setSelectedSkillPaths((current) => current.includes(value) ? current : [...current, value]);
+  }
+
   function clearSelectedSkills() {
     setSelectedSkillPaths([]);
+  }
+
+  function addFileMention(file) {
+    const pathValue = String(file?.path || '').trim();
+    if (!pathValue) {
+      return;
+    }
+    setFileMentions((current) => {
+      if (current.some((item) => item.path === pathValue)) {
+        return current;
+      }
+      return [
+        ...current,
+        {
+          name: file.name || pathValue.split('/').pop() || pathValue,
+          path: pathValue,
+          relativePath: file.relativePath || file.name || pathValue
+        }
+      ].slice(0, 12);
+    });
+  }
+
+  function removeFileMention(pathValue) {
+    setFileMentions((current) => current.filter((item) => item.path !== pathValue));
+  }
+
+  function queueQueryForSession(session = selectedSessionRef.current) {
+    if (!session?.id) {
+      return '';
+    }
+    if (isDraftSession(session)) {
+      return `draftSessionId=${encodeURIComponent(session.id)}`;
+    }
+    return `sessionId=${encodeURIComponent(session.id)}`;
+  }
+
+  async function loadQueueDrafts(session = selectedSessionRef.current) {
+    const query = queueQueryForSession(session);
+    if (!query) {
+      setQueueDrafts([]);
+      return;
+    }
+    try {
+      const result = await apiFetch(`/api/chat/queue?${query}`);
+      setQueueDrafts(Array.isArray(result.drafts) ? result.drafts : []);
+    } catch {
+      setQueueDrafts([]);
+    }
+  }
+
+  async function removeQueueDraft(draftId) {
+    const session = selectedSessionRef.current;
+    const body = {
+      sessionId: isDraftSession(session) ? null : session?.id,
+      draftSessionId: isDraftSession(session) ? session?.id : null,
+      draftId
+    };
+    await apiFetch('/api/chat/queue', { method: 'DELETE', body }).catch(() => null);
+    await loadQueueDrafts(session);
+  }
+
+  async function restoreQueueDraft(draftId) {
+    const session = selectedSessionRef.current;
+    const body = {
+      sessionId: isDraftSession(session) ? null : session?.id,
+      draftSessionId: isDraftSession(session) ? session?.id : null,
+      draftId
+    };
+    const result = await apiFetch('/api/chat/queue/restore', { method: 'POST', body }).catch(() => null);
+    const draft = result?.draft;
+    if (!draft) {
+      await loadQueueDrafts(session);
+      return;
+    }
+    setInput(draft.text || '');
+    setAttachments(Array.isArray(draft.attachments) ? draft.attachments : []);
+    setFileMentions(Array.isArray(draft.fileMentions) ? draft.fileMentions : []);
+    setSelectedSkillPaths((Array.isArray(draft.selectedSkills) ? draft.selectedSkills : [])
+      .map((skill) => skill.path)
+      .filter(Boolean));
+    await loadQueueDrafts(session);
+  }
+
+  async function steerQueueDraft(draftId) {
+    const session = selectedSessionRef.current;
+    const body = {
+      projectId: selectedProjectRef.current?.id || selectedProject?.id,
+      sessionId: isDraftSession(session) ? null : session?.id,
+      draftSessionId: isDraftSession(session) ? session?.id : null,
+      draftId
+    };
+    await apiFetch('/api/chat/queue/steer', { method: 'POST', body }).catch(() => null);
+    await loadQueueDrafts(session);
   }
 
   async function submitCodexMessage({
     message,
     attachmentsForTurn = [],
+    fileMentionsForTurn = [],
     clearComposer = false,
     restoreTextOnError = false,
     sendMode = 'start'
   }) {
     const project = selectedProject || selectedProjectRef.current;
     const selectedAttachments = Array.isArray(attachmentsForTurn) ? attachmentsForTurn : [];
-    const displayMessage = String(message || '').trim() || (selectedAttachments.length ? '请查看附件。' : '');
-    if ((!displayMessage && !selectedAttachments.length) || !project) {
+    const selectedFileMentions = Array.isArray(fileMentionsForTurn) ? fileMentionsForTurn : [];
+    const displayMessage =
+      String(message || '').trim() ||
+      (selectedAttachments.length ? '请查看附件。' : (selectedFileMentions.length ? '请查看引用文件。' : ''));
+    if ((!displayMessage && !selectedAttachments.length && !selectedFileMentions.length) || !project) {
       if (restoreTextOnError && displayMessage) {
         restoreVoiceTextToInput(displayMessage);
       }
@@ -6659,6 +7638,7 @@ export default function App() {
     if (clearComposer) {
       setInput('');
       setAttachments([]);
+      setFileMentions([]);
     }
 
     markRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
@@ -6715,6 +7695,7 @@ export default function App() {
           reasoningEffort: selectedReasoningEffort || status.reasoningEffort || DEFAULT_REASONING_EFFORT,
           selectedSkills: selectedSkillsForTurn(),
           attachments: selectedAttachments,
+          fileMentions: selectedFileMentions,
           sendMode
         }
       });
@@ -6756,6 +7737,7 @@ export default function App() {
       clearRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
       if (clearComposer) {
         setAttachments(selectedAttachments);
+        setFileMentions(selectedFileMentions);
         if (String(message || '').trim()) {
           setInput(String(message).trim());
         }
@@ -6797,31 +7779,28 @@ export default function App() {
 
   async function handleSubmit({ mode = 'start' } = {}) {
     const message = input.trim();
-    if ((!message && !attachments.length) || !selectedProject) {
+    if ((!message && !attachments.length && !fileMentions.length) || !selectedProject) {
       return;
     }
     try {
       await submitCodexMessage({
         message,
         attachmentsForTurn: attachments,
+        fileMentionsForTurn: fileMentions,
         clearComposer: true,
         sendMode: mode === 'guide' ? 'interrupt' : mode
       });
+      await loadQueueDrafts(selectedSessionRef.current);
     } catch {
       // submitCodexMessage already reflects the failure in the chat UI.
     }
   }
 
   async function handleGitAction(action) {
-    const message = gitActionPrompt(action);
-    if (!message || !selectedProject || running) {
+    if (!selectedProject || running) {
       return;
     }
-    try {
-      await submitCodexMessage({ message });
-    } catch {
-      // submitCodexMessage already reflects the failure in the chat UI.
-    }
+    setGitPanel({ open: true, action });
   }
 
   function restoreVoiceTextToInput(text) {
@@ -6937,6 +7916,13 @@ export default function App() {
   const createThreadUnavailableReason =
     status.desktopBridge?.capabilities?.createThreadReason ||
     '当前桌面端还没有开放从手机新建同源对话的入口';
+  const notificationSupported = browserNotificationsSupported();
+  const recoveryState = connectionRecoveryState({
+    authenticated,
+    connectionState,
+    desktopBridge: status.desktopBridge,
+    syncing
+  });
 
   if (!authenticated) {
     return <PairingScreen onPaired={bootstrap} />;
@@ -6946,11 +7932,15 @@ export default function App() {
     <div className={shellClass}>
       <TopBar
         selectedProject={selectedProject}
+        selectedSession={selectedSession}
         connectionState={connectionState}
         desktopBridge={status.desktopBridge}
         onMenu={() => setDrawerOpen(true)}
         onOpenDocs={() => setDocsOpen(true)}
         onGitAction={handleGitAction}
+        notificationSupported={notificationSupported}
+        notificationEnabled={notificationsEnabled && notificationPermission === 'granted'}
+        onEnableNotifications={enableNotifications}
         gitDisabled={!selectedProject || running}
       />
       <Drawer
@@ -6989,6 +7979,21 @@ export default function App() {
         onOpenAuth={handleOpenDocsAuth}
         onRefresh={handleRefreshDocs}
       />
+      <GitPanel
+        open={gitPanel.open}
+        action={gitPanel.action}
+        project={selectedProject}
+        onToast={showToast}
+        onClose={() => setGitPanel((current) => ({ ...current, open: false }))}
+      />
+      <ConnectionRecoveryCard
+        state={recoveryState}
+        onRetry={handleRetryConnection}
+        onSync={handleSync}
+        onPair={handleResetPairing}
+        onStatus={handleShowConnectionStatus}
+      />
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
       <ChatPane
         messages={messages}
         selectedSession={selectedSession}
@@ -7000,6 +8005,7 @@ export default function App() {
       <Composer
         input={input}
         setInput={setInput}
+        selectedProject={selectedProject}
         selectedSession={selectedSession}
         onSubmit={handleSubmit}
         running={running}
@@ -7012,16 +8018,24 @@ export default function App() {
         skills={status.skills}
         selectedSkillPaths={selectedSkillPaths}
         onToggleSkill={toggleSelectedSkill}
+        onSelectSkill={selectSkill}
         onClearSkills={clearSelectedSkills}
         permissionMode={permissionMode}
         onSelectPermission={setPermissionMode}
         attachments={attachments}
         onUploadFiles={handleUploadFiles}
         onRemoveAttachment={handleRemoveAttachment}
+        fileMentions={fileMentions}
+        onAddFileMention={addFileMention}
+        onRemoveFileMention={removeFileMention}
         uploading={uploading}
         contextStatus={visibleContextStatus}
         runStatus={composerRunStatus ? { ...composerRunStatus, steerable: selectedRuntime?.steerable !== false } : null}
         desktopBridge={status.desktopBridge}
+        queueDrafts={queueDrafts}
+        onRestoreQueueDraft={restoreQueueDraft}
+        onRemoveQueueDraft={removeQueueDraft}
+        onSteerQueueDraft={steerQueueDraft}
       />
       <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />
     </div>

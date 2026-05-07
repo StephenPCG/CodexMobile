@@ -313,3 +313,111 @@ test('sendChat starts a headless local Codex turn when desktop bridge is in head
   assert.match(runPayload.message, /桌面端没开也跑一下/);
   assert.equal(broadcasts.some((payload) => payload.type === 'user-message'), true);
 });
+
+test('queue drafts can be listed, deleted, and restored without auto starting during active work', async () => {
+  const { service } = makeChatService({
+    getActiveRuns: () => [{ sessionId: 'thread-1', status: 'running' }],
+    getCacheSnapshot: () => ({
+      config: {
+        model: 'gpt-5.5',
+        skills: [{ name: 'frontend-design', path: '/skills/frontend-design/SKILL.md' }]
+      }
+    })
+  });
+
+  const first = await service.sendChat({
+    projectId: 'project-1',
+    sessionId: 'thread-1',
+    clientTurnId: 'queued-turn-1',
+    message: '排队草稿 1',
+    sendMode: 'queue',
+    selectedSkills: [{ path: '/skills/frontend-design/SKILL.md' }],
+    fileMentions: [{ name: 'App.jsx', path: '/repo/client/src/App.jsx' }]
+  });
+  const second = await service.sendChat({
+    projectId: 'project-1',
+    sessionId: 'thread-1',
+    clientTurnId: 'queued-turn-2',
+    message: '排队草稿 2',
+    sendMode: 'queue'
+  });
+
+  assert.equal(first.delivery, 'queued');
+  assert.equal(second.delivery, 'queued');
+  let queue = service.listQueue({ sessionId: 'thread-1' });
+  assert.equal(queue.drafts.length, 2);
+  assert.equal(queue.drafts[0].text, '排队草稿 1');
+  assert.equal(queue.drafts[0].selectedSkills[0].path, '/skills/frontend-design/SKILL.md');
+  assert.equal(queue.drafts[0].fileMentions[0].path, '/repo/client/src/App.jsx');
+
+  const deleted = service.removeQueuedDraft({ sessionId: 'thread-1', draftId: 'queued-turn-2' });
+  assert.equal(deleted.text, '排队草稿 2');
+  queue = service.listQueue({ sessionId: 'thread-1' });
+  assert.equal(queue.drafts.length, 1);
+
+  const restored = service.restoreQueuedDraft({ sessionId: 'thread-1', draftId: 'queued-turn-1' });
+  assert.equal(restored.text, '排队草稿 1');
+  assert.equal(service.listQueue({ sessionId: 'thread-1' }).drafts.length, 0);
+});
+
+test('queued drafts can be steered into the current turn', async () => {
+  let steerPayload = null;
+  const { service } = makeChatService({
+    getActiveRuns: () => [{ sessionId: 'thread-1', status: 'running' }],
+    steerCodexTurn: async (identifier, payload) => {
+      steerPayload = { identifier, payload };
+      return { sessionId: 'thread-1', turnId: 'steered-turn' };
+    }
+  });
+
+  await service.sendChat({
+    projectId: 'project-1',
+    sessionId: 'thread-1',
+    clientTurnId: 'queued-steer-1',
+    message: '马上补充这句',
+    fileMentions: [{ name: 'server.js', path: '/repo/server/index.js' }],
+    sendMode: 'queue'
+  });
+
+  const result = await service.steerQueuedDraft({
+    projectId: 'project-1',
+    sessionId: 'thread-1',
+    draftId: 'queued-steer-1'
+  });
+
+  assert.equal(result.delivery, 'steered');
+  assert.equal(steerPayload.identifier, 'thread-1');
+  assert.match(steerPayload.payload.message, /马上补充这句/);
+  assert.match(steerPayload.payload.message, /引用文件路径/);
+  assert.match(steerPayload.payload.message, /\/repo\/server\/index\.js/);
+  assert.equal(service.listQueue({ sessionId: 'thread-1' }).drafts.length, 0);
+});
+
+test('file mentions are appended to normal chat sends', async () => {
+  let runPayload = null;
+  const { service } = makeChatService({
+    getDesktopBridgeStatus: async () => ({
+      strict: false,
+      connected: true,
+      mode: 'headless-local',
+      reason: null,
+      capabilities: { read: true, createThread: true, sendToOpenDesktopThread: false }
+    }),
+    runCodexTurn: async (payload, emit) => {
+      runPayload = payload;
+      emit({ type: 'chat-complete', sessionId: payload.sessionId, turnId: payload.turnId });
+      return payload.sessionId;
+    }
+  });
+
+  await service.sendChat({
+    projectId: 'project-1',
+    sessionId: 'thread-1',
+    message: '看文件',
+    fileMentions: [{ name: 'App.jsx', path: '/repo/client/src/App.jsx' }]
+  });
+
+  assert.match(runPayload.message, /看文件/);
+  assert.match(runPayload.message, /引用文件路径/);
+  assert.match(runPayload.message, /App\.jsx \(\/repo\/client\/src\/App\.jsx\)/);
+});

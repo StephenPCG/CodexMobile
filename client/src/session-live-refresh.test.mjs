@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  applySessionRenameToProjectSessions,
   desktopThreadHasAssistantAfterLocalSend,
   desktopThreadHasAssistantAfterPendingSend,
   mergeLiveSelectedThreadMessages,
@@ -96,4 +97,39 @@ test('desktopThreadHasAssistantAfterPendingSend still detects completion after l
   ];
 
   assert.equal(desktopThreadHasAssistantAfterPendingSend(pending, loaded), true);
+});
+
+test('applySessionRenameToProjectSessions patches the loaded sidebar session in place', () => {
+  const current = {
+    projectA: [
+      { id: 'thread-1', projectId: 'projectA', title: '旧标题', titleLocked: false, messageCount: 2 },
+      { id: 'thread-2', projectId: 'projectA', title: '别的线程', titleLocked: false, messageCount: 1 }
+    ]
+  };
+
+  const next = applySessionRenameToProjectSessions(current, {
+    type: 'session-renamed',
+    projectId: 'projectA',
+    sessionId: 'thread-1',
+    title: '新标题',
+    titleLocked: true
+  });
+
+  assert.deepEqual(next.projectA.map((session) => session.title), ['新标题', '别的线程']);
+  assert.equal(next.projectA[0].messageCount, 2);
+  assert.equal(next.projectA[0].titleLocked, true);
+});
+
+test('applySessionRenameToProjectSessions can insert a renamed session from a full payload', () => {
+  const next = applySessionRenameToProjectSessions({}, {
+    type: 'session-renamed',
+    projectId: 'projectA',
+    sessionId: 'thread-1',
+    title: '新标题',
+    session: { id: 'thread-1', projectId: 'projectA', title: '新标题', messageCount: 3 }
+  });
+
+  assert.deepEqual(next.projectA, [
+    { id: 'thread-1', projectId: 'projectA', title: '新标题', messageCount: 3, titleLocked: true }
+  ]);
 });
