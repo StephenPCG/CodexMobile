@@ -6,13 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { imageMarkdownFromCodexImageGeneration } from './codex-native-images.js';
+import { statusLabel } from './codex-runner.js';
 import { promisify } from 'node:util';
 import { archiveDesktopThread, listDesktopThreads, readDesktopThread, setDesktopThreadName } from './codex-app-server.js';
 import { CODEX_STATE_DB, readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
 import {
   readMobileSessionIndex,
-  readMobileSessionMessages,
-  readMobileSessions,
   renameMobileSession
 } from './mobile-session-index.js';
 
@@ -21,6 +20,11 @@ const HIDDEN_SESSIONS_PATH = path.join(process.cwd(), '.codexmobile', 'state', '
 const DESKTOP_IMAGE_ROOT = path.join(process.cwd(), '.codexmobile', 'desktop-images');
 const PROJECTLESS_PROJECT_ID = '__codexmobile_projectless__';
 const PROJECTLESS_PROJECT_NAME = '普通对话';
+const INCLUDE_MISSING_SUBAGENT_THREADS = process.env.CODEXMOBILE_INCLUDE_MISSING_SUBAGENT_THREADS === '1';
+const ROLLOUT_CONTEXT_READ_BYTES = Math.max(
+  64 * 1024,
+  Number(process.env.CODEXMOBILE_ROLLOUT_CONTEXT_READ_BYTES) || 1024 * 1024
+);
 const execFileAsync = promisify(execFile);
 
 let cache = {
@@ -332,7 +336,17 @@ async function readRolloutContextState(filePath, sessionId) {
     return state;
   }
 
-  const stream = fsSync.createReadStream(filePath, { encoding: 'utf8' });
+  let start = 0;
+  try {
+    const stats = await fs.stat(filePath);
+    if (stats.size > ROLLOUT_CONTEXT_READ_BYTES) {
+      start = stats.size - ROLLOUT_CONTEXT_READ_BYTES;
+    }
+  } catch {
+    return state;
+  }
+
+  const stream = fsSync.createReadStream(filePath, { encoding: 'utf8', start });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   try {
     for await (const line of rl) {
@@ -366,6 +380,9 @@ function sourceToString(source) {
 
 function isStaleProjectlessDesktopSession(thread, session) {
   if (sourceToString(thread?.source) !== 'vscode' || !session?.projectless) {
+    return false;
+  }
+  if (session.projectlessRegistered || session.mobileSessionKnown) {
     return false;
   }
   const cwd = String(thread?.cwd || '').trim();
@@ -436,7 +453,8 @@ async function sessionFromDesktopThread(
   }
   const mobileSession = mobileSessionIndex.get(thread.id);
   const hasDesktopCwd = typeof thread.cwd === 'string' && thread.cwd.trim();
-  const explicitProjectless = !hasDesktopCwd && (projectlessThreadIds.has(thread.id) || Boolean(mobileSession?.projectless));
+  const projectlessRegistered = projectlessThreadIds.has(thread.id);
+  const explicitProjectless = !hasDesktopCwd && (projectlessRegistered || Boolean(mobileSession?.projectless));
   const cwd = thread.cwd || mobileSession?.projectPath || (explicitProjectless ? projectlessWorkdir : '');
   if (!cwd && !explicitProjectless) {
     return null;
@@ -449,7 +467,8 @@ async function sessionFromDesktopThread(
     !visibleProjectIds.has(projectId);
   const preview = sanitizeVisibleUserMessage(thread.preview || mobileSession?.summary || '');
   const mobileTitle = String(mobileSession?.title || '').trim();
-  const title = String(thread.name || mobileTitle || preview.slice(0, 52) || '新对话').trim();
+  const mobileTitleCandidate = mobileTitle && mobileTitle !== '新对话' ? mobileTitle : '';
+  const title = String(thread.name || mobileTitleCandidate || preview.slice(0, 52) || mobileTitle || '新对话').trim();
   const mobileMessages = Array.isArray(mobileSession?.messages) ? mobileSession.messages : [];
   const contextState = await readRolloutContextState(thread.path, thread.id);
   const subAgentMeta = subAgentMetaFromThread(thread, spawnEdge);
@@ -470,6 +489,8 @@ async function sessionFromDesktopThread(
     isSubAgent: Boolean(subAgentMeta.parentSessionId || subAgentMeta.subAgent),
     subAgent: subAgentMeta.subAgent,
     projectless,
+    projectlessRegistered,
+    mobileSessionKnown: Boolean(mobileSession),
     filePath: thread.path || null,
     context: publicContextState(contextState, configContext)
   };
@@ -560,7 +581,6 @@ export async function refreshCodexCache() {
   const config = await readCodexConfig();
   const workspaceState = await readCodexWorkspaceState();
   const mobileSessionIndex = await readMobileSessionIndex();
-  const mobileSessions = await readMobileSessions();
   const hiddenSessionIds = await readHiddenSessionIds();
   const projectById = new Map();
   const sessionsByProject = new Map();
@@ -578,8 +598,8 @@ export async function refreshCodexCache() {
   const visibleProjectIds = new Set();
   const projectlessThreadIds = new Set(workspaceState.projectlessThreadIds || []);
   const projectlessWorkdir = projectlessWorkingDirectory(workspaceState);
-  const hasProjectlessSessions = projectlessThreadIds.size > 0 || mobileSessions.some((session) => session?.projectless);
-  const spawnEdges = await readThreadSpawnEdges();
+  const hasProjectlessSessions = projectlessThreadIds.size > 0;
+  const spawnEdges = INCLUDE_MISSING_SUBAGENT_THREADS ? await readThreadSpawnEdges() : [];
   const spawnEdgeByChildId = new Map(spawnEdges.map((edge) => [edge.childSessionId, edge]));
 
   for (const project of visibleProjects) {
@@ -627,89 +647,54 @@ export async function refreshCodexCache() {
       continue;
     }
     const existing = sessionById.get(edge.childSessionId);
-    if (existing) {
-      existing.parentSessionId = existing.parentSessionId || edge.parentSessionId;
-      existing.isSubAgent = true;
-      existing.subAgent = {
-        ...(existing.subAgent || {}),
-        status: existing.subAgent?.status || edge.status || null
-      };
+    if (!existing) {
       continue;
     }
-    let childThread = null;
-    try {
-      childThread = (await readDesktopThread(edge.childSessionId, { includeTurns: false }))?.thread || null;
-    } catch {
-      continue;
-    }
-    if (isArchivedOrDeletedDesktopThread(childThread)) {
-      continue;
-    }
-    const childSession = await sessionFromDesktopThread(
-      childThread,
-      mobileSessionIndex,
-      projectlessThreadIds,
-      projectlessWorkdir,
-      visibleProjectIds,
-      config.context || {},
-      edge
-    );
-    if (isStaleProjectlessDesktopSession(childThread, childSession)) {
-      continue;
-    }
-    if (!childSession || hiddenSessionIds.has(childSession.id)) {
-      continue;
-    }
-    if (childSession.projectless) {
-      upsertProjectlessProject(projectById, workspaceState);
-      visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
-    } else if (!visibleProjectIds.has(childSession.projectId)) {
-      continue;
-    }
-    addSessionToMaps(childSession, projectById, sessionsByProject, sessionById);
+    existing.parentSessionId = existing.parentSessionId || edge.parentSessionId;
+    existing.isSubAgent = true;
+    existing.subAgent = {
+      ...(existing.subAgent || {}),
+      status: existing.subAgent?.status || edge.status || null
+    };
   }
 
-  for (const mobileSession of mobileSessions) {
-    if (!mobileSession?.id || (!mobileSession.projectPath && !mobileSession.projectless) || sessionById.has(mobileSession.id)) {
-      continue;
+  if (INCLUDE_MISSING_SUBAGENT_THREADS) {
+    for (const edge of spawnEdges) {
+      if (hiddenSessionIds.has(edge.childSessionId) || sessionById.has(edge.childSessionId)) {
+        continue;
+      }
+      let childThread = null;
+      try {
+        childThread = (await readDesktopThread(edge.childSessionId, { includeTurns: false }))?.thread || null;
+      } catch {
+        continue;
+      }
+      if (isArchivedOrDeletedDesktopThread(childThread)) {
+        continue;
+      }
+      const childSession = await sessionFromDesktopThread(
+        childThread,
+        mobileSessionIndex,
+        projectlessThreadIds,
+        projectlessWorkdir,
+        visibleProjectIds,
+        config.context || {},
+        edge
+      );
+      if (isStaleProjectlessDesktopSession(childThread, childSession)) {
+        continue;
+      }
+      if (!childSession || hiddenSessionIds.has(childSession.id)) {
+        continue;
+      }
+      if (childSession.projectless) {
+        upsertProjectlessProject(projectById, workspaceState);
+        visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
+      } else if (!visibleProjectIds.has(childSession.projectId)) {
+        continue;
+      }
+      addSessionToMaps(childSession, projectById, sessionsByProject, sessionById);
     }
-    if (hiddenSessionIds.has(mobileSession.id)) {
-      continue;
-    }
-    const mobileProjectPath = mobileSession.projectPath ? path.resolve(mobileSession.projectPath) : '';
-    const mobileProjectId = mobileProjectPath ? projectIdFor(mobileProjectPath) : PROJECTLESS_PROJECT_ID;
-    const mobileProjectless =
-      Boolean(mobileSession.projectless && (!mobileProjectPath || isDocumentsCodexConversationPath(mobileProjectPath) || !visibleProjectIds.has(mobileProjectId)));
-    const projectId = mobileProjectless ? PROJECTLESS_PROJECT_ID : mobileProjectId;
-    if (!visibleProjectIds.has(projectId)) {
-      continue;
-    }
-    const project = projectById.get(projectId);
-    if (!project) {
-      continue;
-    }
-    const messages = Array.isArray(mobileSession.messages) ? mobileSession.messages : [];
-    const session = {
-      id: mobileSession.id,
-      cwd: mobileSession.projectPath ? path.resolve(mobileSession.projectPath) : projectlessWorkdir,
-      projectId,
-      title: mobileSession.title || mobileSession.summary?.slice(0, 52) || '新对话',
-      titleLocked: Boolean(mobileSession.titleLocked),
-      titleAutoGenerated: mobileSession.titleLocked ? null : 'stored',
-      summary: mobileSession.summary || mobileSession.title || 'CodexMobile 对话',
-      model: mobileSession.model || null,
-      provider: mobileSession.provider || null,
-      messageCount: messages.length,
-      updatedAt: mobileSession.updatedAt || null,
-      source: mobileSession.source || 'codexmobile',
-      filePath: null,
-      mobileOnly: true
-    };
-    if (!sessionsByProject.has(project.id)) {
-      sessionsByProject.set(project.id, []);
-    }
-    sessionsByProject.get(project.id).push(session);
-    sessionById.set(session.id, session);
   }
 
   for (const [projectId, sessions] of sessionsByProject.entries()) {
@@ -1177,6 +1162,10 @@ function desktopActivityLabel(status, labels) {
   return labels.completed;
 }
 
+function desktopMobileStatusLabel(kind, status) {
+  return statusLabel(kind, status);
+}
+
 function desktopActivityFallbackStatus(turnStatus) {
   return turnStatus === 'running' ? 'running' : turnStatus === 'failed' ? 'failed' : 'completed';
 }
@@ -1363,7 +1352,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
     return {
       id: `${turnId}-command-${item.id || index}`,
       kind: 'command_execution',
-      label: desktopActivityLabel(status, { running: '正在执行命令', completed: '命令已完成', failed: '命令失败' }),
+      label: desktopMobileStatusLabel('command_execution', status),
       status,
       detail: item.command || '',
       command: item.command || '',
@@ -1377,7 +1366,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
     return {
       id: `${turnId}-file-change-${item.id || index}`,
       kind: 'file_change',
-      label: desktopActivityLabel(status, { running: '正在修改文件', completed: '文件已修改', failed: '文件修改失败' }),
+      label: desktopMobileStatusLabel('file_change', status),
       status,
       detail: '',
       fileChanges: normalizePatchChanges(item.changes),
@@ -1389,7 +1378,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
     return {
       id: `${turnId}-mcp-${item.id || index}`,
       kind: 'mcp_tool_call',
-      label: desktopActivityLabel(status, { running: '正在调用工具', completed: '工具调用完成', failed: '工具调用失败' }),
+      label: desktopMobileStatusLabel('mcp_tool_call', status),
       status,
       detail: [item.server, item.tool].filter(Boolean).join(' / '),
       toolName: item.tool || '',
@@ -1402,7 +1391,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
     return {
       id: `${turnId}-tool-${item.id || index}`,
       kind: 'dynamic_tool_call',
-      label: desktopActivityLabel(status, { running: '正在调用工具', completed: '工具调用完成', failed: '工具调用失败' }),
+      label: desktopMobileStatusLabel('dynamic_tool_call', status),
       status,
       detail: item.tool || '',
       toolName: item.tool || '',
@@ -1414,7 +1403,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
     return {
       id: `${turnId}-web-search-${item.id || index}`,
       kind: 'web_search',
-      label: desktopActivityLabel(status, { running: '正在搜索网页', completed: '网页搜索完成', failed: '网页搜索失败' }),
+      label: desktopMobileStatusLabel('web_search', status),
       status,
       detail: item.query || item.action?.query || '',
       timestamp
@@ -1445,7 +1434,7 @@ function desktopActivityFromThreadItem(item, turnId, index, timestamp, turnStatu
   return null;
 }
 
-function messagesFromDesktopThread(thread, { includeActivity = false } = {}) {
+export function messagesFromDesktopThread(thread, { includeActivity = false } = {}) {
   const messages = [];
   const turns = Array.isArray(thread?.turns) ? thread.turns : [];
 
@@ -1545,16 +1534,7 @@ function messagesFromDesktopThread(thread, { includeActivity = false } = {}) {
 }
 
 export async function readSessionMessages(sessionId, { limit = 120, offset = null, latest = true, includeActivity = false } = {}) {
-  const mobileMessages = await readMobileSessionMessages(sessionId);
   const deletedIds = await readDeletedMessageIds(sessionId);
-  const cachedSession = cache.sessionById.get(sessionId);
-
-  if (cachedSession?.mobileOnly) {
-    return {
-      ...paginateMessages(filterDeletedMessages(mobileMessages, deletedIds), { limit, offset, latest }),
-      context: publicContextState({ sessionId }, cache.config?.context || {})
-    };
-  }
 
   const response = await readDesktopThread(sessionId, { includeTurns: true });
   if (!response?.thread) {

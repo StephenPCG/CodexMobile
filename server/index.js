@@ -2,10 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gzipSync } from 'node:zlib';
 import { WebSocketServer } from 'ws';
 import {
   extractBearerToken,
@@ -29,16 +27,25 @@ import {
   renameSession
 } from './codex-data.js';
 import { getCodexQuota } from './codex-quota.js';
-import { abortCodexTurn, getActiveRuns, runCodexTurn } from './codex-runner.js';
+import { readCodexConfig } from './codex-config.js';
+import { getDesktopBridgeStatus } from './codex-app-server.js';
+import { abortCodexTurn, getActiveRuns, runCodexTurn, steerCodexTurn } from './codex-runner.js';
+import {
+  interruptDesktopFollowerTurn,
+  startDesktopFollowerTurn,
+  steerDesktopFollowerTurn
+} from './desktop-ipc-client.js';
 import { GENERATED_ROOT, isImageRequest, runImageTurn } from './image-generator.js';
 import { useLegacyImageGenerator } from './codex-native-images.js';
 import { getLarkDocsStatus, logoutLarkCli, startLarkCliAuth } from './lark-cli.js';
-import { registerMobileSession } from './mobile-session-index.js';
 import { publicVoiceTranscriptionStatus, transcribeAudio } from './voice-transcriber.js';
 import { publicVoiceSpeechStatus, synthesizeSpeech } from './voice-speaker.js';
 import { publicVoiceRealtimeStatus, startVoiceRealtimeProxy } from './realtime-voice.js';
 import { maybeAutoNameSession } from './session-title-generator.js';
-import { provisionalSessionTitle } from '../shared/session-title.js';
+import { createChatService } from './chat-service.js';
+import { htmlEscape, readBody, sendHtml, sendJson } from './http-utils.js';
+import { createStaticService } from './static-service.js';
+import { readVoiceUpload, saveUpload } from './upload-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -57,248 +64,36 @@ const FEISHU_APP_ID = String(process.env.CODEXMOBILE_FEISHU_APP_ID || '').trim()
 const FEISHU_APP_SECRET = String(process.env.CODEXMOBILE_FEISHU_APP_SECRET || '').trim();
 const FEISHU_REDIRECT_URI = String(process.env.CODEXMOBILE_FEISHU_REDIRECT_URI || '').trim();
 const FEISHU_DOCS_HOME_URL = process.env.CODEXMOBILE_FEISHU_DOCS_URL || 'https://docs.feishu.cn/';
-const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_VOICE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 const FEISHU_AUTH_STATE_MAX_AGE_MS = 15 * 60 * 1000;
-
-const mimeTypes = new Map([
-  ['.html', 'text/html; charset=utf-8'],
-  ['.js', 'text/javascript; charset=utf-8'],
-  ['.css', 'text/css; charset=utf-8'],
-  ['.json', 'application/json; charset=utf-8'],
-  ['.webmanifest', 'application/manifest+json; charset=utf-8'],
-  ['.cer', 'application/x-x509-ca-cert'],
-  ['.svg', 'image/svg+xml'],
-  ['.png', 'image/png'],
-  ['.jpg', 'image/jpeg'],
-  ['.jpeg', 'image/jpeg'],
-  ['.webp', 'image/webp'],
-  ['.ico', 'image/x-icon']
-]);
-
-const compressibleExtensions = new Set([
-  '.html',
-  '.js',
-  '.css',
-  '.json',
-  '.webmanifest',
-  '.svg'
-]);
+const SYNC_RESPONSE_TIMEOUT_MS = Math.max(1000, Number(process.env.CODEXMOBILE_SYNC_RESPONSE_TIMEOUT_MS) || 12_000);
+let syncRefreshPromise = null;
 
 const sockets = new Set();
-const recentTurns = new Map();
-const conversationQueues = new Map();
-const sessionQueueKeys = new Map();
-const recentImagePromptsByProject = new Map();
-const activeImageRuns = new Map();
+const staticService = createStaticService({
+  clientDist: CLIENT_DIST,
+  generatedRoot: GENERATED_ROOT,
+  httpsRootCaPath: HTTPS_ROOT_CA_PATH
+});
+let statusConfigFallback = null;
+
+async function getStatusConfigFallback() {
+  if (!statusConfigFallback) {
+    statusConfigFallback = readCodexConfig().catch((error) => {
+      console.warn('[server] Failed to read status config fallback:', error.message);
+      statusConfigFallback = null;
+      return null;
+    });
+  }
+  return statusConfigFallback;
+}
 let feishuAuthState = { token: null, pendingStates: {} };
-const MAX_RECENT_TURNS = 80;
-
-function rememberTurn(turnId, patch) {
-  if (!turnId) {
-    return null;
-  }
-  const existing = recentTurns.get(turnId) || { turnId, createdAt: new Date().toISOString() };
-  const next = {
-    ...existing,
-    ...patch,
-    turnId,
-    updatedAt: new Date().toISOString()
-  };
-  recentTurns.set(turnId, next);
-
-  if (recentTurns.size > MAX_RECENT_TURNS) {
-    const oldest = [...recentTurns.entries()].sort(
-      (a, b) => new Date(a[1].updatedAt || a[1].createdAt || 0) - new Date(b[1].updatedAt || b[1].createdAt || 0)
-    )[0]?.[0];
-    if (oldest) {
-      recentTurns.delete(oldest);
-    }
-  }
-  return next;
-}
-
-function rememberTurnEvent(payload) {
-  if (!payload?.turnId) {
-    return;
-  }
-
-  const patch = {
-    projectId: payload.projectId,
-    sessionId: payload.sessionId || undefined,
-    previousSessionId: payload.previousSessionId || undefined
-  };
-
-  if (payload.type === 'chat-started') {
-    patch.status = 'running';
-    patch.startedAt = payload.startedAt || new Date().toISOString();
-    patch.label = '正在思考';
-  } else if (payload.type === 'thread-started') {
-    patch.status = 'running';
-    patch.label = '正在思考';
-  } else if (payload.type === 'status-update') {
-    patch.status = payload.status || 'running';
-    patch.kind = payload.kind || undefined;
-    patch.label = payload.label || undefined;
-    patch.detail = payload.detail || undefined;
-  } else if (payload.type === 'assistant-update') {
-    patch.status = 'running';
-    patch.hadAssistantText = true;
-    patch.assistantPreview = payload.content || '';
-    patch.messageId = payload.messageId || undefined;
-    patch.label = '正在回复';
-  } else if (payload.type === 'context-status-update') {
-    patch.status = payload.status || 'running';
-    patch.context = payload;
-    patch.label = '背景信息已同步';
-  } else if (payload.type === 'chat-complete') {
-    patch.status = 'completed';
-    patch.completedAt = payload.completedAt || new Date().toISOString();
-    patch.hadAssistantText = Boolean(payload.hadAssistantText);
-    patch.usage = payload.usage || null;
-    patch.context = payload.context || null;
-    patch.label = '任务已完成';
-  } else if (payload.type === 'chat-error') {
-    patch.status = 'failed';
-    patch.error = payload.error || '任务失败';
-    patch.label = '任务失败';
-  } else if (payload.type === 'chat-aborted') {
-    patch.status = 'aborted';
-    patch.label = '已中止';
-  } else {
-    return;
-  }
-
-  if (payload.startedAt) {
-    patch.startedAt = payload.startedAt;
-  }
-  if (payload.completedAt) {
-    patch.completedAt = payload.completedAt;
-  }
-  if (payload.durationMs) {
-    patch.durationMs = payload.durationMs;
-  }
-
-  rememberTurn(payload.turnId, patch);
-}
 
 function fallbackModels(config) {
   const model = config.model || 'gpt-5.5';
   return [{ value: model, label: model }];
-}
-
-function normalizeSelectedSkills(value, availableSkills = []) {
-  const requested = Array.isArray(value) ? value : [];
-  if (!requested.length || !Array.isArray(availableSkills) || !availableSkills.length) {
-    return [];
-  }
-
-  const byPath = new Map();
-  const byName = new Map();
-  for (const skill of availableSkills) {
-    if (skill?.path) {
-      byPath.set(String(skill.path), skill);
-    }
-    if (skill?.name) {
-      byName.set(String(skill.name), skill);
-    }
-  }
-
-  const selected = [];
-  const seen = new Set();
-  for (const item of requested) {
-    const pathValue = typeof item === 'string' ? item : item?.path;
-    const nameValue = typeof item === 'string' ? item : item?.name;
-    const skill = byPath.get(String(pathValue || '')) || byName.get(String(nameValue || ''));
-    if (!skill?.path || seen.has(skill.path)) {
-      continue;
-    }
-    seen.add(skill.path);
-    selected.push({
-      type: 'skill',
-      name: skill.name || skill.label || path.basename(path.dirname(skill.path)),
-      path: skill.path
-    });
-  }
-  return selected.slice(0, 8);
-}
-
-function getActiveImageRuns() {
-  return [...activeImageRuns.values()].map((run) => ({
-    sessionId: run.sessionId,
-    previousSessionId: run.previousSessionId,
-    startedAt: run.startedAt,
-    status: run.status,
-    turnId: run.turnId,
-    kind: 'image_generation_call',
-    label: run.label
-  }));
-}
-
-function payloadReferencesSession(payload, sessionId) {
-  return [
-    payload?.sessionId,
-    payload?.previousSessionId,
-    payload?.draftSessionId,
-    payload?.selectedSessionId
-  ].some((value) => value && value === sessionId);
-}
-
-function sessionHasActiveWork(sessionId) {
-  if (!sessionId) {
-    return false;
-  }
-  const activeRuns = [...getActiveRuns(), ...getActiveImageRuns()];
-  if (activeRuns.some((run) => payloadReferencesSession(run, sessionId))) {
-    return true;
-  }
-
-  for (const turn of recentTurns.values()) {
-    if (
-      (turn.status === 'accepted' || turn.status === 'queued' || turn.status === 'running') &&
-      payloadReferencesSession(turn, sessionId)
-    ) {
-      return true;
-    }
-  }
-
-  for (const state of conversationQueues.values()) {
-    if (state.running && state.sessionId === sessionId) {
-      return true;
-    }
-    if (state.jobs.some((job) => payloadReferencesSession(job, sessionId))) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function sendJson(res, status, payload) {
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store'
-  });
-  res.end(JSON.stringify(payload));
-}
-
-function sendHtml(res, status, html) {
-  res.writeHead(status, {
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': 'no-store'
-  });
-  res.end(html);
-}
-
-function htmlEscape(value) {
-  return String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 async function loadFeishuAuthState() {
@@ -494,421 +289,6 @@ async function handleFeishuCallback(req, res, url) {
   }
 }
 
-function acceptsGzip(req) {
-  return String(req.headers['accept-encoding'] || '')
-    .split(',')
-    .some((value) => value.trim().toLowerCase().startsWith('gzip'));
-}
-
-function staticCacheControl(ext, filePath = '') {
-  if (ext === '.html') {
-    return 'no-store';
-  }
-  const normalized = filePath.split(path.sep).join('/');
-  if (normalized.includes('/assets/')) {
-    return 'public, max-age=31536000, immutable';
-  }
-  return 'public, max-age=3600';
-}
-
-function sendStaticContent(req, res, status, content, headers, ext) {
-  let body = content;
-  const nextHeaders = { ...headers };
-  if (content.length >= 1024 && compressibleExtensions.has(ext) && acceptsGzip(req)) {
-    body = gzipSync(content);
-    nextHeaders['content-encoding'] = 'gzip';
-    nextHeaders.vary = nextHeaders.vary ? `${nextHeaders.vary}, Accept-Encoding` : 'Accept-Encoding';
-  }
-  nextHeaders['content-length'] = body.length;
-  res.writeHead(status, nextHeaders);
-  res.end(body);
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk;
-      if (body.length > MAX_JSON_BYTES) {
-        reject(new Error('Request body too large'));
-        req.destroy();
-      }
-    });
-    req.on('end', () => {
-      if (!body) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(new Error('Invalid JSON body'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-function readBuffer(req, maxBytes) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let total = 0;
-    let settled = false;
-    req.on('data', (chunk) => {
-      if (settled) {
-        return;
-      }
-      total += chunk.length;
-      if (total > maxBytes) {
-        settled = true;
-        req.resume();
-        reject(new Error('Upload too large'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      if (!settled) {
-        settled = true;
-        resolve(Buffer.concat(chunks));
-      }
-    });
-    req.on('error', (error) => {
-      if (!settled) {
-        settled = true;
-        reject(error);
-      }
-    });
-  });
-}
-
-function parseHeaderValue(value, key) {
-  const match = String(value || '').match(new RegExp(`${key}="([^"]*)"`));
-  return match ? match[1] : '';
-}
-
-function sanitizeFileName(fileName) {
-  const baseName = path.basename(String(fileName || 'upload.bin')).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_');
-  return baseName || 'upload.bin';
-}
-
-function classifyUpload(mimeType) {
-  return String(mimeType || '').startsWith('image/') ? 'image' : 'file';
-}
-
-function resolveLocalImagePath(value) {
-  const raw = String(value || '').trim();
-  if (!raw) {
-    return '';
-  }
-  if (/^file:\/\//i.test(raw)) {
-    return fileURLToPath(raw);
-  }
-  if (raw === '~') {
-    return os.homedir();
-  }
-  if (raw.startsWith('~/') || raw.startsWith('~\\')) {
-    return path.join(os.homedir(), raw.slice(2));
-  }
-  return raw;
-}
-
-function safeDecodeLocalPath(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-async function sendLocalImage(req, res, url) {
-  const requestedPath = resolveLocalImagePath(url.searchParams.get('path'));
-  const decodedPath = /%[0-9a-f]{2}/i.test(requestedPath) ? resolveLocalImagePath(safeDecodeLocalPath(requestedPath)) : '';
-  const candidates = [...new Set([requestedPath, decodedPath].filter(Boolean))];
-  if (!candidates.length || !candidates.some((candidate) => path.isAbsolute(candidate))) {
-    sendJson(res, 400, { error: 'Image path must be absolute' });
-    return;
-  }
-
-  for (const candidate of candidates) {
-    if (!path.isAbsolute(candidate)) {
-      continue;
-    }
-    const filePath = path.resolve(candidate);
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = mimeTypes.get(ext) || '';
-    if (!contentType.startsWith('image/')) {
-      continue;
-    }
-    try {
-      const stat = await fs.stat(filePath);
-      if (!stat.isFile()) {
-        continue;
-      }
-      const content = await fs.readFile(filePath);
-      sendStaticContent(req, res, 200, content, {
-        'content-type': contentType,
-        'cache-control': 'private, max-age=3600',
-        'x-content-type-options': 'nosniff'
-      }, ext);
-      return;
-    } catch {
-      // Try the decoded candidate before reporting a miss.
-    }
-  }
-
-  sendJson(res, 404, { error: 'Image not found' });
-}
-
-function parseMultipartFile(buffer, contentType, fieldName = 'file') {
-  const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[1] || contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[2];
-  if (!boundary) {
-    throw new Error('Missing multipart boundary');
-  }
-  const acceptedNames = Array.isArray(fieldName) ? fieldName : [fieldName];
-
-  const boundaryBuffer = Buffer.from(`--${boundary}`);
-  let cursor = buffer.indexOf(boundaryBuffer);
-
-  while (cursor >= 0) {
-    cursor += boundaryBuffer.length;
-    if (buffer[cursor] === 45 && buffer[cursor + 1] === 45) {
-      break;
-    }
-    if (buffer[cursor] === 13 && buffer[cursor + 1] === 10) {
-      cursor += 2;
-    }
-
-    const nextBoundary = buffer.indexOf(boundaryBuffer, cursor);
-    if (nextBoundary < 0) {
-      break;
-    }
-
-    const headerEnd = buffer.indexOf(Buffer.from('\r\n\r\n'), cursor);
-    if (headerEnd < 0 || headerEnd > nextBoundary) {
-      cursor = nextBoundary;
-      continue;
-    }
-
-    const headers = buffer.slice(cursor, headerEnd).toString('utf8');
-    const disposition = headers.match(/^content-disposition:\s*(.+)$/im)?.[1] || '';
-    const name = parseHeaderValue(disposition, 'name');
-    const fileName = parseHeaderValue(disposition, 'filename');
-    const mimeType = headers.match(/^content-type:\s*(.+)$/im)?.[1]?.trim() || 'application/octet-stream';
-
-    if (acceptedNames.includes(name) && fileName) {
-      let contentEnd = nextBoundary;
-      if (buffer[contentEnd - 2] === 13 && buffer[contentEnd - 1] === 10) {
-        contentEnd -= 2;
-      }
-      return {
-        fileName: sanitizeFileName(fileName),
-        mimeType,
-        data: buffer.slice(headerEnd + 4, contentEnd)
-      };
-    }
-
-    cursor = nextBoundary;
-  }
-
-  throw new Error('No file field found');
-}
-
-async function readVoiceUpload(req) {
-  const contentType = req.headers['content-type'] || '';
-  if (!contentType.toLowerCase().startsWith('multipart/form-data')) {
-    const error = new Error('multipart/form-data is required');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  let body;
-  try {
-    body = await readBuffer(req, MAX_VOICE_BYTES);
-  } catch (error) {
-    const next = new Error(error.message === 'Upload too large' ? '音频超过 10MB' : '读取音频失败');
-    next.statusCode = error.message === 'Upload too large' ? 413 : 400;
-    throw next;
-  }
-
-  let part;
-  try {
-    part = parseMultipartFile(body, contentType, 'audio');
-  } catch {
-    const error = new Error('没有收到音频');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  if (!part.data?.length) {
-    const error = new Error('没有收到音频');
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!String(part.mimeType || '').toLowerCase().startsWith('audio/')) {
-    const error = new Error('音频格式不支持');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  return part;
-}
-
-async function saveUpload(req) {
-  const contentType = req.headers['content-type'] || '';
-  if (!contentType.toLowerCase().startsWith('multipart/form-data')) {
-    throw new Error('multipart/form-data is required');
-  }
-
-  const body = await readBuffer(req, MAX_UPLOAD_BYTES);
-  const part = parseMultipartFile(body, contentType);
-  const id = crypto.randomUUID();
-  const dateFolder = new Date().toISOString().slice(0, 10);
-  const filePath = path.join(UPLOAD_ROOT, dateFolder, `${id}-${part.fileName}`);
-
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, part.data);
-
-  return {
-    id,
-    name: part.fileName,
-    size: part.data.length,
-    mimeType: part.mimeType,
-    path: filePath,
-    kind: classifyUpload(part.mimeType)
-  };
-}
-
-function normalizeAttachments(value) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value
-    .filter((item) => item && typeof item.path === 'string' && item.path.trim())
-    .map((item) => ({
-      id: String(item.id || ''),
-      name: String(item.name || path.basename(item.path)),
-      size: Number(item.size) || 0,
-      mimeType: String(item.mimeType || ''),
-      path: String(item.path),
-      kind: item.kind === 'image' ? 'image' : 'file'
-    }));
-}
-
-function markdownImageDestination(value) {
-  const raw = String(value || '').trim();
-  if (!raw) {
-    return '';
-  }
-  if (/[\s<>()]/.test(raw)) {
-    return `<${raw.replace(/>/g, '%3E')}>`;
-  }
-  return raw;
-}
-
-function markdownImageAlt(value) {
-  return String(value || '图片').replace(/[\[\]\n\r]/g, '').trim() || '图片';
-}
-
-function imageAttachmentMarkdown(attachment) {
-  const destination = markdownImageDestination(attachment.path);
-  if (!destination) {
-    return '';
-  }
-  return `![${markdownImageAlt(attachment.name)}](${destination})`;
-}
-
-function withImageAttachmentPreviews(message, attachments) {
-  const imageLines = attachments
-    .filter((attachment) => attachment.kind === 'image')
-    .map(imageAttachmentMarkdown)
-    .filter(Boolean);
-  return [message, imageLines.join('\n')].filter(Boolean).join('\n\n');
-}
-
-function withAttachmentReferences(message, attachments) {
-  if (!attachments.length) {
-    return message;
-  }
-
-  const imageMessage = withImageAttachmentPreviews(message, attachments);
-  const fileLines = attachments.filter((attachment) => attachment.kind !== 'image').map((attachment) => {
-    const type = attachment.kind === 'image' ? '图片' : '文件';
-    return `- ${type}: ${attachment.name} (${attachment.path})`;
-  });
-  if (!fileLines.length) {
-    return imageMessage;
-  }
-  return `${imageMessage}\n\n附件路径:\n${fileLines.join('\n')}`;
-}
-
-async function loadRecentImagePrompts() {
-  try {
-    const raw = await fs.readFile(IMAGE_PROMPT_STATE, 'utf8');
-    const parsed = JSON.parse(raw);
-    for (const [projectId, entry] of Object.entries(parsed.projects || {})) {
-      if (entry?.prompt) {
-        recentImagePromptsByProject.set(projectId, entry.prompt);
-      }
-    }
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      console.warn('[image] Failed to load prompt state:', error.message);
-    }
-  }
-}
-
-function persistRecentImagePrompt(projectId, prompt) {
-  if (!projectId || !prompt) {
-    return;
-  }
-  fs.mkdir(path.dirname(IMAGE_PROMPT_STATE), { recursive: true })
-    .then(async () => {
-      let state = { version: 1, projects: {} };
-      try {
-        state = JSON.parse(await fs.readFile(IMAGE_PROMPT_STATE, 'utf8'));
-      } catch {
-        // Start a fresh state file.
-      }
-      state.version = 1;
-      state.projects = {
-        ...(state.projects || {}),
-        [projectId]: {
-          prompt,
-          updatedAt: new Date().toISOString()
-        }
-      };
-      await fs.writeFile(IMAGE_PROMPT_STATE, JSON.stringify(state, null, 2), 'utf8');
-    })
-    .catch((error) => console.warn('[image] Failed to persist prompt state:', error.message));
-}
-
-function isContinuationMessage(message) {
-  return /^(继续|中断了|又中断了|断了|重新来|重新生成|重新发送|再来|再试一次|retry|continue)$/i.test(String(message || '').trim());
-}
-
-function rememberImagePrompt(projectId, prompt) {
-  if (projectId && prompt && isImageRequest(prompt, [])) {
-    recentImagePromptsByProject.set(projectId, prompt);
-    persistRecentImagePrompt(projectId, prompt);
-  }
-}
-
-function resolveContinuationImagePrompt(projectId, message) {
-  if (!isContinuationMessage(message)) {
-    return '';
-  }
-  const remembered = recentImagePromptsByProject.get(projectId);
-  if (remembered) {
-    return remembered;
-  }
-  const sessions = listProjectSessions(projectId);
-  const recentImageSession = sessions.find((session) =>
-    isImageRequest(session.summary || session.title || '', [])
-  );
-  return recentImageSession?.summary || recentImageSession?.title || '';
-}
-
 function remoteAddress(req) {
   return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
 }
@@ -937,11 +317,77 @@ function broadcast(payload) {
   }
 }
 
+const chatService = createChatService({
+  imagePromptState: IMAGE_PROMPT_STATE,
+  defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
+  getProject,
+  getSession,
+  getCacheSnapshot,
+  getDesktopBridgeStatus,
+  listProjectSessions,
+  refreshCodexCache,
+  renameSession,
+  broadcast,
+  runCodexTurn,
+  startDesktopFollowerTurn,
+  steerDesktopFollowerTurn,
+  interruptDesktopFollowerTurn,
+  abortCodexTurn,
+  getActiveRuns,
+  steerCodexTurn,
+  runImageTurn,
+  isImageRequest,
+  useLegacyImageGenerator,
+  maybeAutoNameSession
+});
+
+function startSyncRefresh() {
+  if (!syncRefreshPromise) {
+    syncRefreshPromise = refreshCodexCache().finally(() => {
+      syncRefreshPromise = null;
+    });
+  }
+  return syncRefreshPromise;
+}
+
+async function refreshCodexCacheForSyncResponse() {
+  const refresh = startSyncRefresh();
+  const timeout = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      resolve({ timedOut: true, snapshot: getCacheSnapshot() });
+    }, SYNC_RESPONSE_TIMEOUT_MS);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  });
+  const result = await Promise.race([
+    refresh
+      .then((snapshot) => ({ timedOut: false, snapshot }))
+      .catch((error) => ({ timedOut: false, snapshot: getCacheSnapshot(), error })),
+    timeout
+  ]);
+  if (result.error) {
+    console.warn('[sync] Refresh failed:', result.error.message);
+  }
+  if (result.timedOut) {
+    refresh
+      .then((snapshot) => {
+        broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
+      })
+      .catch((error) => {
+        console.warn('[sync] Background refresh failed:', error.message);
+      });
+  }
+  return result;
+}
+
 async function publicStatus(authenticated) {
   const snapshot = getCacheSnapshot();
-  const config = snapshot.config || {};
+  const config = snapshot.config || await getStatusConfigFallback() || {};
+  const desktopBridge = await getDesktopBridgeStatus();
   return {
     connected: true,
+    desktopBridge,
     hostName: getHostName(),
     port: PORT,
     provider: config.provider || 'codex',
@@ -956,193 +402,13 @@ async function publicStatus(authenticated) {
     voiceRealtime: publicVoiceRealtimeStatus(config),
     docs: await publicDocsStatus(authenticated),
     syncedAt: snapshot.syncedAt,
-    activeRuns: [...getActiveRuns(), ...getActiveImageRuns()],
+    activeRuns: [...getActiveRuns(), ...chatService.getActiveImageRuns()],
     auth: {
       required: true,
       authenticated,
       trustedDevices: getTrustedDeviceCount()
     }
   };
-}
-
-function rememberConversationAlias(queueKey, sessionId) {
-  if (queueKey && sessionId) {
-    sessionQueueKeys.set(sessionId, queueKey);
-  }
-}
-
-function resolveConversationKey(...ids) {
-  for (const id of ids) {
-    if (id && sessionQueueKeys.has(id)) {
-      return sessionQueueKeys.get(id);
-    }
-  }
-  const queueKey = ids.find(Boolean) || crypto.randomUUID();
-  for (const id of ids) {
-    rememberConversationAlias(queueKey, id);
-  }
-  return queueKey;
-}
-
-function getConversationQueue(queueKey) {
-  if (!conversationQueues.has(queueKey)) {
-    conversationQueues.set(queueKey, {
-      sessionId: null,
-      running: false,
-      jobs: []
-    });
-  }
-  return conversationQueues.get(queueKey);
-}
-
-function emitJobEvent(job, payload) {
-  const enriched = { projectId: job.project.id, ...payload };
-  rememberTurnEvent(enriched);
-  broadcast(enriched);
-}
-
-async function autoNameCompletedSession({ sessionId, turnId, userMessage }) {
-  if (!sessionId || !turnId) {
-    return;
-  }
-  const turn = recentTurns.get(turnId) || {};
-  const assistantMessage = turn.assistantPreview || '';
-  if (!String(userMessage || assistantMessage || '').trim()) {
-    return;
-  }
-
-  await refreshCodexCache();
-  const session = getSession(sessionId);
-  if (!session || session.titleLocked) {
-    return;
-  }
-
-  const renamed = await maybeAutoNameSession({
-    session,
-    userMessage,
-    assistantMessage,
-    renameSessionImpl: renameSession
-  });
-  if (renamed) {
-    const snapshot = await refreshCodexCache();
-    broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
-  }
-}
-
-function scheduleAutoNameCompletedSession(payload) {
-  autoNameCompletedSession(payload).catch((error) => {
-    console.warn('[title] auto naming failed:', error.message);
-  });
-}
-
-function enqueueChatJob(job) {
-  const state = getConversationQueue(job.queueKey);
-  rememberConversationAlias(job.queueKey, job.selectedSessionId);
-  rememberConversationAlias(job.queueKey, job.draftSessionId);
-
-  const queued = state.running || state.jobs.length > 0;
-  state.jobs.push(job);
-
-  if (queued) {
-    const sessionId = state.sessionId || job.selectedSessionId || job.draftSessionId;
-    rememberTurn(job.turnId, {
-      status: 'queued',
-      label: '已加入队列',
-      sessionId: sessionId || null
-    });
-    broadcast({
-      type: 'status-update',
-      projectId: job.project.id,
-      sessionId,
-      turnId: job.turnId,
-      kind: 'turn',
-      status: 'queued',
-      label: '已加入队列',
-      detail: '',
-      timestamp: new Date().toISOString()
-    });
-  }
-
-  runNextQueuedChat(job.queueKey);
-  return queued;
-}
-
-function runNextQueuedChat(queueKey) {
-  const state = getConversationQueue(queueKey);
-  if (state.running) {
-    return;
-  }
-
-  const job = state.jobs.shift();
-  if (!job) {
-    return;
-  }
-
-  state.running = true;
-  const sessionId = state.sessionId || job.selectedSessionId;
-
-  runCodexTurn(
-    {
-      sessionId,
-      draftSessionId: job.draftSessionId,
-      projectPath: job.project.path,
-      message: job.codexMessage,
-      attachments: job.attachments,
-      selectedSkills: job.selectedSkills,
-      model: job.model,
-      reasoningEffort: job.reasoningEffort,
-      permissionMode: job.permissionMode,
-      turnId: job.turnId
-    },
-    (payload) => {
-      if (payload.sessionId) {
-        state.sessionId = payload.sessionId;
-        rememberConversationAlias(queueKey, payload.sessionId);
-      }
-      if (payload.previousSessionId) {
-        rememberConversationAlias(queueKey, payload.previousSessionId);
-      }
-      emitJobEvent(job, payload);
-    }
-  ).then(async (finalSessionId) => {
-    if (finalSessionId) {
-      state.sessionId = finalSessionId;
-      rememberConversationAlias(queueKey, finalSessionId);
-      await registerMobileSession({
-        id: finalSessionId,
-        projectPath: job.project.path,
-        projectless: job.project.projectless,
-        title: provisionalSessionTitle(job.displayMessage),
-        summary: job.displayMessage,
-        titleLocked: false,
-        updatedAt: new Date().toISOString()
-      });
-    }
-    rememberTurn(job.turnId, {
-      projectId: job.project.id,
-      sessionId: finalSessionId || sessionId || job.selectedSessionId || job.draftSessionId || null,
-      previousSessionId: job.draftSessionId || job.selectedSessionId || null
-    });
-    if (job.draftSessionId) {
-      scheduleAutoNameCompletedSession({
-        sessionId: finalSessionId || sessionId || job.selectedSessionId || null,
-        turnId: job.turnId,
-        userMessage: job.displayMessage
-      });
-    }
-  }).finally(async () => {
-    try {
-      const snapshot = await refreshCodexCache();
-      broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
-    } catch (error) {
-      console.warn('[sync] Failed to refresh after chat:', error.message);
-    } finally {
-      state.running = false;
-      if (state.jobs.length) {
-        setTimeout(() => runNextQueuedChat(queueKey), 0);
-      }
-    }
-  });
 }
 
 async function handleApi(req, res, url) {
@@ -1180,9 +446,12 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && pathname === '/api/sync') {
-    const snapshot = await refreshCodexCache();
-    broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
-    sendJson(res, 200, { success: true, ...snapshot });
+    const result = await refreshCodexCacheForSyncResponse();
+    const { snapshot, timedOut } = result;
+    if (!timedOut) {
+      broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
+    }
+    sendJson(res, 200, { success: !timedOut && !result.error, pending: timedOut, error: result.error?.message || null, ...snapshot });
     return;
   }
 
@@ -1202,7 +471,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'GET' && pathname === '/api/local-image') {
-    await sendLocalImage(req, res, url);
+    await staticService.sendLocalImage(req, res, url);
     return;
   }
 
@@ -1327,7 +596,7 @@ async function handleApi(req, res, url) {
       sendJson(res, 404, { error: 'Session not found' });
       return;
     }
-    if (sessionHasActiveWork(sessionId)) {
+    if (chatService.sessionHasActiveWork(sessionId)) {
       sendJson(res, 409, { error: 'Session is running' });
       return;
     }
@@ -1346,7 +615,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'chat' && parts[2] === 'turns') {
     const turnId = decodeURIComponent(parts[3]);
-    sendJson(res, 200, { turn: recentTurns.get(turnId) || null });
+    sendJson(res, 200, { turn: chatService.getTurn(turnId) });
     return;
   }
 
@@ -1380,7 +649,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'POST' && pathname === '/api/uploads') {
-    const upload = await saveUpload(req);
+    const upload = await saveUpload(req, { uploadRoot: UPLOAD_ROOT, maxUploadBytes: MAX_UPLOAD_BYTES });
     console.log(`[upload] saved name=${upload.name} size=${upload.size} kind=${upload.kind} remote=${remoteAddress(req)}`);
     sendJson(res, 200, { upload });
     return;
@@ -1389,7 +658,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/voice/transcribe') {
     const startedAt = Date.now();
     try {
-      const audio = await readVoiceUpload(req);
+      const audio = await readVoiceUpload(req, { maxVoiceBytes: MAX_VOICE_BYTES });
       const config = getCacheSnapshot().config || {};
       const result = await transcribeAudio(audio, config);
       console.log(`[voice] transcribed size=${audio.data.length} mime=${audio.mimeType} provider=${result.provider} model=${result.model} remote=${remoteAddress(req)}`);
@@ -1437,293 +706,23 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/chat/send') {
     const body = await readBody(req);
-    const attachmentCount = Array.isArray(body.attachments) ? body.attachments.length : 0;
-    console.log(
-      `[chat] send request remote=${remoteAddress(req)} project=${body.projectId || ''} session=${body.sessionId || body.draftSessionId || ''} attachments=${attachmentCount}`
-    );
-    const project = getProject(body.projectId);
-    if (!project) {
-      console.warn(`[chat] rejected project not found: ${body.projectId || ''}`);
-      sendJson(res, 404, { error: 'Project not found' });
-      return;
+    try {
+      const result = await chatService.sendChat(body, { remoteAddress: remoteAddress(req) });
+      sendJson(res, 202, result);
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to send chat' });
     }
-    const attachments = normalizeAttachments(body.attachments);
-    const message = String(body.message || '').trim();
-    if (!message && !attachments.length) {
-      sendJson(res, 400, { error: 'message or attachments are required' });
-      return;
-    }
-
-    const requestedSessionId = String(body.sessionId || '').trim();
-    const isDraftSession = requestedSessionId.startsWith('draft-');
-    const session = requestedSessionId && !isDraftSession ? getSession(requestedSessionId) : null;
-    const mobileOnlySession = session?.mobileOnly ? session : null;
-    const draftSessionId = String(body.draftSessionId || '').trim() || mobileOnlySession?.id || null;
-    const selectedSessionId = session && !session.mobileOnly
-      ? session.id
-      : (requestedSessionId && !isDraftSession && !mobileOnlySession ? requestedSessionId : null);
-    const turnId = String(body.clientTurnId || '').trim() || crypto.randomUUID();
-    const config = getCacheSnapshot().config || {};
-    const selectedSkills = normalizeSelectedSkills(body.selectedSkills, config.skills);
-    const displayMessage = message || '请查看附件。';
-    const visibleMessage = withImageAttachmentPreviews(displayMessage, attachments);
-    const codexMessage = withAttachmentReferences(displayMessage, attachments);
-    const legacyImageRoute = useLegacyImageGenerator();
-    const imagePrompt = legacyImageRoute
-      ? (isImageRequest(displayMessage, attachments)
-        ? displayMessage
-        : resolveContinuationImagePrompt(project.id, displayMessage))
-      : null;
-    const conversationSessionId = selectedSessionId || mobileOnlySession?.id || draftSessionId || null;
-    rememberTurn(turnId, {
-      projectId: project.id,
-      projectPath: project.path,
-      sessionId: conversationSessionId,
-      previousSessionId: draftSessionId || selectedSessionId || null,
-      draftSessionId,
-      status: 'accepted',
-      label: '正在思考',
-      hadAssistantText: false,
-      startedAt: new Date().toISOString()
-    });
-
-    broadcast({
-      type: 'user-message',
-      sessionId: conversationSessionId,
-      projectId: project.id,
-      message: {
-        id: `local-${Date.now()}`,
-        role: 'user',
-        content: visibleMessage,
-        timestamp: new Date().toISOString()
-      }
-    });
-
-    if (imagePrompt) {
-      rememberImagePrompt(project.id, imagePrompt);
-      const imageSessionId = selectedSessionId || mobileOnlySession?.id || `mobile-image-${crypto.randomUUID()}`;
-      const previousSessionId = imageSessionId === conversationSessionId ? draftSessionId : conversationSessionId;
-      const imageLabel = attachments.some((attachment) => attachment.kind === 'image') ? '正在编辑图片' : '正在生成图片';
-      activeImageRuns.set(turnId, {
-        turnId,
-        sessionId: imageSessionId,
-        previousSessionId,
-        startedAt: new Date().toISOString(),
-        status: 'running',
-        label: imageLabel
-      });
-      console.log(`[chat] accepted image turn=${turnId} session=${imageSessionId} project=${project.name}`);
-      rememberTurn(turnId, {
-        projectId: project.id,
-        projectPath: project.path,
-        sessionId: imageSessionId,
-        previousSessionId,
-        status: 'running',
-        kind: 'image_generation_call',
-        label: imageLabel
-      });
-      runImageTurn(
-        {
-          sessionId: imageSessionId,
-          previousSessionId,
-          projectPath: project.path,
-          projectless: project.projectless,
-          message: imagePrompt,
-          attachments,
-          config,
-          turnId,
-          persistMobileSession: true
-        },
-        (payload) => {
-          if (payload.turnId && activeImageRuns.has(payload.turnId)) {
-            const existing = activeImageRuns.get(payload.turnId);
-            if (payload.type === 'status-update' || payload.type === 'activity-update') {
-              activeImageRuns.set(payload.turnId, {
-                ...existing,
-                sessionId: payload.sessionId || existing.sessionId,
-                previousSessionId: payload.previousSessionId || existing.previousSessionId,
-                status: payload.status || existing.status,
-                label: payload.label || existing.label
-              });
-            }
-          }
-          emitJobEvent({ project }, payload);
-        }
-      ).then(async (finalSessionId) => {
-        rememberTurn(turnId, {
-          projectId: project.id,
-          sessionId: finalSessionId,
-          previousSessionId
-        });
-        try {
-          const snapshot = await refreshCodexCache();
-          broadcast({ type: 'sync-complete', syncedAt: snapshot.syncedAt, projects: snapshot.projects });
-        } catch (error) {
-          console.warn('[sync] Failed to refresh after image chat:', error.message);
-        }
-      }).catch((error) => {
-        const errorMessage = error?.message || '图片生成失败';
-        activeImageRuns.delete(turnId);
-        rememberTurn(turnId, {
-          projectId: project.id,
-          sessionId: imageSessionId,
-          previousSessionId,
-          status: 'failed',
-          error: errorMessage,
-          label: '图片生成失败'
-        });
-        emitJobEvent({ project }, {
-          type: 'chat-error',
-          sessionId: imageSessionId,
-          previousSessionId,
-          turnId,
-          error: errorMessage
-        });
-      }).finally(() => {
-        activeImageRuns.delete(turnId);
-      });
-      sendJson(res, 202, {
-        accepted: true,
-        queued: false,
-        sessionId: imageSessionId,
-        draftSessionId,
-        turnId,
-        mode: 'image'
-      });
-      return;
-    }
-
-    console.log(`[chat] accepted codex turn=${turnId} session=${selectedSessionId || draftSessionId || ''} project=${project.name}`);
-    const queueKey = resolveConversationKey(selectedSessionId, draftSessionId, requestedSessionId);
-    const queued = enqueueChatJob({
-      queueKey,
-      project,
-      selectedSessionId,
-      draftSessionId,
-      turnId,
-      codexMessage,
-      displayMessage,
-      attachments,
-      selectedSkills,
-      model: session?.model || body.model || config.model || 'gpt-5.5',
-      reasoningEffort: body.reasoningEffort || DEFAULT_REASONING_EFFORT,
-      permissionMode: body.permissionMode || 'bypassPermissions'
-    });
-
-    sendJson(res, 202, { accepted: true, queued, sessionId: selectedSessionId, draftSessionId, turnId });
     return;
   }
 
   if (method === 'POST' && pathname === '/api/chat/abort') {
     const body = await readBody(req);
-    console.log(`[chat] abort request remote=${remoteAddress(req)} turn=${body.turnId || ''} session=${body.sessionId || ''}`);
-    const aborted = abortCodexTurn(body.turnId || body.sessionId);
+    const aborted = chatService.abortChat(body, { remoteAddress: remoteAddress(req) });
     sendJson(res, aborted ? 200 : 404, { aborted });
     return;
   }
 
   sendJson(res, 404, { error: 'Not found' });
-}
-
-async function serveFileFromRoot(req, res, rootDir, requestedPath, cacheControl) {
-  const relativePath = requestedPath.replace(/^\/+/, '');
-  const candidate = path.normalize(path.join(rootDir, relativePath));
-  const rootWithSep = rootDir.endsWith(path.sep) ? rootDir : `${rootDir}${path.sep}`;
-  if (candidate !== rootDir && !candidate.startsWith(rootWithSep)) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return true;
-  }
-
-  try {
-    const stat = await fs.stat(candidate);
-    if (!stat.isFile()) {
-      res.writeHead(404);
-      res.end('Not found');
-      return true;
-    }
-    const ext = path.extname(candidate);
-    const content = await fs.readFile(candidate);
-    sendStaticContent(req, res, 200, content, {
-      'content-type': mimeTypes.get(ext) || 'application/octet-stream',
-      'cache-control': cacheControl,
-      'x-content-type-options': 'nosniff'
-    }, ext);
-    return true;
-  } catch {
-    res.writeHead(404);
-    res.end('Not found');
-    return true;
-  }
-}
-
-async function serveStatic(req, res, url) {
-  let requestedPath = decodeURIComponent(url.pathname);
-  if (requestedPath === '/codexmobile-root-ca.cer') {
-    try {
-      const stat = await fs.stat(HTTPS_ROOT_CA_PATH);
-      const content = await fs.readFile(HTTPS_ROOT_CA_PATH);
-      res.writeHead(200, {
-        'content-type': 'application/x-x509-ca-cert',
-        'content-length': stat.size,
-        'cache-control': 'no-store',
-        'content-disposition': 'attachment; filename="codexmobile-root-ca.cer"',
-        'x-content-type-options': 'nosniff'
-      });
-      res.end(content);
-    } catch {
-      res.writeHead(404);
-      res.end('Certificate not found');
-    }
-    return;
-  }
-
-  if (requestedPath.startsWith('/generated/')) {
-    await serveFileFromRoot(
-      req,
-      res,
-      GENERATED_ROOT,
-      requestedPath.slice('/generated/'.length),
-      'private, max-age=86400'
-    );
-    return;
-  }
-
-  if (requestedPath === '/') {
-    requestedPath = '/index.html';
-  }
-
-  const candidate = path.normalize(path.join(CLIENT_DIST, requestedPath));
-  if (!candidate.startsWith(CLIENT_DIST)) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return;
-  }
-
-  try {
-    const stat = await fs.stat(candidate);
-    const filePath = stat.isDirectory() ? path.join(candidate, 'index.html') : candidate;
-    const ext = path.extname(filePath);
-    const content = await fs.readFile(filePath);
-    sendStaticContent(req, res, 200, content, {
-      'content-type': mimeTypes.get(ext) || 'application/octet-stream',
-      'cache-control': staticCacheControl(ext, filePath),
-      'x-content-type-options': 'nosniff'
-    }, ext);
-  } catch {
-    const indexPath = path.join(CLIENT_DIST, 'index.html');
-    try {
-      const content = await fs.readFile(indexPath);
-      sendStaticContent(req, res, 200, content, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
-        'x-content-type-options': 'nosniff'
-      }, '.html');
-    } catch {
-      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('CodexMobile server is running. Build the PWA with: npm run build');
-    }
-  }
 }
 
 async function requestHandler(req, res) {
@@ -1733,7 +732,7 @@ async function requestHandler(req, res) {
       await handleApi(req, res, url);
       return;
     }
-    await serveStatic(req, res, url);
+    await staticService.serveStatic(req, res, url);
   } catch (error) {
     console.error('[server] Request failed:', error);
     sendJson(res, 500, { error: error.message || 'Internal server error' });
@@ -1743,8 +742,7 @@ async function requestHandler(req, res) {
 async function main() {
   const auth = await initializeAuth();
   await loadFeishuAuthState();
-  await loadRecentImagePrompts();
-  await refreshCodexCache();
+  await chatService.loadRecentImagePrompts();
 
   const server = http.createServer(requestHandler);
   const wss = new WebSocketServer({ noServer: true });
@@ -1785,6 +783,10 @@ async function main() {
     console.log(`CodexMobile listening on http://${HOST}:${PORT}`);
     console.log(`Pairing code: ${getPairingCode()} (${auth.trustedDevices} trusted device(s)${auth.fixedPairingCode ? ', fixed' : ''})`);
     console.log('Use Tailscale and open http://<this-pc-tailscale-ip>:3321 on iPhone.');
+  });
+
+  refreshCodexCache().catch((error) => {
+    console.warn('[server] Initial sync failed:', error.message);
   });
 
   try {

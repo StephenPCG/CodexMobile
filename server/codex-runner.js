@@ -8,6 +8,48 @@ import { detectFeishuSkillKeys } from './feishu-skills.js';
 
 const activeRuns = new Map();
 const NON_ASCII_PATH_PATTERN = /[^\u0000-\u007F]/;
+const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+const TURN_TIMEOUT_MS = parseTurnTimeoutMs(process.env.CODEXMOBILE_TURN_TIMEOUT_MS, DEFAULT_TURN_TIMEOUT_MS);
+const TURN_INACTIVITY_TIMEOUT_MS = parseTurnTimeoutMs(
+  process.env.CODEXMOBILE_TURN_INACTIVITY_TIMEOUT_MS,
+  DEFAULT_TURN_INACTIVITY_TIMEOUT_MS
+);
+
+function parseTurnTimeoutMs(value, fallbackMs = DEFAULT_TURN_TIMEOUT_MS) {
+  const timeoutMs = Number(value);
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    return Math.max(1000, Math.floor(timeoutMs));
+  }
+  return fallbackMs;
+}
+
+function formatTimeoutDuration(timeoutMs) {
+  if (timeoutMs >= 60_000) {
+    return `${Math.round(timeoutMs / 60_000)} 分钟`;
+  }
+  return `${Math.round(timeoutMs / 1000)} 秒`;
+}
+
+function turnTimeoutError() {
+  const error = new Error(`Codex turn timed out after ${formatTimeoutDuration(TURN_TIMEOUT_MS)}`);
+  error.code = 'CODEXMOBILE_TURN_TIMEOUT';
+  return error;
+}
+
+function turnInactivityTimeoutError() {
+  const error = new Error(`Codex turn had no activity for ${formatTimeoutDuration(TURN_INACTIVITY_TIMEOUT_MS)}`);
+  error.code = 'CODEXMOBILE_TURN_INACTIVITY_TIMEOUT';
+  return error;
+}
+
+function isTurnTimeoutError(error) {
+  return error?.code === 'CODEXMOBILE_TURN_TIMEOUT';
+}
+
+function isTurnInactivityTimeoutError(error) {
+  return error?.code === 'CODEXMOBILE_TURN_INACTIVITY_TIMEOUT';
+}
 
 async function ensureAsciiWorkingDirectory(projectPath) {
   if (process.platform !== 'win32' || !NON_ASCII_PATH_PATTERN.test(projectPath)) {
@@ -93,7 +135,7 @@ function contentFromItem(item) {
   return '';
 }
 
-function statusLabel(kind, status = 'running') {
+export function statusLabel(kind, status = 'running') {
   const done = status === 'completed';
   const failed = status === 'failed';
   const labels = {
@@ -101,17 +143,17 @@ function statusLabel(kind, status = 'running') {
     reasoning: done ? '思考完成' : '正在思考',
     agent_message: '正在回复',
     message: '正在回复',
-    command_execution: done ? '命令已完成' : failed ? '命令失败' : '正在执行命令',
-    file_change: done ? '文件已修改' : failed ? '文件修改失败' : '正在修改文件',
-    mcp_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
-    dynamic_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
-    web_search: done ? '网页搜索完成' : failed ? '网页搜索失败' : '正在搜索网页',
+    command_execution: done ? '本地任务已处理' : failed ? '本地任务失败' : '正在处理本地任务',
+    file_change: done ? '文件已更新' : failed ? '文件更新失败' : '正在更新文件',
+    mcp_tool_call: done ? '已完成一步操作' : failed ? '这一步操作失败' : '正在完成一步操作',
+    dynamic_tool_call: done ? '已完成一步操作' : failed ? '这一步操作失败' : '正在完成一步操作',
+    web_search: done ? '网页信息已查到' : failed ? '网页搜索失败' : '正在查找网页信息',
     plan: done ? '计划已更新' : '正在规划',
     todo_list: done ? '计划已更新' : '正在规划',
     image_generation_call: done ? '图片生成完成' : failed ? '图片生成失败' : '正在生成图片',
     context_compaction: '上下文已自动压缩',
-    custom_tool_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
-    function_call: done ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具',
+    custom_tool_call: done ? '已完成一步操作' : failed ? '这一步操作失败' : '正在完成一步操作',
+    function_call: done ? '已完成一步操作' : failed ? '这一步操作失败' : '正在完成一步操作',
     error: '出现错误'
   };
   return labels[kind] || (done ? '已完成' : failed ? '失败' : '正在处理');
@@ -710,6 +752,9 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   const abortPromise = new Promise((_, reject) => {
     abortController.signal.addEventListener('abort', () => reject(abortError()), { once: true });
   });
+  let turnTimeoutTimer = null;
+  let turnInactivityTimeoutTimer = null;
+  let resetTurnInactivityTimeout = () => {};
 
   try {
     if (larkCliContext.enabled && larkCliContext.env) {
@@ -721,7 +766,9 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       env: larkCliContext.env || { ...process.env },
       cwd: workingDirectory,
       clientInfo: { name: 'CodexMobile', title: null, version: '0.1.0' },
+      allowHeadlessLocal: true,
       onNotification: (appMessage) => {
+        resetTurnInactivityTimeout();
         const params = appMessage.params || {};
         if (appMessage.method === 'thread/started' && params.thread?.id) {
           const fromSessionId = previousSessionId || currentSessionId || draftSessionId || params.thread.id;
@@ -813,10 +860,33 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     if (turnResponse?.turn?.id) {
       run.appTurnId = turnResponse.turn.id;
     }
+    const turnTimeoutPromise = new Promise((_, reject) => {
+      turnTimeoutTimer = setTimeout(() => reject(turnTimeoutError()), TURN_TIMEOUT_MS);
+      if (typeof turnTimeoutTimer.unref === 'function') {
+        turnTimeoutTimer.unref();
+      }
+    });
+    const turnInactivityTimeoutPromise = new Promise((_, reject) => {
+      resetTurnInactivityTimeout = () => {
+        if (turnInactivityTimeoutTimer) {
+          clearTimeout(turnInactivityTimeoutTimer);
+        }
+        turnInactivityTimeoutTimer = setTimeout(
+          () => reject(turnInactivityTimeoutError()),
+          TURN_INACTIVITY_TIMEOUT_MS
+        );
+        if (typeof turnInactivityTimeoutTimer.unref === 'function') {
+          turnInactivityTimeoutTimer.unref();
+        }
+      };
+      resetTurnInactivityTimeout();
+    });
 
     await Promise.race([
       completionPromise,
       abortPromise,
+      turnTimeoutPromise,
+      turnInactivityTimeoutPromise,
       client.closed.then(({ error }) => {
         if (error && run.status !== 'aborted') {
           throw error;
@@ -844,11 +914,28 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       });
     }
   } catch (error) {
+    const timedOut = isTurnTimeoutError(error);
+    const inactiveTimedOut = isTurnInactivityTimeoutError(error);
+    if (timedOut || inactiveTimedOut) {
+      run.status = 'timeout';
+      if (client && currentSessionId && run.appTurnId) {
+        await client.request('turn/interrupt', {
+          threadId: currentSessionId,
+          turnId: run.appTurnId
+        }, { timeoutMs: 5_000 }).catch((interruptError) => {
+          console.warn('[codex] Failed to interrupt timed out turn:', interruptError.message);
+        });
+      }
+    }
     const wasAborted =
       error?.name === 'AbortError' ||
       String(error?.message || '').toLowerCase().includes('aborted') ||
       activeRuns.get(turnId)?.status === 'aborted';
-    const userError = userFacingCodexError(error);
+    const userError = timedOut
+      ? `任务超过 ${formatTimeoutDuration(TURN_TIMEOUT_MS)} 没有完成，已自动中止。可以重新发送一次。`
+      : inactiveTimedOut
+        ? `任务超过 ${formatTimeoutDuration(TURN_INACTIVITY_TIMEOUT_MS)} 没有任何进度，已自动中止。可以重新发送一次。`
+      : userFacingCodexError(error);
 
     emit({
       type: wasAborted ? 'chat-aborted' : 'chat-error',
@@ -868,6 +955,12 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       });
     }
   } finally {
+    if (turnTimeoutTimer) {
+      clearTimeout(turnTimeoutTimer);
+    }
+    if (turnInactivityTimeoutTimer) {
+      clearTimeout(turnInactivityTimeoutTimer);
+    }
     if (client) {
       client.close();
     }
@@ -920,6 +1013,54 @@ export function getActiveRuns() {
       startedAt: run.startedAt,
       status: run.status,
       turnId: run.turnId,
+      steerable: Boolean(run.appTurnId),
       context: run.context || null
     }));
+}
+
+export async function steerCodexTurn(identifier, { message, attachments = [], selectedSkills = [] } = {}) {
+  const id = String(identifier || '').trim();
+  const run = [...activeRuns.values()].find(
+    (item) => item.status === 'running' && runMatchesIdentifier(item, id)
+  );
+  if (!run) {
+    const error = new Error('当前桌面端没有可引导的运行任务');
+    error.statusCode = 409;
+    error.code = 'NO_ACTIVE_TURN';
+    throw error;
+  }
+  if (!run.client || !run.sessionId || !run.appTurnId) {
+    const error = new Error('当前任务暂时不能接收运行中消息');
+    error.statusCode = 409;
+    error.code = 'ACTIVE_TURN_NOT_STEERABLE';
+    throw error;
+  }
+
+  try {
+    const response = await run.client.request('turn/steer', {
+      threadId: run.sessionId,
+      expectedTurnId: run.appTurnId,
+      input: buildCodexTurnInput({ message, attachments, selectedSkills })
+    }, { timeoutMs: 30_000 });
+    return {
+      accepted: true,
+      delivery: 'steered',
+      sessionId: run.sessionId,
+      turnId: run.turnId,
+      appTurnId: response?.turnId || run.appTurnId
+    };
+  } catch (error) {
+    const text = String(error?.message || '');
+    if (
+      /active.*not.*steerable|no active turn to steer|cannot steer|expected active turn id/i.test(text) ||
+      error?.code === 'ActiveTurnNotSteerable'
+    ) {
+      const steerError = new Error('当前桌面端任务不能接收运行中消息，可以加入队列或中止后发送。');
+      steerError.statusCode = 409;
+      steerError.code = 'ACTIVE_TURN_NOT_STEERABLE';
+      steerError.detail = text;
+      throw steerError;
+    }
+    throw error;
+  }
 }

@@ -743,7 +743,7 @@ export async function buildCodexLarkCliContext(message = '') {
           'Do not run lark-cli commands. Reply in concise Chinese that Feishu authorization has expired or is unavailable, and ask the user to open the top-right Docs panel and reconnect Feishu.'
         ].join('\n')
       : '';
-  const env = larkCliEnvironment();
+  const env = enabled ? larkCliEnvironment() : { ...process.env };
   if (enabled) {
     const configRoot = await ensureAgentLarkConfigDir();
     const realCli = await resolveLarkCliCommand();

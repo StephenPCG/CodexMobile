@@ -244,6 +244,56 @@ export async function readCodexWorkspaceState() {
   }
 }
 
+export function defaultProjectlessWorkspaceRoot() {
+  return path.join(os.homedir(), 'Documents', 'Codex');
+}
+
+export async function registerProjectlessThread(threadId, workspaceRoot = defaultProjectlessWorkspaceRoot()) {
+  const id = String(threadId || '').trim();
+  if (!id) {
+    return null;
+  }
+
+  let state = {};
+  try {
+    state = JSON.parse(await fs.readFile(CODEX_GLOBAL_STATE_PATH, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const root = path.resolve(workspaceRoot || defaultProjectlessWorkspaceRoot());
+  const projectlessThreadIds = Array.isArray(state['projectless-thread-ids'])
+    ? state['projectless-thread-ids'].filter((value) => typeof value === 'string' && value.trim())
+    : [];
+  if (!projectlessThreadIds.includes(id)) {
+    projectlessThreadIds.push(id);
+  }
+
+  const threadWorkspaceRootHints = state['thread-workspace-root-hints'] &&
+    typeof state['thread-workspace-root-hints'] === 'object' &&
+    !Array.isArray(state['thread-workspace-root-hints'])
+    ? state['thread-workspace-root-hints']
+    : {};
+
+  const nextState = {
+    ...state,
+    'projectless-thread-ids': projectlessThreadIds,
+    'thread-workspace-root-hints': {
+      ...threadWorkspaceRootHints,
+      [id]: root
+    }
+  };
+
+  await fs.mkdir(CODEX_HOME, { recursive: true });
+  const tempPath = `${CODEX_GLOBAL_STATE_PATH}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(tempPath, JSON.stringify(nextState), 'utf8');
+  await fs.rename(tempPath, CODEX_GLOBAL_STATE_PATH);
+
+  return { threadId: id, workspaceRoot: root };
+}
+
 export async function readCodexConfig() {
   const fallback = {
     provider: 'codex',

@@ -10,6 +10,32 @@ fs.mkdirSync(logDir, { recursive: true });
 const outPath = path.join(logDir, 'server.out.log');
 const errPath = path.join(logDir, 'server.err.log');
 
+function loadDotEnv() {
+  const envPath = path.join(root, '.env');
+  if (!fs.existsSync(envPath)) {
+    return;
+  }
+  const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match || process.env[match[1]] !== undefined) {
+      continue;
+    }
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[match[1]] = value;
+  }
+}
+
 function dedupePath(value) {
   const seen = new Set();
   return String(value || '')
@@ -50,6 +76,8 @@ function childEnv() {
   return env;
 }
 
+loadDotEnv();
+
 function listenerPidsForPort(value) {
   if (process.platform === 'win32') {
     return [];
@@ -87,7 +115,10 @@ function pidIsAlive(pid) {
 }
 
 async function stopExistingServer() {
-  const pids = listenerPidsForPort(port).filter((pid) => commandForPid(pid).includes('server/index.js'));
+  const pids = listenerPidsForPort(port).filter((pid) => {
+    const command = commandForPid(pid);
+    return command.includes('server/index.js') || command.includes('scripts/run-server.mjs');
+  });
   if (!pids.length) {
     return;
   }

@@ -40,12 +40,28 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { apiBlobFetch, apiFetch, clearToken, getToken, realtimeVoiceWebsocketUrl, setToken, websocketUrl } from './api.js';
+import { isThinkingActivityStep, thinkingActivityText } from './activity-display.js';
 import { removeDuplicateFinalAnswerActivity } from './activity-dedupe.js';
+import { mergeActivityStep } from './activity-merge.js';
+import { isPlaceholderTimelineItem } from './activity-timeline.js';
 import { isNearChatBottom, shouldFollowChatOutput } from './chat-scroll.js';
+import { composerSendState, desktopBridgeCanCreateThread } from './send-state.js';
+import {
+  desktopThreadHasAssistantAfterLocalSend,
+  desktopThreadHasAssistantAfterPendingSend,
+  mergeLiveSelectedThreadMessages,
+  shouldPollSelectedSessionMessages
+} from './session-live-refresh.js';
 import { provisionalSessionTitle, sessionTitleFromConversation } from '../../shared/session-title.js';
 
 const DEFAULT_STATUS = {
   connected: false,
+  desktopBridge: {
+    strict: true,
+    connected: false,
+    mode: 'unavailable',
+    reason: null
+  },
   provider: 'cliproxyapi',
   model: 'gpt-5.5',
   modelShort: '5.5 中',
@@ -925,7 +941,7 @@ function isGenericActivityLabel(value) {
   if (!text) {
     return true;
   }
-  return /^(正在思考中?|思考完成|正在处理|正在回复|正在整理回复|正在准备任务|正在修改并验证|正在执行命令|命令已完成|命令完成|命令执行完成|执行完成|工具调用完成|正在调用工具|工具调用失败|工具已完成|计划已更新|正在规划|任务已完成|已完成|完成|失败)$/i.test(text);
+  return /^(正在思考中?|思考完成|正在处理|正在回复|正在整理回复|正在准备任务|正在修改并验证|正在执行命令|命令已完成|命令完成|命令执行完成|执行完成|正在处理本地任务|本地任务已处理|本地任务失败|文件已更新|文件更新失败|正在更新文件|工具调用完成|正在调用工具|工具调用失败|正在完成一步操作|已完成一步操作|这一步操作失败|工具已完成|网页信息已查到|正在查找网页信息|计划已更新|正在规划|任务已完成|已完成|完成|失败)$/i.test(text);
 }
 
 function activityStepFromPayload(payload, fallbackKind = 'status') {
@@ -1016,36 +1032,12 @@ function briefActivityLabel(value, fallback = '正在处理') {
   return text.length > 18 ? '' : text;
 }
 
-function mergeActivityStep(currentSteps, step) {
-  if (!step) {
-    return currentSteps || [];
-  }
-  const steps = [...(currentSteps || [])];
-  const existingIndex = steps.findIndex((item) => item.id === step.id);
-  if (existingIndex >= 0) {
-    steps[existingIndex] = { ...steps[existingIndex], ...step };
-    return steps;
-  }
-  const sameWorkIndex = steps.findIndex(
-    (item) =>
-      item.kind === step.kind &&
-      item.label === step.label &&
-      (item.command || '') === (step.command || '')
-  );
-  if (sameWorkIndex >= 0) {
-    steps[sameWorkIndex] = { ...steps[sameWorkIndex], ...step };
-    return steps;
-  }
-  const last = steps[steps.length - 1];
-  if (last && last.label === step.label && last.detail === step.detail && last.status === step.status) {
-    return steps;
-  }
-  return [...steps, step];
-}
-
 function isVisibleActivityStep(step, messageStatus) {
   if (!step) {
     return false;
+  }
+  if (isThinkingActivityStep(step)) {
+    return true;
   }
   const label = String(step.label || '').trim();
   const hasWorkDetail =
@@ -1430,7 +1422,9 @@ function Drawer({
   onSync,
   syncing,
   theme,
-  setTheme
+  setTheme,
+  canCreateThread = true,
+  createThreadUnavailableReason = ''
 }) {
   const [drawerView, setDrawerView] = useState('main');
   const [subagentExpandedById, setSubagentExpandedById] = useState({});
@@ -1537,7 +1531,12 @@ function Drawer({
               aria-label="搜索对话"
             />
           </label>
-          <button className="drawer-new-button" onClick={onNewConversation}>
+          <button
+            className="drawer-new-button"
+            onClick={onNewConversation}
+            disabled={!canCreateThread}
+            title={!canCreateThread ? (createThreadUnavailableReason || '请先在桌面端新建对话') : '新对话'}
+          >
             <Plus size={17} />
             新对话
           </button>
@@ -1820,8 +1819,18 @@ function Drawer({
   );
 }
 
-function TopBar({ selectedProject, connectionState, onMenu, onOpenDocs, onGitAction, gitDisabled = false }) {
-  const status = CONNECTION_STATUS[connectionState] || CONNECTION_STATUS.disconnected;
+function bridgeConnectionLabel(connectionState, desktopBridge) {
+  if (connectionState !== 'connected') {
+    return CONNECTION_STATUS[connectionState] || CONNECTION_STATUS.disconnected;
+  }
+  if (desktopBridge?.mode === 'headless-local') {
+    return { label: '后台 Codex', className: 'is-connected is-headless' };
+  }
+  return CONNECTION_STATUS.connected;
+}
+
+function TopBar({ selectedProject, connectionState, desktopBridge, onMenu, onOpenDocs, onGitAction, gitDisabled = false }) {
+  const status = bridgeConnectionLabel(connectionState, desktopBridge);
   const [gitOpen, setGitOpen] = useState(false);
   const gitMenuRef = useRef(null);
 
@@ -2091,6 +2100,11 @@ function ActivityMessage({ message, now = Date.now() }) {
                   className="message-content activity-markdown activity-text"
                   text={item.text}
                 />
+              ) : item.type === 'live' ? (
+                <div key={item.id} className={`activity-live is-${item.liveType || 'step'} ${item.status === 'running' ? 'is-running' : ''}`}>
+                  <span className="activity-live-dot" />
+                  <span>{item.text}</span>
+                </div>
               ) : item.type === 'divider' ? (
                 <div key={item.id} className="activity-divider">
                   <span>{item.text}</span>
@@ -2098,7 +2112,7 @@ function ActivityMessage({ message, now = Date.now() }) {
               ) : item.metaType === 'subagent' ? (
                 <SubagentActivityBlock key={item.id} item={item} />
               ) : item.items.some((step) => activityDetailText(step)) ? (
-                <details key={item.id} className="activity-meta">
+                <details key={item.id} className={`activity-meta ${item.items.some((step) => step.status === 'running' || step.status === 'queued') ? 'is-running' : ''}`}>
                   <summary className="activity-meta-summary">
                     {activityMetaIcon(item)}
                     <span>{item.title}</span>
@@ -2110,7 +2124,7 @@ function ActivityMessage({ message, now = Date.now() }) {
                   </div>
                 </details>
               ) : (
-                <div key={item.id} className="activity-meta">
+                <div key={item.id} className={`activity-meta ${item.items.some((step) => step.status === 'running' || step.status === 'queued') ? 'is-running' : ''}`}>
                   <div className="activity-meta-summary">
                     {activityMetaIcon(item)}
                     <span>{item.title}</span>
@@ -2134,7 +2148,7 @@ function ActivityStepDetail({ step }) {
     const output = step.output || step.error || '';
     const failed = step.status === 'failed';
     const running = step.status === 'running';
-    const title = `${failed ? '命令失败' : running ? '正在运行' : '已运行'} ${conciseActivityDetail(command, 110)}`;
+    const title = `${failed ? '本地任务失败' : running ? '正在处理本地任务' : '本地任务已处理'} ${conciseActivityDetail(command, 110)}`;
     const shellText = [`$ ${command}`, output].filter(Boolean).join('\n\n');
     const statusText = failed && step.exitCode !== undefined && step.exitCode !== null
       ? `退出码 ${step.exitCode}`
@@ -2216,6 +2230,28 @@ function activityTimeRange(steps) {
   return { startedAt, endedAt };
 }
 
+function stepsForActivityTimeline(steps) {
+  const items = Array.isArray(steps) ? steps : [];
+  let latestThinkingIndex = -1;
+  let latestNarrativeIndex = -1;
+  items.forEach((step, index) => {
+    if (isThinkingActivityStep(step)) {
+      latestThinkingIndex = index;
+    } else if (isNarrativeActivity(step)) {
+      latestNarrativeIndex = index;
+    }
+  });
+  return items.filter((step, index) => {
+    if (isThinkingActivityStep(step)) {
+      return index === latestThinkingIndex;
+    }
+    if (isNarrativeActivity(step)) {
+      return index === latestNarrativeIndex;
+    }
+    return true;
+  });
+}
+
 function buildActivityTimeline(steps, running) {
   const timeline = [];
   let batch = [];
@@ -2235,8 +2271,17 @@ function buildActivityTimeline(steps, running) {
     batch = [];
   }
 
-  for (const step of steps || []) {
-    if (isContextCompactionActivity(step)) {
+  for (const step of stepsForActivityTimeline(steps)) {
+    if (isThinkingActivityStep(step)) {
+      flushBatch();
+      timeline.push({
+        id: `thinking-${step.id}`,
+        type: 'live',
+        liveType: 'thinking',
+        text: thinkingActivityText(step),
+        status: step.status || 'running'
+      });
+    } else if (isContextCompactionActivity(step)) {
       flushBatch();
       timeline.push({
         id: `divider-${step.id}`,
@@ -2251,7 +2296,10 @@ function buildActivityTimeline(steps, running) {
         text: String(step.label || step.detail || step.content || '').trim()
       });
     } else {
-      batch.push(activityTimelineItem(step));
+      const item = activityTimelineItem(step);
+      if (!isPlaceholderTimelineItem(item)) {
+        batch.push(item);
+      }
     }
   }
   flushBatch();
@@ -2445,6 +2493,10 @@ function dominantActivityType(items) {
 
 function summarizeActivityBatch(items, running) {
   const activeItem = items.length === 1 && running && items[0]?.status === 'running' ? items[0] : null;
+  if (activeItem?.type === 'edit') {
+    const detail = activeItem.detail || activeItem.label || '';
+    return detail ? `正在编辑 ${conciseActivityDetail(detail)}` : '正在编辑文件';
+  }
   if (activeItem?.type === 'command' && activeItem.detail) {
     return `正在运行 ${conciseActivityDetail(activeItem.detail)}`;
   }
@@ -2489,7 +2541,7 @@ function summarizeActivityBatch(items, running) {
       return failedOnly ? `编辑失败 ${group.failed} 个文件` : `${active ? '正在编辑' : '已编辑'} ${doneCount || group.count} 个文件`;
     }
     if (key === 'command') {
-      return failedOnly ? `${group.failed} 条命令失败` : `${active ? '正在运行' : '已运行'} ${doneCount || group.count} 条命令`;
+      return failedOnly ? `${group.failed} 个本地任务失败` : `${active ? '正在处理' : '已处理'} ${doneCount || group.count} 个本地任务`;
     }
     if (key === 'browser') {
       return failedOnly ? `浏览器操作失败 ${group.failed} 次` : `${active ? '正在操作浏览器' : '已操作浏览器'} ${doneCount || group.count} 次`;
@@ -2498,7 +2550,7 @@ function summarizeActivityBatch(items, running) {
       return failedOnly ? '计划更新失败' : active ? '正在更新计划' : '已更新计划';
     }
     if (key === 'tool') {
-      return failedOnly ? `工具调用失败 ${group.failed} 个` : `${active ? '正在调用' : '已调用'} ${doneCount || group.count} 个工具`;
+      return failedOnly ? `${group.failed} 步操作失败` : `${active ? '正在完成' : '已完成'} ${doneCount || group.count} 步操作`;
     }
     if (key === 'subagent') {
       return failedOnly
@@ -3279,10 +3331,15 @@ function contentWithAttachmentPreviews(content, attachments = []) {
 function splitMessageImages(content) {
   const textLines = [];
   const images = [];
+  const seenImages = new Set();
   for (const line of String(content || '').replace(/\r\n?/g, '\n').split('\n')) {
     const image = markdownImageFromLine(line) || legacyAttachmentImageFromLine(line);
     if (image) {
-      images.push(image);
+      const key = image.url || line;
+      if (!seenImages.has(key)) {
+        seenImages.add(key);
+        images.push(image);
+      }
     } else {
       textLines.push(line);
     }
@@ -3745,6 +3802,7 @@ function ContextStatusButton({ contextStatus, open, onToggle }) {
 function Composer({
   input,
   setInput,
+  selectedSession,
   onSubmit,
   running,
   onAbort,
@@ -3764,7 +3822,8 @@ function Composer({
   onRemoveAttachment,
   uploading,
   contextStatus,
-  runStatus
+  runStatus,
+  desktopBridge
 }) {
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -3777,6 +3836,17 @@ function Composer({
   const skillList = Array.isArray(skills) ? skills : [];
   const selectedSkillSet = new Set(Array.isArray(selectedSkillPaths) ? selectedSkillPaths : []);
   const selectedSkills = skillList.filter((skill) => selectedSkillSet.has(skill.path));
+  const sendState = composerSendState({
+    running,
+    hasInput,
+    uploading,
+    desktopBridge,
+    steerable: runStatus?.steerable !== false,
+    sessionIsDraft: isDraftSession(selectedSession)
+  });
+  const stopMode = sendState.mode === 'abort';
+  const runningInputMode = running && hasInput;
+  const sendLabel = sendState.label;
   const filteredSkills = skillList.filter((skill) => {
     const query = skillFilter.trim().toLowerCase();
     if (!query) {
@@ -3798,12 +3868,16 @@ function Composer({
 
   function submit(event) {
     event.preventDefault();
-    if (running && !hasInput) {
+    if (stopMode) {
       onAbort();
       return;
     }
+    if (runningInputMode) {
+      setOpenMenu((current) => (current === 'send-mode' ? null : 'send-mode'));
+      return;
+    }
     if (hasInput) {
-      onSubmit();
+      onSubmit({ mode: 'start' });
       setOpenMenu(null);
     }
   }
@@ -3919,22 +3993,6 @@ function Composer({
       ) : null}
       {openMenu === 'model' ? (
         <div className="composer-menu model-menu">
-          <div className="menu-section-label">智能</div>
-          {REASONING_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={selectedReasoningEffort === option.value ? 'is-selected' : ''}
-              onClick={() => {
-                onSelectReasoningEffort(option.value);
-                setOpenMenu(null);
-              }}
-            >
-              {selectedReasoningEffort === option.value ? <Check size={16} /> : <span className="menu-spacer" />}
-              <span>{option.label}</span>
-            </button>
-          ))}
-          <div className="menu-divider" />
           <div className="menu-section-label">模型</div>
           {modelList.map((model) => (
             <button
@@ -3948,6 +4006,22 @@ function Composer({
             >
               {selectedModel === model.value ? <Check size={16} /> : <span className="menu-spacer" />}
               <span>{model.label}</span>
+            </button>
+          ))}
+          <div className="menu-divider" />
+          <div className="menu-section-label">智能</div>
+          {REASONING_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={selectedReasoningEffort === option.value ? 'is-selected' : ''}
+              onClick={() => {
+                onSelectReasoningEffort(option.value);
+                setOpenMenu(null);
+              }}
+            >
+              {selectedReasoningEffort === option.value ? <Check size={16} /> : <span className="menu-spacer" />}
+              <span>{option.label}</span>
             </button>
           ))}
         </div>
@@ -3965,6 +4039,72 @@ function Composer({
             <small>{runStatus.label}</small>
           </span>
           {runStatus.duration ? <span className="composer-run-time">{runStatus.duration}</span> : null}
+        </div>
+      ) : null}
+      {!sendState.disabled || sendState.mode !== 'unavailable' ? null : (
+        <div className="composer-run-status is-warning" role="status" aria-live="polite">
+          <span className="composer-run-dot" />
+          <span className="composer-run-main">
+            <strong>桌面端 Codex 未连接</strong>
+            <small>{desktopBridge?.reason || '打开桌面端 Codex，或配置同源 app-server control socket 后再发送'}</small>
+          </span>
+        </div>
+      )}
+      {sendState.mode !== 'create-unavailable' ? null : (
+        <div className="composer-run-status is-warning" role="status" aria-live="polite">
+          <span className="composer-run-dot" />
+          <span className="composer-run-main">
+            <strong>只能继续桌面端已有对话</strong>
+            <small>{desktopBridge?.capabilities?.createThreadReason || '当前桌面端还没有开放从手机新建同源对话的入口'}</small>
+          </span>
+        </div>
+      )}
+      {openMenu === 'send-mode' ? (
+        <div className="composer-menu send-mode-menu">
+          <button
+            type="button"
+            disabled={!sendState.canSteer}
+            onClick={() => {
+              if (!sendState.canSteer) {
+                return;
+              }
+              onSubmit({ mode: 'steer' });
+              setOpenMenu(null);
+            }}
+          >
+            <MessageSquare size={16} />
+            <span>
+              <strong>发送到当前任务</strong>
+              <small>{sendState.canSteer ? '直接补充给桌面端正在执行的任务' : '当前任务暂时不能接收补充消息'}</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onSubmit({ mode: 'queue' });
+              setOpenMenu(null);
+            }}
+          >
+            <MessageSquarePlus size={16} />
+            <span>
+              <strong>加入队列</strong>
+              <small>当前任务结束后自动发送</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            className="is-danger"
+            onClick={() => {
+              onSubmit({ mode: 'interrupt' });
+              setOpenMenu(null);
+            }}
+          >
+            <Square size={15} />
+            <span>
+              <strong>中止并发送</strong>
+              <small>停下当前任务，用这条消息重新引导</small>
+            </span>
+          </button>
         </div>
       ) : null}
       <div className="composer">
@@ -3987,6 +4127,7 @@ function Composer({
           rows={1}
           value={input}
           onChange={(event) => setInput(event.target.value)}
+          onFocus={() => setOpenMenu(null)}
           placeholder="给 Codex 发送消息"
         />
         <div className="composer-controls">
@@ -4014,8 +4155,14 @@ function Composer({
               {shortModelName(selectedModelLabel)} {reasoningLabel(selectedReasoningEffort)}
               <ChevronDown size={15} />
             </button>
-            <button type="submit" className={`send-button ${running ? 'is-running' : ''}`} disabled={uploading || (!hasInput && !running)}>
-              {running && !hasInput ? <Square size={16} /> : uploading ? <Loader2 className="spin" size={16} /> : <ArrowUp size={19} />}
+            <button
+              type="submit"
+              className={`send-button ${stopMode ? 'is-running' : ''} ${runningInputMode ? 'is-queueing' : ''}`}
+              disabled={sendState.disabled}
+              aria-label={sendLabel}
+              title={sendLabel}
+            >
+              {stopMode ? <Square size={16} /> : uploading ? <Loader2 className="spin" size={16} /> : <ArrowUp size={19} />}
             </button>
           </div>
         </div>
@@ -4072,10 +4219,10 @@ export default function App() {
   const messagesRef = useRef([]);
   const autoTitleSyncRef = useRef(new Set());
   const runningByIdRef = useRef({});
-  const lastLocalRunAtRef = useRef(0);
   const activePollsRef = useRef(new Set());
   const turnRefreshTimersRef = useRef(new Map());
   const sessionLivePollRef = useRef(false);
+  const desktopIpcPendingRunsRef = useRef(new Map());
   const voiceDialogRecorderRef = useRef(null);
   const voiceDialogChunksRef = useRef([]);
   const voiceDialogStreamRef = useRef(null);
@@ -4161,6 +4308,9 @@ export default function App() {
   }, []);
 
   const running = hasRunningKey(runningById, selectedRunKeys(selectedSession));
+  const selectedRuntime = selectedRunKeys(selectedSession)
+    .map((key) => threadRuntimeById[key])
+    .find(Boolean) || null;
   const hasRunningActivity = useMemo(
     () =>
       messages.some(
@@ -5138,7 +5288,6 @@ export default function App() {
     if (!keys.length) {
       return;
     }
-    lastLocalRunAtRef.current = Date.now();
     setRunningById((current) => {
       const next = { ...current };
       for (const key of keys) {
@@ -5152,6 +5301,7 @@ export default function App() {
       for (const key of keys) {
         next[key] = {
           status: 'running',
+          steerable: payload.steerable !== false,
           updatedAt: payload.timestamp || payload.startedAt || new Date().toISOString()
         };
       }
@@ -5233,8 +5383,7 @@ export default function App() {
     const activeRuns = Array.isArray(nextStatus?.activeRuns) ? nextStatus.activeRuns : [];
     const shouldPreserveLocalRuns =
       activePollsRef.current.size > 0 ||
-      turnRefreshTimersRef.current.size > 0 ||
-      Date.now() - lastLocalRunAtRef.current < 15000;
+      turnRefreshTimersRef.current.size > 0;
 
     if (!activeRuns.length) {
       if (!shouldPreserveLocalRuns) {
@@ -5270,6 +5419,7 @@ export default function App() {
         nextRunning[key] = true;
         nextRuntime[key] = {
           status: 'running',
+          steerable: run.steerable !== false,
           updatedAt: run.startedAt || new Date().toISOString()
         };
       }
@@ -5303,6 +5453,39 @@ export default function App() {
       window.clearTimeout(timer);
       turnRefreshTimersRef.current.delete(turnId);
     }
+  }
+
+  function rememberDesktopIpcPendingRun(sessionId, pending) {
+    if (!sessionId || !pending?.message) {
+      return;
+    }
+    desktopIpcPendingRunsRef.current.set(sessionId, {
+      ...pending,
+      sessionId,
+      startedAt: pending.startedAt || new Date().toISOString()
+    });
+  }
+
+  function completeDesktopIpcPendingRun(sessionId) {
+    const pending = desktopIpcPendingRunsRef.current.get(sessionId);
+    if (!pending) {
+      return false;
+    }
+    desktopIpcPendingRunsRef.current.delete(sessionId);
+    const completedPayload = {
+      sessionId,
+      turnId: selectedSessionRef.current?.turnId || pending.clientTurnId || pending.turnId || null,
+      completedAt: new Date().toISOString()
+    };
+    clearRun(completedPayload);
+    if (pending.turnId && pending.turnId !== completedPayload.turnId) {
+      clearRun({ ...completedPayload, turnId: pending.turnId });
+    }
+    if (pending.clientTurnId && pending.clientTurnId !== completedPayload.turnId) {
+      clearRun({ ...completedPayload, turnId: pending.clientTurnId });
+    }
+    markSessionCompleteNotice(completedPayload);
+    return true;
   }
 
   async function refreshMessagesForPayload(payload) {
@@ -5409,17 +5592,39 @@ export default function App() {
       if (stopped || sessionLivePollRef.current) {
         return;
       }
-      if (hasRunningKey(runningByIdRef.current || {}, selectedRunKeys(selectedSessionRef.current || selectedSession))) {
+      const hasSelectedRunning = hasRunningKey(
+        runningByIdRef.current || {},
+        selectedRunKeys(selectedSessionRef.current || selectedSession)
+      );
+      const hasExternalThreadRefresh = Boolean(desktopIpcPendingRunsRef.current.get(sessionId));
+      if (!shouldPollSelectedSessionMessages({
+        hasSelectedRunning,
+        desktopBridge: status.desktopBridge,
+        hasExternalThreadRefresh
+      })) {
         return;
       }
       sessionLivePollRef.current = true;
       try {
         const data = await apiFetch(sessionMessagesApiPath(sessionId));
         if (!stopped && selectedSessionRef.current?.id === sessionId && Array.isArray(data.messages)) {
+          const pendingDesktopRun = desktopIpcPendingRunsRef.current.get(sessionId) || null;
+          const shouldCompleteDesktopRun =
+            hasSelectedRunning &&
+            status.desktopBridge?.mode === 'desktop-ipc' &&
+            (
+              desktopThreadHasAssistantAfterPendingSend(pendingDesktopRun, data.messages) ||
+              desktopThreadHasAssistantAfterLocalSend(messagesRef.current, data.messages)
+            );
           setContextStatus((current) => mergeContextStatus(current, data.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
           setMessages((current) =>
-            messageStreamSignature(current) === messageStreamSignature(data.messages) ? current : data.messages
+            messageStreamSignature(current) === messageStreamSignature(data.messages)
+              ? current
+              : mergeLiveSelectedThreadMessages(current, data.messages)
           );
+          if (shouldCompleteDesktopRun) {
+            completeDesktopIpcPendingRun(sessionId);
+          }
         }
       } catch {
         // Keep the currently rendered conversation if a transient poll fails.
@@ -5435,7 +5640,7 @@ export default function App() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [authenticated, selectedSession?.id, hasRunningActivity, running]);
+  }, [authenticated, selectedSession?.id, hasRunningActivity, running, status.desktopBridge]);
 
   useEffect(() => () => closeVoiceDialog(), []);
 
@@ -5867,6 +6072,22 @@ export default function App() {
       if (payload.type === 'sync-complete' && payload.projects) {
         setProjects(payload.projects);
         const project = selectedProjectRef.current;
+        if (!project?.id) {
+          const preferred =
+            payload.projects.find((item) => item.name.toLowerCase() === 'codexmobile') ||
+            payload.projects.find((item) => item.path.toLowerCase().includes('codexmobile')) ||
+            payload.projects[0] ||
+            null;
+          if (preferred) {
+            setSelectedProject(preferred);
+            setExpandedProjectIds((current) => ({ ...current, [preferred.id]: true }));
+            loadSessions(preferred, {
+              chooseLatest: true,
+              preserveSelection: false
+            }).catch(() => null);
+          }
+          return;
+        }
         if (project?.id) {
           apiFetch(`/api/projects/${encodeURIComponent(project.id)}/sessions`)
             .then((data) => {
@@ -6141,6 +6362,19 @@ export default function App() {
   }
 
   function handleNewConversation() {
+    if (!desktopBridgeCanCreateThread(status.desktopBridge)) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: `desktop-create-unavailable-${Date.now()}`,
+          role: 'activity',
+          content: status.desktopBridge?.capabilities?.createThreadReason || '当前桌面端还没有开放从手机新建同源对话的入口。请先在桌面端新建或打开一个对话，再从手机继续发送。',
+          timestamp: new Date().toISOString()
+        }
+      ]);
+      setDrawerOpen(false);
+      return;
+    }
     const project = selectedProject || projects[0];
     if (!project) {
       return;
@@ -6392,7 +6626,8 @@ export default function App() {
     message,
     attachmentsForTurn = [],
     clearComposer = false,
-    restoreTextOnError = false
+    restoreTextOnError = false,
+    sendMode = 'start'
   }) {
     const project = selectedProject || selectedProjectRef.current;
     const selectedAttachments = Array.isArray(attachmentsForTurn) ? attachmentsForTurn : [];
@@ -6479,17 +6714,40 @@ export default function App() {
           model: selectedModel || status.model,
           reasoningEffort: selectedReasoningEffort || status.reasoningEffort || DEFAULT_REASONING_EFFORT,
           selectedSkills: selectedSkillsForTurn(),
-          attachments: selectedAttachments
+          attachments: selectedAttachments,
+          sendMode
         }
       });
+      const resultTurnId = result.turnId || turnId;
+      const resultSessionId = result.sessionId || optimisticSessionId;
+      if (result.desktopBridge?.mode === 'desktop-ipc') {
+        rememberDesktopIpcPendingRun(resultSessionId, {
+          message: displayMessage,
+          turnId: resultTurnId,
+          clientTurnId: turnId,
+          previousSessionId: draftSessionId || outgoingSessionId,
+          startedAt: submittedAt
+        });
+        markRun({
+          turnId: resultTurnId,
+          sessionId: resultSessionId,
+          previousSessionId: draftSessionId || outgoingSessionId
+        });
+        return {
+          turnId: resultTurnId,
+          optimisticSessionId,
+          projectId: project.id,
+          previousSessionId: draftSessionId || outgoingSessionId
+        };
+      }
       pollTurnUntilComplete({
-        turnId: result.turnId || turnId,
+        turnId: resultTurnId,
         optimisticSessionId,
         projectId: project.id,
         previousSessionId: draftSessionId || outgoingSessionId
       });
       return {
-        turnId: result.turnId || turnId,
+        turnId: resultTurnId,
         optimisticSessionId,
         projectId: project.id,
         previousSessionId: draftSessionId || outgoingSessionId
@@ -6498,6 +6756,9 @@ export default function App() {
       clearRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
       if (clearComposer) {
         setAttachments(selectedAttachments);
+        if (String(message || '').trim()) {
+          setInput(String(message).trim());
+        }
       }
       if (restoreTextOnError) {
         restoreVoiceTextToInput(displayMessage);
@@ -6517,7 +6778,24 @@ export default function App() {
     }
   }
 
-  async function handleSubmit() {
+  async function abortCurrentRun() {
+    const abortId =
+      selectedSessionRef.current?.id ||
+      selectedSessionRef.current?.turnId ||
+      Object.keys(runningByIdRef.current || runningById)[0];
+    if (!abortId) {
+      return false;
+    }
+    await apiFetch('/api/chat/abort', {
+      method: 'POST',
+      body: { sessionId: abortId, turnId: selectedSessionRef.current?.turnId || null }
+    }).catch(() => null);
+    desktopIpcPendingRunsRef.current.delete(abortId);
+    clearRun({ sessionId: abortId, turnId: selectedSessionRef.current?.turnId || null });
+    return true;
+  }
+
+  async function handleSubmit({ mode = 'start' } = {}) {
     const message = input.trim();
     if ((!message && !attachments.length) || !selectedProject) {
       return;
@@ -6526,90 +6804,11 @@ export default function App() {
       await submitCodexMessage({
         message,
         attachmentsForTurn: attachments,
-        clearComposer: true
+        clearComposer: true,
+        sendMode: mode === 'guide' ? 'interrupt' : mode
       });
     } catch {
       // submitCodexMessage already reflects the failure in the chat UI.
-    }
-    return;
-    let sessionForTurn = selectedSession;
-    if (!sessionForTurn) {
-      sessionForTurn = createDraftSession(selectedProject);
-      setSelectedSession(sessionForTurn);
-      setExpandedProjectIds((current) => ({ ...current, [selectedProject.id]: true }));
-      setSessionsByProject((current) => upsertSessionInProject(current, selectedProject.id, sessionForTurn));
-    }
-    const turnId = createClientTurnId();
-    const draftSessionId = isDraftSession(sessionForTurn) ? sessionForTurn.id : null;
-    const outgoingSessionId = draftSessionId ? null : sessionForTurn?.id || null;
-    const optimisticSessionId = draftSessionId || outgoingSessionId || turnId;
-    const selectedAttachments = attachments;
-    const initialTitle = draftSessionId && !sessionForTurn.titleLocked
-      ? titleFromFirstMessage(message || '查看附件')
-      : null;
-    const displayMessage = message || '请查看附件。';
-    setInput('');
-    setAttachments([]);
-    markRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
-    setSelectedSession((current) =>
-      current?.id === sessionForTurn?.id
-        ? { ...current, turnId, ...autoTitlePatch(initialTitle) }
-        : current
-    );
-    if (initialTitle) {
-      setSessionsByProject((current) => ({
-        ...current,
-        [selectedProject.id]: (current[selectedProject.id] || []).map((item) =>
-          item.id === sessionForTurn.id ? { ...item, ...autoTitlePatch(initialTitle) } : item
-        )
-      }));
-    }
-    setMessages((current) => [
-      ...current,
-      {
-        id: `local-${Date.now()}`,
-        role: 'user',
-        content: displayMessage,
-        timestamp: new Date().toISOString(),
-        sessionId: optimisticSessionId,
-        turnId
-      }
-    ]);
-    try {
-      const result = await apiFetch('/api/chat/send', {
-        method: 'POST',
-        body: {
-          projectId: selectedProject.id,
-          sessionId: outgoingSessionId,
-          draftSessionId,
-          clientTurnId: turnId,
-          message: displayMessage,
-          permissionMode,
-          model: selectedModel || status.model,
-          reasoningEffort: selectedReasoningEffort || status.reasoningEffort || DEFAULT_REASONING_EFFORT,
-          attachments: selectedAttachments
-        }
-      });
-      pollTurnUntilComplete({
-        turnId: result.turnId || turnId,
-        optimisticSessionId,
-        projectId: selectedProject.id,
-        previousSessionId: draftSessionId || outgoingSessionId
-      });
-    } catch (error) {
-      clearRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
-      setAttachments(selectedAttachments);
-      setMessages((current) =>
-        upsertStatusMessage(current, {
-          sessionId: optimisticSessionId,
-          turnId,
-          kind: 'turn',
-          status: 'failed',
-          label: '发送失败',
-          detail: error.message,
-          timestamp: new Date().toISOString()
-        })
-      );
     }
   }
 
@@ -6652,112 +6851,10 @@ export default function App() {
       attachmentsForTurn: [],
       restoreTextOnError: true
     });
-    if (!selectedProject) {
-      restoreVoiceTextToInput(message);
-      throw new Error('请先选择项目');
-    }
-
-    let sessionForTurn = selectedSession;
-    if (!sessionForTurn) {
-      sessionForTurn = createDraftSession(selectedProject);
-      setSelectedSession(sessionForTurn);
-      setExpandedProjectIds((current) => ({ ...current, [selectedProject.id]: true }));
-      setSessionsByProject((current) => upsertSessionInProject(current, selectedProject.id, sessionForTurn));
-    }
-
-    const turnId = createClientTurnId();
-    const draftSessionId = isDraftSession(sessionForTurn) ? sessionForTurn.id : null;
-    const outgoingSessionId = draftSessionId ? null : sessionForTurn?.id || null;
-    const optimisticSessionId = draftSessionId || outgoingSessionId || turnId;
-    const displayMessage = message;
-    const initialTitle = draftSessionId && !sessionForTurn.titleLocked
-      ? titleFromFirstMessage(displayMessage)
-      : null;
-
-    markRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
-    setSelectedSession((current) =>
-      current?.id === sessionForTurn?.id
-        ? { ...current, turnId, ...autoTitlePatch(initialTitle) }
-        : current
-    );
-    if (initialTitle) {
-      setSessionsByProject((current) => ({
-        ...current,
-        [selectedProject.id]: (current[selectedProject.id] || []).map((item) =>
-          item.id === sessionForTurn.id ? { ...item, ...autoTitlePatch(initialTitle) } : item
-        )
-      }));
-    }
-    setMessages((current) => [
-      ...current,
-      {
-        id: `local-${Date.now()}`,
-        role: 'user',
-        content: displayMessage,
-        timestamp: new Date().toISOString(),
-        sessionId: optimisticSessionId,
-        turnId
-      }
-    ]);
-
-    try {
-      const result = await apiFetch('/api/chat/send', {
-        method: 'POST',
-        body: {
-          projectId: selectedProject.id,
-          sessionId: outgoingSessionId,
-          draftSessionId,
-          clientTurnId: turnId,
-          message: displayMessage,
-          permissionMode,
-          model: selectedModel || status.model,
-          reasoningEffort: selectedReasoningEffort || status.reasoningEffort || DEFAULT_REASONING_EFFORT,
-          attachments: []
-        }
-      });
-      pollTurnUntilComplete({
-        turnId: result.turnId || turnId,
-        optimisticSessionId,
-        projectId: selectedProject.id,
-        previousSessionId: draftSessionId || outgoingSessionId
-      });
-      return {
-        turnId: result.turnId || turnId,
-        optimisticSessionId,
-        projectId: selectedProject.id,
-        previousSessionId: draftSessionId || outgoingSessionId
-      };
-    } catch (error) {
-      clearRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
-      restoreVoiceTextToInput(displayMessage);
-      setMessages((current) =>
-        upsertStatusMessage(current, {
-          sessionId: optimisticSessionId,
-          turnId,
-          kind: 'turn',
-          status: 'failed',
-          label: '发送失败',
-          detail: error.message,
-          timestamp: new Date().toISOString()
-        })
-      );
-      throw error;
-    }
   }
 
   async function handleAbort() {
-    const abortId =
-      selectedSessionRef.current?.id ||
-      selectedSessionRef.current?.turnId ||
-      Object.keys(runningById)[0];
-    if (!abortId) {
-      return;
-    }
-    await apiFetch('/api/chat/abort', {
-      method: 'POST',
-      body: { sessionId: abortId, turnId: selectedSessionRef.current?.turnId || null }
-    }).catch(() => null);
-    clearRun({ sessionId: abortId, turnId: selectedSessionRef.current?.turnId || null });
+    await abortCurrentRun();
   }
 
   async function handleConnectDocs() {
@@ -6836,6 +6933,10 @@ export default function App() {
     },
     [contextStatus, selectedSession]
   );
+  const canCreateThreadFromMobile = desktopBridgeCanCreateThread(status.desktopBridge);
+  const createThreadUnavailableReason =
+    status.desktopBridge?.capabilities?.createThreadReason ||
+    '当前桌面端还没有开放从手机新建同源对话的入口';
 
   if (!authenticated) {
     return <PairingScreen onPaired={bootstrap} />;
@@ -6846,6 +6947,7 @@ export default function App() {
       <TopBar
         selectedProject={selectedProject}
         connectionState={connectionState}
+        desktopBridge={status.desktopBridge}
         onMenu={() => setDrawerOpen(true)}
         onOpenDocs={() => setDocsOpen(true)}
         onGitAction={handleGitAction}
@@ -6872,6 +6974,8 @@ export default function App() {
         syncing={syncing}
         theme={theme}
         setTheme={setTheme}
+        canCreateThread={canCreateThreadFromMobile}
+        createThreadUnavailableReason={createThreadUnavailableReason}
       />
       <DocsPanel
         open={docsOpen}
@@ -6896,6 +7000,7 @@ export default function App() {
       <Composer
         input={input}
         setInput={setInput}
+        selectedSession={selectedSession}
         onSubmit={handleSubmit}
         running={running}
         onAbort={handleAbort}
@@ -6915,7 +7020,8 @@ export default function App() {
         onRemoveAttachment={handleRemoveAttachment}
         uploading={uploading}
         contextStatus={visibleContextStatus}
-        runStatus={composerRunStatus}
+        runStatus={composerRunStatus ? { ...composerRunStatus, steerable: selectedRuntime?.steerable !== false } : null}
+        desktopBridge={status.desktopBridge}
       />
       <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />
     </div>
