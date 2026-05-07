@@ -993,7 +993,7 @@ async function main() {
   server.listen(PORT, HOST, () => {
     console.log(`CodexMobile listening on http://${HOST}:${PORT}`);
     console.log(`Pairing code: ${getPairingCode()} (${auth.trustedDevices} trusted device(s)${auth.fixedPairingCode ? ', fixed' : ''})`);
-    console.log('Use Tailscale and open http://<this-pc-tailscale-ip>:3321 on iPhone.');
+    console.log(`Use Tailscale and open http://<this-pc-tailscale-ip>:${PORT} on iPhone.`);
   });
 
   refreshCodexCache().catch((error) => {

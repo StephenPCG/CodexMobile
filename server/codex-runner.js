@@ -5,6 +5,7 @@ import { createCodexAppServerClient } from './codex-app-server.js';
 import { buildCodexTurnInput, imageMarkdownFromCodexImageGeneration } from './codex-native-images.js';
 import { buildCodexLarkCliContext } from './lark-cli.js';
 import { detectFeishuSkillKeys } from './feishu-skills.js';
+import { prepareCodexRunTarget } from './codex-worktree.js';
 
 const activeRuns = new Map();
 const NON_ASCII_PATH_PATTERN = /[^\u0000-\u007F]/;
@@ -736,6 +737,11 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     turnId,
     sessionId: sessionId || draftSessionId || null,
     previousSessionId: draftSessionId || sessionId || null,
+    requestedRunMode: runMode === 'newWorktree' ? 'newWorktree' : 'local',
+    runMode: 'local',
+    projectPath: path.resolve(projectPath),
+    workingDirectory,
+    worktree: null,
     startedAt: new Date().toISOString(),
     status: 'running'
   };
@@ -757,6 +763,17 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   let resetTurnInactivityTimeout = () => {};
 
   try {
+    target = await prepareCodexRunTarget({ projectPath, runMode, sessionId });
+    workingDirectory = await ensureAsciiWorkingDirectory(target.workingDirectory);
+    Object.assign(run, {
+      requestedRunMode: target.requestedMode,
+      runMode: target.effectiveMode,
+      projectPath: target.originalProjectPath,
+      targetProjectPath: target.workingDirectory,
+      workingDirectory,
+      worktree: target.worktree
+    });
+
     if (larkCliContext.enabled && larkCliContext.env) {
       larkCliContext.env.CODEXMOBILE_TURN_ID = turnId;
       larkCliContext.env.CODEXMOBILE_SESSION_ID = sessionId || draftSessionId || '';
@@ -838,7 +855,11 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       sessionId: currentSessionId,
       previousSessionId,
       turnId,
-      projectPath,
+      projectPath: target.originalProjectPath,
+      workingDirectory,
+      requestedRunMode: target.requestedMode,
+      runMode: target.effectiveMode,
+      worktree: target.worktree,
       startedAt: new Date().toISOString()
     });
     emitStatus(emit, { sessionId: currentSessionId, turnId, kind: 'reasoning', status: 'running', label: '正在思考' });
@@ -907,6 +928,11 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
         sessionId: currentSessionId,
         previousSessionId,
         turnId,
+        targetProjectPath: target.workingDirectory,
+        workingDirectory,
+        requestedRunMode: target.requestedMode,
+        runMode: target.effectiveMode,
+        worktree: target.worktree,
         usage: state.usage,
         context: state.context,
         hadAssistantText: state.hadAssistantText,

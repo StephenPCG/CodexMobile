@@ -15,6 +15,7 @@ import {
   renameMobileSession
 } from './mobile-session-index.js';
 
+const execFileAsync = promisify(execFile);
 const DELETED_MESSAGES_PATH = path.join(process.cwd(), '.codexmobile', 'state', 'deleted-messages.json');
 const HIDDEN_SESSIONS_PATH = path.join(process.cwd(), '.codexmobile', 'state', 'hidden-sessions.json');
 const DESKTOP_IMAGE_ROOT = path.join(process.cwd(), '.codexmobile', 'desktop-images');
@@ -145,6 +146,101 @@ export function normalizeComparablePath(value) {
   }
   const normalized = path.resolve(value);
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isSameOrChildPath(childPath, parentPath) {
+  const child = normalizeComparablePath(childPath);
+  const parent = normalizeComparablePath(parentPath);
+  if (!child || !parent) {
+    return false;
+  }
+  if (child === parent) {
+    return true;
+  }
+  const parentWithSep = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+  return child.startsWith(parentWithSep);
+}
+
+function visibleRootForPath(projectPath, visibleProjects) {
+  return visibleProjects.find((project) => isSameOrChildPath(projectPath, project.path)) || null;
+}
+
+function isInternalCodexProjectPath(projectPath) {
+  return isSameOrChildPath(projectPath, path.join(CODEX_HOME, 'memories'));
+}
+
+async function gitCommonDir(projectPath) {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: projectPath,
+      timeout: 8000,
+      maxBuffer: 256 * 1024,
+      windowsHide: true
+    });
+    return normalizeComparablePath(String(stdout || '').trim());
+  } catch {
+    return '';
+  }
+}
+
+async function cachedGitCommonDir(projectPath, cacheMap) {
+  const key = normalizeComparablePath(projectPath);
+  if (!key) {
+    return '';
+  }
+  if (!cacheMap.has(key)) {
+    cacheMap.set(key, await gitCommonDir(projectPath));
+  }
+  return cacheMap.get(key);
+}
+
+function visibleProjectNameMatch(projectPath, projectById, visibleProjects) {
+  const parts = path.normalize(projectPath).split(path.sep).filter(Boolean);
+  const worktreesIndex = parts.lastIndexOf('worktrees');
+  if (worktreesIndex < 0) {
+    return null;
+  }
+  const tail = parts.slice(worktreesIndex + 1);
+  const candidates = visibleProjects
+    .map((project) => ({
+      project,
+      name: path.basename(project.path)
+    }))
+    .filter((entry) => entry.name && !isSameOrChildPath(entry.project.path, path.join(CODEX_HOME, 'worktrees')))
+    .sort((a, b) => b.name.length - a.name.length);
+
+  for (const { project, name } of candidates) {
+    if (tail.includes(name) || tail.some((segment) => segment.startsWith(`${name}-`))) {
+      return projectById.get(projectIdFor(project.path)) || null;
+    }
+  }
+  return null;
+}
+
+async function projectForSessionPath(projectPath, { projectById, visibleProjects, gitProjectByCommonDir, gitCommonDirCache }) {
+  const exactProject = projectById.get(projectIdFor(projectPath));
+  if (exactProject) {
+    return exactProject;
+  }
+  if (isInternalCodexProjectPath(projectPath)) {
+    return null;
+  }
+
+  const commonDir = await cachedGitCommonDir(projectPath, gitCommonDirCache);
+  if (commonDir && gitProjectByCommonDir.has(commonDir)) {
+    return gitProjectByCommonDir.get(commonDir);
+  }
+
+  const nameMatchedProject = visibleProjectNameMatch(projectPath, projectById, visibleProjects);
+  if (nameMatchedProject) {
+    return nameMatchedProject;
+  }
+
+  const visibleRoot = visibleRootForPath(projectPath, visibleProjects);
+  if (!visibleRoot) {
+    return null;
+  }
+  return upsertProject(projectById, projectPath, visibleRoot.trustLevel, null);
 }
 
 function projectIdFor(projectPath) {
@@ -585,6 +681,8 @@ export async function refreshCodexCache() {
   const projectById = new Map();
   const sessionsByProject = new Map();
   const sessionById = new Map();
+  const gitCommonDirCache = new Map();
+  const gitProjectByCommonDir = new Map();
 
   const visibleProjects = workspaceState.projects.length
     ? workspaceState.projects.map((project) => ({
@@ -604,8 +702,9 @@ export async function refreshCodexCache() {
 
   for (const project of visibleProjects) {
     const entry = upsertProject(projectById, project.path, project.trustLevel, project.label);
-    if (entry) {
-      visibleProjectIds.add(entry.id);
+    const commonDir = entry ? await cachedGitCommonDir(entry.path, gitCommonDirCache) : '';
+    if (commonDir && !gitProjectByCommonDir.has(commonDir)) {
+      gitProjectByCommonDir.set(commonDir, entry);
     }
   }
   if (hasProjectlessSessions) {
@@ -734,7 +833,8 @@ export async function refreshCodexCache() {
     }
     const orderA = projectOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER;
     const orderB = projectOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER;
-    return orderA - orderB || a.name.localeCompare(b.name, 'zh-Hans-CN');
+    const updatedDelta = new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+    return orderA - orderB || updatedDelta || a.name.localeCompare(b.name, 'zh-Hans-CN');
   });
 
   cache = {

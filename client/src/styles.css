@@ -1154,6 +1154,10 @@ button {
   gap: 8px;
 }
 
+.settings-group + .settings-group {
+  margin-top: 16px;
+}
+
 .theme-setting {
   display: grid;
   gap: 10px;
@@ -1210,6 +1214,44 @@ button {
   color: var(--text);
   background: var(--panel);
   box-shadow: 0 1px 4px rgba(20, 24, 31, 0.12);
+}
+
+.cli-info {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f5f7f4;
+}
+
+[data-theme="dark"] .cli-info {
+  background: #262626;
+}
+
+.cli-info div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cli-info span,
+.cli-info small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.cli-info strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 18px;
+  text-align: right;
+}
+
+.cli-info small {
+  overflow-wrap: anywhere;
 }
 
 .drawer-action,
@@ -4878,6 +4920,10 @@ button {
     max-width: 104px;
   }
 
+  .run-mode-pill {
+    max-width: 92px;
+  }
+
   .model-select {
     max-width: 104px;
   }
@@ -4892,6 +4938,10 @@ button {
   .permission-pill {
     max-width: 92px;
     overflow: hidden;
+  }
+
+  .run-mode-pill {
+    max-width: 78px;
   }
 
   .model-select {

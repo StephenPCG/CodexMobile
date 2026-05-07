@@ -140,6 +140,7 @@ const CONNECTION_STATUS = {
 
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 const REASONING_DEFAULT_VERSION = 'xhigh-v1';
+const RUN_MODE_KEY = 'codexmobile.runMode';
 const THEME_KEY = 'codexmobile.theme';
 const SELECTED_SKILLS_KEY = 'codexmobile.selectedSkills';
 const VOICE_MAX_RECORDING_MS = 90 * 1000;
@@ -155,6 +156,11 @@ const REALTIME_VOICE_BUFFER_SIZE = 2048;
 const REALTIME_VOICE_MIN_TURN_MS = 500;
 const REALTIME_VOICE_BARGE_IN_LEVEL_THRESHOLD = 0.026;
 const REALTIME_VOICE_BARGE_IN_SUSTAIN_MS = 180;
+
+const RUN_MODE_OPTIONS = [
+  { value: 'local', label: 'Local', shortLabel: 'Local' },
+  { value: 'newWorktree', label: 'New worktree', shortLabel: 'Worktree' }
+];
 
 function realtimePayloadErrorMessage(payload) {
   return String(payload?.error?.message || payload?.error || payload?.message || '');
@@ -427,6 +433,14 @@ function shortModelName(model) {
 
 function permissionLabel(value) {
   return PERMISSION_OPTIONS.find((option) => option.value === value)?.label || '默认权限';
+}
+
+function runModeLabel(value) {
+  return RUN_MODE_OPTIONS.find((option) => option.value === value)?.label || 'Local';
+}
+
+function runModeShortLabel(value) {
+  return RUN_MODE_OPTIONS.find((option) => option.value === value)?.shortLabel || 'Local';
 }
 
 function reasoningLabel(value) {
@@ -1529,6 +1543,26 @@ function Drawer({
                     黑色
                   </button>
                 </div>
+              </div>
+            </section>
+            <section className="settings-group">
+              <div className="drawer-heading">Codex CLI</div>
+              <div className="cli-info">
+                <div>
+                  <span>版本</span>
+                  <strong>{status?.codexCli?.version || '未知'}</strong>
+                </div>
+                <div>
+                  <span>来源</span>
+                  <strong>{
+                    status?.codexCli?.source === 'path'
+                      ? 'PATH'
+                      : status?.codexCli?.source === 'env'
+                        ? 'CODEXMOBILE_CODEX_PATH'
+                        : '内置依赖'
+                  }</strong>
+                </div>
+                <small>{status?.codexCli?.path || status?.codexCli?.error || '未找到 Codex 可执行文件'}</small>
               </div>
             </section>
           </div>
@@ -4362,6 +4396,8 @@ function Composer({
   onClearSkills,
   permissionMode,
   onSelectPermission,
+  runMode,
+  onSelectRunMode,
   attachments,
   onUploadFiles,
   onRemoveAttachment,
@@ -7721,6 +7757,7 @@ export default function App() {
           clientTurnId: turnId,
           message: displayMessage,
           permissionMode,
+          runMode,
           model: selectedModel || status.model,
           reasoningEffort: selectedReasoningEffort || status.reasoningEffort || DEFAULT_REASONING_EFFORT,
           selectedSkills: selectedSkillsForTurn(),
@@ -8052,6 +8089,8 @@ export default function App() {
         onClearSkills={clearSelectedSkills}
         permissionMode={permissionMode}
         onSelectPermission={setPermissionMode}
+        runMode={runMode}
+        onSelectRunMode={setRunMode}
         attachments={attachments}
         onUploadFiles={handleUploadFiles}
         onRemoveAttachment={handleRemoveAttachment}
