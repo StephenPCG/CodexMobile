@@ -254,6 +254,12 @@ const TRANSLATIONS = {
     'quota.notUpdated': '暂未更新',
     'quota.updatedAt': '更新于 {time}',
     'quota.unknownUpdate': '更新时间未知',
+    'quota.fiveHour': '5h limit',
+    'quota.weekly': 'Weekly limit',
+    'quota.sparkFiveHour': 'Codex Spark 5h',
+    'quota.sparkWeekly': 'Codex Spark weekly',
+    'quota.expand': '展开额度',
+    'quota.collapse': '收起额度',
     'top.openMenu': '打开菜单',
     'top.more': '更多操作',
     'top.changes': '变更',
@@ -606,6 +612,12 @@ const TRANSLATIONS = {
     'quota.notUpdated': 'Not updated yet',
     'quota.updatedAt': 'Updated {time}',
     'quota.unknownUpdate': 'Update time unknown',
+    'quota.fiveHour': '5h limit',
+    'quota.weekly': 'Weekly limit',
+    'quota.sparkFiveHour': 'Codex Spark 5h',
+    'quota.sparkWeekly': 'Codex Spark weekly',
+    'quota.expand': 'Expand rate limits',
+    'quota.collapse': 'Collapse rate limits',
     'top.openMenu': 'Open menu',
     'top.more': 'More Actions',
     'top.changes': 'Changes',
@@ -1166,38 +1178,40 @@ function formatTime(value, locale = 'zh') {
   }
 }
 
+function formatRelativeTime(value, now = Date.now()) {
+  if (!value) {
+    return '';
+  }
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) {
+    return '';
+  }
+  const diffMs = Math.max(0, now - time);
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const week = 7 * day;
+  if (diffMs < minute) {
+    return '<1m';
+  }
+  if (diffMs < hour) {
+    return `${Math.max(1, Math.floor(diffMs / minute))}m`;
+  }
+  if (diffMs < day) {
+    return `${Math.max(1, Math.floor(diffMs / hour))}h`;
+  }
+  if (diffMs < week) {
+    return `${Math.max(1, Math.floor(diffMs / day))}d`;
+  }
+  return `${Math.max(1, Math.floor(diffMs / week))}w`;
+}
+
 function formatQuotaUpdateTime(value, t = DEFAULT_I18N.t) {
   if (!value) {
     return t('quota.notUpdated');
   }
   const formatted = formatTime(value);
   return formatted ? t('quota.updatedAt', { time: formatted }) : t('quota.unknownUpdate');
-}
-
-function subAgentRoleLabel(role, t = DEFAULT_I18N.t) {
-  const value = String(role || '').trim().toLowerCase();
-  if (value === 'worker') {
-    return t('subagent.worker');
-  }
-  if (value === 'explorer') {
-    return t('subagent.explorer');
-  }
-  return value || t('activity.subagent');
-}
-
-function subAgentSubtitle(session, t = DEFAULT_I18N.t) {
-  const agent = session?.subAgent || {};
-  const parts = [t('activity.subagent')];
-  if (agent.nickname) {
-    parts.push(agent.nickname);
-  }
-  if (agent.role) {
-    parts.push(subAgentRoleLabel(agent.role, t));
-  }
-  if (agent.status === 'open') {
-    parts.push(t('common.running'));
-  }
-  return parts.join(' · ');
 }
 
 function formatDuration(start, end = Date.now()) {
@@ -1660,6 +1674,9 @@ function parseAppRoute(pathname = '') {
   if (!parts.length) {
     return { type: 'welcome' };
   }
+  if (parts[0] === 'settings') {
+    return { type: 'settings' };
+  }
   if (parts[0] !== 'projects' || !parts[1]) {
     return { type: 'welcome' };
   }
@@ -1675,6 +1692,10 @@ function projectNewRoutePath(projectId) {
 
 function sessionRoutePath(projectId, sessionId) {
   return `/projects/${encodeURIComponent(projectId)}/threads/${encodeURIComponent(sessionId)}`;
+}
+
+function settingsRoutePath() {
+  return '/settings';
 }
 
 function newDraftCacheKey(projectId) {
@@ -2689,10 +2710,64 @@ function quotaToneClass(percent) {
   return 'is-low';
 }
 
+function shortHostName(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return 'localhost';
+  }
+  return text.split('.')[0] || text;
+}
+
+function connectionDotClass(connectionState, status = DEFAULT_STATUS) {
+  if (connectionState === 'connecting') {
+    return 'is-connecting';
+  }
+  if (connectionState === 'connected' && status?.connected !== false) {
+    return 'is-connected';
+  }
+  return 'is-disconnected';
+}
+
+function quotaWindowRole(quotaWindow) {
+  const source = `${quotaWindow?.id || ''} ${quotaWindow?.label || ''}`.toLowerCase();
+  if (source.includes('weekly') || source.includes('周')) {
+    return 'weekly';
+  }
+  if (source.includes('five-hour') || source.includes('5 小时') || source.includes('5h') || source.includes('5 hour')) {
+    return 'five-hour';
+  }
+  return '';
+}
+
+function quotaWindowIsSpark(quotaWindow) {
+  const source = `${quotaWindow?.id || ''} ${quotaWindow?.label || ''}`.toLowerCase();
+  return source.includes('spark');
+}
+
+function firstQuotaAccount(accounts = []) {
+  return accounts.find((account) => account?.status === 'ok' && Array.isArray(account.windows) && account.windows.length) ||
+    accounts.find(Boolean) ||
+    null;
+}
+
+function quotaRowDefinitions(account, t = DEFAULT_I18N.t) {
+  const windows = Array.isArray(account?.windows) ? account.windows : [];
+  const findWindow = (role, spark) => windows.find((quotaWindow) =>
+    quotaWindowRole(quotaWindow) === role && quotaWindowIsSpark(quotaWindow) === spark
+  );
+  return [
+    { key: 'five-hour', label: t('quota.fiveHour'), window: findWindow('five-hour', false), expandedOnly: false },
+    { key: 'weekly', label: t('quota.weekly'), window: findWindow('weekly', false), expandedOnly: false },
+    { key: 'spark-five-hour', label: t('quota.sparkFiveHour'), window: findWindow('five-hour', true), expandedOnly: true },
+    { key: 'spark-weekly', label: t('quota.sparkWeekly'), window: findWindow('weekly', true), expandedOnly: true }
+  ].filter((row) => row.window);
+}
+
 function Drawer({
   open,
   onClose,
   status = DEFAULT_STATUS,
+  connectionState = 'disconnected',
   projects,
   selectedProject,
   selectedSession,
@@ -2708,15 +2783,11 @@ function Drawer({
   onRenameSession,
   onDeleteSession,
   onNewConversation,
-  onOpenDocs,
-  languageSetting,
-  setLanguageSetting,
-  themeSetting,
-  setThemeSetting
+  onOpenSettings
 }) {
   const { t } = useI18n();
-  const [drawerView, setDrawerView] = useState('main');
   const [subagentExpandedById, setSubagentExpandedById] = useState({});
+  const [quotaExpanded, setQuotaExpanded] = useState(false);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [quotaLoaded, setQuotaLoaded] = useState(false);
   const [quotaError, setQuotaError] = useState('');
@@ -2725,14 +2796,10 @@ function Drawer({
   const [quotaAccounts, setQuotaAccounts] = useState([]);
   const [drawerQuery, setDrawerQuery] = useState('');
   const normalizedDrawerQuery = drawerQuery.trim().toLowerCase();
-  const runningCount = Object.values(runningById || {}).filter(Boolean).length;
-  const environment = status?.environment || {};
-  const codexCli = status?.codexCli || {};
-  const codexCliVersion = codexCli.version || (codexCli.error ? t('common.unavailable') : t('common.unknown'));
-  const codexCliMeta = [codexCliSourceLabel(codexCli.source, t), codexCli.path].filter(Boolean).join(' · ');
-  const bridgeMeta = [status?.desktopBridge?.connected ? t('common.connected') : t('common.disconnected'), status?.desktopBridge?.mode]
-    .filter(Boolean)
-    .join(' · ');
+  const hostName = shortHostName(status?.environment?.hostName || status?.hostName);
+  const activeQuotaAccount = firstQuotaAccount(quotaAccounts);
+  const quotaRows = quotaRowDefinitions(activeQuotaAccount, t);
+  const visibleQuotaRows = quotaRows.filter((row) => quotaExpanded || !row.expandedOnly);
 
   async function loadCodexQuota({ refresh = false } = {}) {
     if (quotaLoading) {
@@ -2781,101 +2848,6 @@ function Drawer({
     setQuotaLoaded(true);
   }, [quotaSnapshot]);
 
-  if (drawerView === 'settings') {
-    return (
-      <>
-        <div className={`drawer-backdrop ${open ? 'is-open' : ''}`} onClick={onClose} />
-        <aside className={`drawer ${open ? 'is-open' : ''}`}>
-          <div className="drawer-subheader">
-            <button className="icon-button" onClick={() => setDrawerView('main')} aria-label={t('common.back')}>
-              <ChevronLeft size={22} />
-            </button>
-            <strong>{t('settings.title')}</strong>
-            <button className="icon-button" onClick={onClose} aria-label={t('common.close')}>
-              <X size={20} />
-            </button>
-          </div>
-          <div className="settings-view">
-            <section className="settings-group">
-              <div className="drawer-heading">{t('settings.appearance')}</div>
-              <div className="theme-setting">
-                <div className="theme-setting-title">
-                  <span>{t('settings.language')}</span>
-                </div>
-                <div className="theme-segment is-three" role="group" aria-label={t('settings.language')}>
-                  {LOCALE_OPTIONS.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      className={languageSetting === option ? 'is-selected' : ''}
-                      onClick={() => setLanguageSetting(option)}
-                    >
-                      {option === 'system' ? t('common.system') : option === 'zh' ? t('settings.zh') : t('settings.en')}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="theme-setting">
-                <div className="theme-setting-title">
-                  <span>{t('settings.theme')}</span>
-                </div>
-                <div className="theme-segment is-three" role="group" aria-label={t('settings.theme')}>
-                  {THEME_OPTIONS.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      className={themeSetting === option ? 'is-selected' : ''}
-                      onClick={() => setThemeSetting(option)}
-                    >
-                      {option === 'system' ? t('common.system') : option === 'light' ? t('settings.light') : t('settings.dark')}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </section>
-            <section className="settings-group">
-              <div className="drawer-heading">{t('settings.integrations')}</div>
-              <div className="settings-list">
-                <button type="button" className="settings-entry settings-card-entry" onClick={onOpenDocs}>
-                  <span>
-                    <FeishuLogoIcon size={18} />
-                    {t('docs.title')}
-                  </span>
-                  <ChevronRight size={17} />
-                </button>
-              </div>
-            </section>
-            <section className="settings-group">
-              <div className="drawer-heading">{t('settings.environment')}</div>
-              <div className="env-info">
-                <div>
-                  <span>{t('settings.host')}</span>
-                  <strong>{environment.hostName || status?.hostName || t('common.unknown')}</strong>
-                </div>
-                <div>
-                  <span>{t('settings.system')}</span>
-                  <strong>{hostSystemLabel(environment, t)}</strong>
-                </div>
-                <div>
-                  <span>{t('settings.codexConnection')}</span>
-                  <strong>{codexBridgeModeLabel(status?.desktopBridge, t)}</strong>
-                </div>
-                <div>
-                  <span>Codex CLI</span>
-                  <strong>{codexCliVersion}</strong>
-                </div>
-                {bridgeMeta ? <small>{bridgeMeta}</small> : null}
-                {codexCliMeta ? <small>{codexCliMeta}</small> : null}
-                {codexCli.error ? <small className="is-error">{codexCli.error}</small> : null}
-                {environment.nodeVersion ? <small>Node {environment.nodeVersion}</small> : null}
-              </div>
-            </section>
-          </div>
-        </aside>
-      </>
-    );
-  }
-
   return (
     <>
       <div className={`drawer-backdrop ${open ? 'is-open' : ''}`} onClick={onClose} />
@@ -2883,7 +2855,10 @@ function Drawer({
         <div className="drawer-header">
           <div>
             <strong>CodexMobile</strong>
-            <small>{runningCount ? t('drawer.connectedWithTasks', { count: runningCount }) : t('common.connected')}</small>
+            <small className="drawer-host-line">
+              <span className={`status-dot ${connectionDotClass(connectionState, status)}`} />
+              <span>{hostName}</span>
+            </small>
           </div>
           <button className="icon-button" onClick={onClose} aria-label={t('common.close')}>
             <X size={20} />
@@ -2904,7 +2879,6 @@ function Drawer({
         </div>
 
         <section className="drawer-section project-section">
-          <div className="drawer-heading">{t('drawer.categories')}</div>
           <div className="project-list">
             {projects.map((project) => {
               const isSelected = selectedProject?.id === project.id;
@@ -2943,6 +2917,14 @@ function Drawer({
                 const openChildCount = Number(session.openChildCount) || 0;
                 const subagentsOpen = Boolean(subagentExpandedById[session.id]);
                 const rowSelected = selectedSession?.id === session.id;
+                const sessionTime = session.draft
+                  ? t('drawer.pending')
+                  : formatRelativeTime(session.createdAt || session.created_at || session.updatedAt);
+                const statusIndicator = sessionRunning ? (
+                  <Loader2 className="thread-status-spin spin" size={12} aria-label={t('drawer.running')} />
+                ) : sessionCompleted ? (
+                  <span className="thread-complete-dot" aria-label={t('drawer.hasNewResult')} />
+                ) : null;
                 return (
                   <div
                     key={session.id}
@@ -2978,21 +2960,10 @@ function Drawer({
                             <ChevronDown size={12} />
                           </span>
                         ) : null}
-                        {sessionRunning ? (
-                          <Loader2 className="thread-status-spin spin" size={12} aria-label={t('drawer.running')} />
-                        ) : sessionCompleted ? (
-                          <span className="thread-complete-dot" aria-label={t('drawer.hasNewResult')} />
-                        ) : null}
                       </span>
-                      <small>
-                        {sessionRunning
-                          ? t('drawer.processing')
-                          : session.draft
-                            ? t('drawer.pending')
-                            : isSubAgent || session.isSubAgent
-                              ? subAgentSubtitle(session, t)
-                              : formatTime(session.updatedAt)}
-                      </small>
+                      <span className="thread-side-meta">
+                        {statusIndicator || <time>{sessionTime}</time>}
+                      </span>
                     </button>
                     {rowSelected ? (
                       <>
@@ -3015,9 +2986,7 @@ function Drawer({
                           <Archive size={14} />
                         </button>
                       </>
-                    ) : (
-                      <ChevronDown size={14} className="thread-row-more" />
-                    )}
+                    ) : null}
                   </div>
                 );
               };
@@ -3030,7 +2999,6 @@ function Drawer({
                     {project.projectless ? <MessageSquare size={18} /> : <Folder size={18} />}
                     <span>
                       <strong>{project.name}</strong>
-                      <small>{project.pathLabel || compactPath(project.path)}</small>
                     </span>
                     <small className="project-count">{project.sessionCount || projectSessions.length || 0}</small>
                     <ChevronDown size={15} className="project-chevron" />
@@ -3047,9 +3015,8 @@ function Drawer({
                             <span className="thread-title-line">
                               <span>{t('drawer.newConversation')}</span>
                             </span>
-                            <small>{t('drawer.pending')}</small>
+                            <span className="thread-side-meta"><time>{t('drawer.pending')}</time></span>
                           </button>
-                          <ChevronRight size={14} className="thread-row-more" />
                         </div>
                       ) : null}
                       {loadingProjectId === project.id ? (
@@ -3084,74 +3051,58 @@ function Drawer({
         </section>
 
         <section className="drawer-section drawer-controls">
-          <div className="quota-widget is-expanded">
-            <div className="quota-card">
-              <div className="quota-card-head">
-                <span className="quota-title">{t('quota.title')}</span>
-              </div>
-              <div className="quota-panel">
-                {quotaError ? (
-                  <button type="button" className="quota-error" onClick={refreshCodexQuota}>
-                    {quotaError}
-                  </button>
-                ) : null}
-                {!quotaError && quotaNotice ? (
-                  <button type="button" className="quota-error" onClick={refreshCodexQuota}>
-                    {t('quota.staleRetry', { message: quotaNotice })}
-                  </button>
-                ) : null}
-                {!quotaError && quotaAccounts.length ? (
-                  quotaAccounts.map((account) => {
-                    const windows = Array.isArray(account.windows) ? account.windows : [];
-                    const accountStatus = account.status || 'ok';
-                    const plan = account.plan || 'Codex';
-                    return (
-                      <div key={account.id} className={`quota-account is-${accountStatus}`}>
-                        <div className="quota-account-head">
-                          <span>{account.label || 'Codex'}</span>
-                          <small>{plan}</small>
-                        </div>
-                        {accountStatus === 'ok' && windows.length ? (
-                          <div className="quota-window-list">
-                            {windows.map((quotaWindow) => {
-                              const percent = quotaRemainingPercent(quotaWindow);
-                              return (
-                                <div
-                                  key={quotaWindow.id}
-                                  className={`quota-window ${quotaToneClass(percent)}`}
-                                  style={{ '--quota-percent': `${percent ?? 0}%` }}
-                                >
-                                  <div className="quota-window-meta">
-                                    <span>{quotaWindow.label}</span>
-                                    <strong>{formatQuotaPercent(quotaWindow)}</strong>
-                                  </div>
-                                  <div className="quota-bar">
-                                    <span />
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="quota-account-message"
-                            onClick={accountStatus === 'failed' ? refreshCodexQuota : undefined}
-                          >
-                            {accountStatus === 'disabled' ? t('quota.disabled') : t('quota.accountRetry', { message: account.error || t('quota.failed') })}
-                          </button>
-                        )}
+          <div className={`quota-widget ${quotaExpanded ? 'is-expanded' : ''}`}>
+            <div className="quota-panel">
+              {quotaError ? (
+                <button type="button" className="quota-error" onClick={refreshCodexQuota}>
+                  {quotaError}
+                </button>
+              ) : null}
+              {!quotaError && quotaNotice ? (
+                <button type="button" className="quota-error" onClick={refreshCodexQuota}>
+                  {t('quota.staleRetry', { message: quotaNotice })}
+                </button>
+              ) : null}
+              {!quotaError && visibleQuotaRows.length ? (
+                visibleQuotaRows.map((row) => {
+                  const percent = quotaRemainingPercent(row.window);
+                  return (
+                    <div
+                      key={row.key}
+                      className={`quota-window ${quotaToneClass(percent)}`}
+                      style={{ '--quota-percent': `${percent ?? 0}%` }}
+                    >
+                      <div className="quota-window-meta">
+                        <span>{row.label}</span>
+                        <strong>{formatQuotaPercent(row.window)}</strong>
+                        {row.window.resetLabel ? <em>{row.window.resetLabel}</em> : null}
                       </div>
-                    );
-                  })
-                ) : null}
-                {quotaLoading && !quotaLoaded ? <div className="quota-empty">{t('quota.loading')}</div> : null}
-                {!quotaLoading && !quotaError && quotaLoaded && !quotaAccounts.length ? (
-                  <div className="quota-empty">{t('quota.empty')}</div>
-                ) : null}
-              </div>
-              <div className="quota-footer">
-                <small>{formatQuotaUpdateTime(quotaResult?.updatedAt || quotaResult?.fetchedAt || quotaResult?.staleSavedAt || quotaResult?.cacheUpdatedAt, t)}</small>
+                      <div className="quota-bar">
+                        <span />
+                      </div>
+                    </div>
+                  );
+                })
+              ) : null}
+              {!quotaError && !visibleQuotaRows.length && activeQuotaAccount?.status && activeQuotaAccount.status !== 'ok' ? (
+                <button
+                  type="button"
+                  className="quota-account-message"
+                  onClick={activeQuotaAccount.status === 'failed' ? refreshCodexQuota : undefined}
+                >
+                  {activeQuotaAccount.status === 'disabled'
+                    ? t('quota.disabled')
+                    : t('quota.accountRetry', { message: activeQuotaAccount.error || t('quota.failed') })}
+                </button>
+              ) : null}
+              {quotaLoading && !quotaLoaded ? <div className="quota-empty">{t('quota.loading')}</div> : null}
+              {!quotaLoading && !quotaError && quotaLoaded && !quotaAccounts.length ? (
+                <div className="quota-empty">{t('quota.empty')}</div>
+              ) : null}
+            </div>
+            <div className="quota-footer">
+              <small>{formatQuotaUpdateTime(quotaResult?.updatedAt || quotaResult?.fetchedAt || quotaResult?.staleSavedAt || quotaResult?.cacheUpdatedAt, t)}</small>
+              <span className="quota-footer-actions">
                 <button
                   type="button"
                   className="quota-refresh"
@@ -3162,10 +3113,19 @@ function Drawer({
                 >
                   {quotaLoading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
                 </button>
-              </div>
+                <button
+                  type="button"
+                  className="quota-refresh"
+                  onClick={() => setQuotaExpanded((value) => !value)}
+                  aria-label={quotaExpanded ? t('quota.collapse') : t('quota.expand')}
+                  title={quotaExpanded ? t('quota.collapse') : t('quota.expand')}
+                >
+                  <ChevronDown size={14} />
+                </button>
+              </span>
             </div>
           </div>
-          <button type="button" className="settings-entry" onClick={() => setDrawerView('settings')}>
+          <button type="button" className="settings-entry" onClick={onOpenSettings}>
             <span>
               <Settings size={18} />
               {t('settings.title')}
@@ -3175,6 +3135,108 @@ function Drawer({
         </section>
       </aside>
     </>
+  );
+}
+
+function SettingsPage({
+  status = DEFAULT_STATUS,
+  languageSetting,
+  setLanguageSetting,
+  themeSetting,
+  setThemeSetting,
+  onOpenDocs
+}) {
+  const { t } = useI18n();
+  const environment = status?.environment || {};
+  const codexCli = status?.codexCli || {};
+  const codexCliVersion = codexCli.version || (codexCli.error ? t('common.unavailable') : t('common.unknown'));
+  const codexCliMeta = [codexCliSourceLabel(codexCli.source, t), codexCli.path].filter(Boolean).join(' · ');
+  const bridgeMeta = [status?.desktopBridge?.connected ? t('common.connected') : t('common.disconnected'), status?.desktopBridge?.mode]
+    .filter(Boolean)
+    .join(' · ');
+
+  return (
+    <main className="settings-page">
+      <div className="settings-page-content">
+        <header className="settings-page-header">
+          <h1>{t('settings.title')}</h1>
+        </header>
+        <section className="settings-group">
+          <div className="drawer-heading">{t('settings.appearance')}</div>
+          <div className="theme-setting">
+            <div className="theme-setting-title">
+              <span>{t('settings.language')}</span>
+            </div>
+            <div className="theme-segment is-three" role="group" aria-label={t('settings.language')}>
+              {LOCALE_OPTIONS.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={languageSetting === option ? 'is-selected' : ''}
+                  onClick={() => setLanguageSetting(option)}
+                >
+                  {option === 'system' ? t('common.system') : option === 'zh' ? t('settings.zh') : t('settings.en')}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="theme-setting">
+            <div className="theme-setting-title">
+              <span>{t('settings.theme')}</span>
+            </div>
+            <div className="theme-segment is-three" role="group" aria-label={t('settings.theme')}>
+              {THEME_OPTIONS.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={themeSetting === option ? 'is-selected' : ''}
+                  onClick={() => setThemeSetting(option)}
+                >
+                  {option === 'system' ? t('common.system') : option === 'light' ? t('settings.light') : t('settings.dark')}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+        <section className="settings-group">
+          <div className="drawer-heading">{t('settings.integrations')}</div>
+          <div className="settings-list">
+            <button type="button" className="settings-entry settings-card-entry" onClick={onOpenDocs}>
+              <span>
+                <FeishuLogoIcon size={18} />
+                {t('docs.title')}
+              </span>
+              <ChevronRight size={17} />
+            </button>
+          </div>
+        </section>
+        <section className="settings-group">
+          <div className="drawer-heading">{t('settings.environment')}</div>
+          <div className="env-info">
+            <div>
+              <span>{t('settings.host')}</span>
+              <strong>{environment.hostName || status?.hostName || t('common.unknown')}</strong>
+            </div>
+            <div>
+              <span>{t('settings.system')}</span>
+              <strong>{hostSystemLabel(environment, t)}</strong>
+            </div>
+            <div>
+              <span>{t('settings.codexConnection')}</span>
+              <strong>{codexBridgeModeLabel(status?.desktopBridge, t)}</strong>
+            </div>
+            <div>
+              <span>Codex CLI</span>
+              <strong>{codexCliVersion}</strong>
+            </div>
+            {bridgeMeta ? <small>{bridgeMeta}</small> : null}
+            {codexCliMeta ? <small>{codexCliMeta}</small> : null}
+            {codexCli.error ? <small className="is-error">{codexCli.error}</small> : null}
+            {environment.nodeVersion ? <small>Node {environment.nodeVersion}</small> : null}
+          </div>
+        </section>
+      </div>
+    </main>
   );
 }
 
@@ -3192,6 +3254,7 @@ function bridgeConnectionLabel(connectionState, desktopBridge, t = DEFAULT_I18N.
 function TopBar({
   selectedProject,
   selectedSession,
+  view = 'chat',
   runMode = 'local',
   onMenu,
   onOpenWorkspace,
@@ -3209,11 +3272,14 @@ function TopBar({
   const [copiedThreadId, setCopiedThreadId] = useState(false);
   const menuRef = useRef(null);
   const copiedTimerRef = useRef(null);
-  const canCopyThreadId = Boolean(selectedSession?.id && !isDraftSession(selectedSession));
-  const canOperateThread = Boolean(selectedProject?.id && selectedSession?.id);
-  const threadTitle = String(selectedSession?.title || (selectedProject ? t('drawer.newConversation') : 'CodexMobile')).trim();
+  const isSettingsView = view === 'settings';
+  const canCopyThreadId = !isSettingsView && Boolean(selectedSession?.id && !isDraftSession(selectedSession));
+  const canOperateThread = !isSettingsView && Boolean(selectedProject?.id && selectedSession?.id);
+  const threadTitle = isSettingsView
+    ? t('settings.title')
+    : String(selectedSession?.title || (selectedProject ? t('drawer.newConversation') : 'CodexMobile')).trim();
   const projectTitle = String(selectedProject?.name || t('top.noProject')).trim();
-  const subtitle = `${projectTitle} · ${runModeShortLabel(runMode, t)}`;
+  const subtitle = isSettingsView ? 'CodexMobile' : `${projectTitle} · ${runModeShortLabel(runMode, t)}`;
 
   useEffect(() => {
     if (!menuOpen) {
@@ -3287,12 +3353,16 @@ function TopBar({
       </button>
       <div className="top-title">
         <strong title={threadTitle}>{threadTitle}</strong>
-        <small title={subtitle}>
-          <span>{projectTitle}</span>
-          <span className="top-title-separator">·</span>
-          <RunModeIcon value={runMode} size={13} />
-          <span>{runModeShortLabel(runMode, t)}</span>
-        </small>
+        {isSettingsView ? (
+          <small title={subtitle}>{subtitle}</small>
+        ) : (
+          <small title={subtitle}>
+            <span>{projectTitle}</span>
+            <span className="top-title-separator">·</span>
+            <RunModeIcon value={runMode} size={13} />
+            <span>{runModeShortLabel(runMode, t)}</span>
+          </small>
+        )}
       </div>
       <div className="top-actions">
         <div className="top-menu-wrap" ref={menuRef}>
@@ -9665,7 +9735,7 @@ export default function App() {
     const data = await apiFetch('/api/projects');
     const list = data.projects || [];
     setProjects(list);
-    if (route.type === 'welcome') {
+    if (route.type === 'welcome' || route.type === 'settings') {
       selectedProjectRef.current = null;
       selectedSessionRef.current = null;
       setSelectedProject(null);
@@ -11163,6 +11233,7 @@ export default function App() {
     syncing
   });
   const showingWelcome = appRoute.type === 'welcome';
+  const showingSettings = appRoute.type === 'settings';
 
   if (!authenticated) {
     return (
@@ -11178,6 +11249,7 @@ export default function App() {
       <TopBar
         selectedProject={selectedProject}
         selectedSession={selectedSession}
+        view={showingSettings ? 'settings' : showingWelcome ? 'welcome' : 'chat'}
         runMode={effectiveRunMode}
         onMenu={() => setDrawerOpen(true)}
         onOpenWorkspace={handleOpenWorkspace}
@@ -11194,6 +11266,7 @@ export default function App() {
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         status={status}
+        connectionState={connectionState}
         projects={projects}
         selectedProject={selectedProject}
         selectedSession={selectedSession}
@@ -11209,14 +11282,10 @@ export default function App() {
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
         onNewConversation={handleNewConversation}
-        onOpenDocs={() => {
-          setDocsOpen(true);
+        onOpenSettings={() => {
+          navigateAppRoute(settingsRoutePath());
           setDrawerOpen(false);
         }}
-        languageSetting={languageSetting}
-        setLanguageSetting={setLanguageSetting}
-        themeSetting={themeSetting}
-        setThemeSetting={setThemeSetting}
       />
       <DocsPanel
         open={docsOpen}
@@ -11253,7 +11322,7 @@ export default function App() {
         onSendTerminal={sendTerminalMessage}
         onClose={() => setTerminalOpen(false)}
       />
-      {showingWelcome ? null : (
+      {showingWelcome || showingSettings ? null : (
         <ConnectionRecoveryCard
           state={recoveryState}
           onRetry={handleRetryConnection}
@@ -11265,6 +11334,15 @@ export default function App() {
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
       {showingWelcome ? (
         <WelcomePane projects={projects} onNewConversation={handleNewConversation} />
+      ) : showingSettings ? (
+        <SettingsPage
+          status={status}
+          languageSetting={languageSetting}
+          setLanguageSetting={setLanguageSetting}
+          themeSetting={themeSetting}
+          setThemeSetting={setThemeSetting}
+          onOpenDocs={() => setDocsOpen(true)}
+        />
       ) : (
         <>
           <ChatPane

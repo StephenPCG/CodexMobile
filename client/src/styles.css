@@ -1299,6 +1299,40 @@ button {
   line-height: 16px;
 }
 
+.drawer-host-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.drawer-host-line span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+
+.status-dot.is-connected {
+  background: #22c55e;
+}
+
+.status-dot.is-connecting {
+  background: #f59e0b;
+}
+
+.status-dot.is-disconnected {
+  background: var(--danger);
+}
+
 [data-theme="dark"] .drawer-header strong {
   color: var(--text);
 }
@@ -1307,7 +1341,7 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 7px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
   padding: 3px;
   border: 0;
   border-radius: 8px;
@@ -1324,8 +1358,8 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 36px;
-  padding: 0 9px;
+  height: 30px;
+  padding: 0 8px;
   color: #8a929c;
 }
 
@@ -1336,7 +1370,7 @@ button {
   outline: 0;
   color: var(--text);
   background: transparent;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .drawer-search input::placeholder {
@@ -1363,6 +1397,27 @@ button {
   min-height: 0;
   overflow: auto;
   padding-top: 8px;
+}
+
+.settings-page {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 18px calc(env(safe-area-inset-bottom, 0px) + 24px);
+}
+
+.settings-page-content {
+  width: min(100%, 680px);
+  display: grid;
+  gap: 18px;
+  margin: 0 auto;
+}
+
+.settings-page-header h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 30px;
+  letter-spacing: 0;
 }
 
 .settings-group {
@@ -1522,6 +1577,14 @@ button {
   line-height: 20px;
 }
 
+.project-row strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .drawer-action small,
 .project-row small {
   color: var(--muted);
@@ -1560,7 +1623,9 @@ button {
   gap: 0;
   max-height: none;
   overflow: auto;
-  padding-right: 0;
+  scrollbar-gutter: stable;
+  margin-right: -12px;
+  padding-right: 12px;
   padding-bottom: 12px;
 }
 
@@ -1576,9 +1641,9 @@ button {
 }
 
 .project-row {
-  min-height: 56px;
-  padding: 9px 2px;
-  border-radius: 0;
+  min-height: 38px;
+  padding: 5px 2px;
+  border-radius: 6px;
   background: transparent;
 }
 
@@ -1598,6 +1663,8 @@ button {
 
 .project-row span {
   flex: 1;
+  min-width: 0;
+  display: block;
 }
 
 .project-count {
@@ -1665,12 +1732,12 @@ button {
 
 .thread-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 3px;
   width: 100%;
-  min-height: 48px;
-  padding: 4px 0;
+  min-height: 34px;
+  padding: 1px 0;
   border-bottom: 0;
   border-radius: 6px;
   color: #4f5661;
@@ -1682,7 +1749,7 @@ button {
 }
 
 .thread-row.has-actions {
-  grid-template-columns: minmax(0, 1fr) 30px 30px;
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
 }
 
 .thread-row.is-selected {
@@ -1730,7 +1797,7 @@ button {
 }
 
 .thread-row.is-subagent {
-  min-height: 40px;
+  min-height: 32px;
   color: #64707d;
 }
 
@@ -1765,11 +1832,11 @@ button {
 
 .thread-main {
   min-width: 0;
-  min-height: 38px;
+  min-height: 32px;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
+  gap: 8px;
   padding: 4px 6px;
   border: 0;
   color: inherit;
@@ -1781,7 +1848,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -1818,6 +1885,24 @@ button {
   line-height: 14px;
   font-weight: 650;
   cursor: pointer;
+}
+
+.thread-side-meta {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 18px;
+  max-width: 72px;
+  color: #8a929c;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.thread-side-meta time {
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
 }
 
 .thread-subagent-toggle svg {
@@ -1906,6 +1991,21 @@ button {
 .thread-row .thread-complete-dot {
   max-width: none;
   overflow: visible;
+}
+
+.thread-row .thread-side-meta {
+  flex: 0 0 auto;
+  max-width: 72px;
+  overflow: visible;
+  color: #8a929c;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.thread-row .thread-side-meta time {
+  overflow: visible;
+  color: inherit;
+  font: inherit;
 }
 
 .thread-row small,
@@ -2028,6 +2128,8 @@ button {
 
 .quota-widget {
   margin-top: 0;
+  display: grid;
+  gap: 7px;
 }
 
 .quota-card {
@@ -2091,10 +2193,10 @@ button {
 
 .quota-panel {
   display: grid;
-  gap: 7px;
-  max-height: min(30svh, 280px);
-  overflow: auto;
-  padding-right: 2px;
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .quota-footer {
@@ -2104,6 +2206,13 @@ button {
   gap: 8px;
   min-width: 0;
   padding-top: 2px;
+}
+
+.quota-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .quota-footer small {
@@ -2177,17 +2286,24 @@ button {
 
 .quota-window {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
 .quota-window-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 7px;
   color: #68717b;
   font-size: 11px;
   line-height: 15px;
+}
+
+.quota-window-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .quota-window-meta strong {
@@ -2195,12 +2311,18 @@ button {
   font-size: 11px;
 }
 
+.quota-window-meta em {
+  color: #8a929c;
+  font-style: normal;
+  white-space: nowrap;
+}
+
 [data-theme="dark"] .quota-window-meta strong {
   color: var(--text);
 }
 
 .quota-bar {
-  height: 4px;
+  height: 5px;
   overflow: hidden;
   border-radius: 999px;
   background: #e5e9e4;
@@ -2242,14 +2364,18 @@ button {
 .quota-account-message,
 .quota-empty {
   width: 100%;
-  min-height: 34px;
-  padding: 8px 9px;
+  min-height: 30px;
+  padding: 7px 9px;
   border-radius: 8px;
   color: #8f332d;
   background: #fff1f1;
   font-size: 12px;
   line-height: 16px;
   text-align: left;
+}
+
+.quota-widget.is-expanded .quota-footer-actions .quota-refresh:last-child svg {
+  transform: rotate(180deg);
 }
 
 .quota-empty {
