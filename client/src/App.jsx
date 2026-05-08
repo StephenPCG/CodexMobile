@@ -38,6 +38,8 @@ import {
   Wifi,
   X
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -151,6 +153,7 @@ const VOICE_DIALOG_MIN_RECORDING_MS = 600;
 const VOICE_DIALOG_LEVEL_THRESHOLD = 0.018;
 const VOICE_DIALOG_SILENCE_AUDIO =
   'data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQIAAAAAAA==';
+const MARKDOWN_PLUGINS = [remarkGfm];
 const REALTIME_VOICE_SAMPLE_RATE = 24000;
 const REALTIME_VOICE_BUFFER_SIZE = 2048;
 const REALTIME_VOICE_MIN_TURN_MS = 500;
@@ -3732,11 +3735,9 @@ function renderInlineText(text, keyPrefix) {
   const nodes = [];
   let lastIndex = 0;
   let match;
-  let partIndex = 0;
-
   while ((match = pattern.exec(value))) {
     if (match.index > lastIndex) {
-      nodes.push(<span key={`${keyPrefix}-text-${partIndex++}`}>{value.slice(lastIndex, match.index)}</span>);
+      blocks.push({ type: 'markdown', value: value.slice(lastIndex, match.index) });
     }
 
     if (match[2]) {
@@ -3761,12 +3762,219 @@ function renderInlineText(text, keyPrefix) {
 
     lastIndex = pattern.lastIndex;
   }
-
   if (lastIndex < value.length) {
-    nodes.push(<span key={`${keyPrefix}-text-${partIndex++}`}>{value.slice(lastIndex)}</span>);
+    blocks.push({ type: 'markdown', value: value.slice(lastIndex) });
+  }
+  const expandedBlocks = [];
+  for (const block of blocks.length ? blocks : [{ type: 'markdown', value }]) {
+    if (block.type !== 'markdown') {
+      expandedBlocks.push(block);
+      continue;
+    }
+    expandedBlocks.push(...splitDiffBlocks(block.value));
+  }
+  return expandedBlocks;
+}
+
+function splitDiffBlocks(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let pending = [];
+  let index = 0;
+
+  function flushPending() {
+    if (pending.length) {
+      blocks.push({ type: 'markdown', value: pending.join('\n') });
+      pending = [];
+    }
   }
 
-  return nodes.length ? nodes : [<span key={`${keyPrefix}-text-0`}>{value}</span>];
+  while (index < lines.length) {
+    const diffSummary = collectDiffSummary(lines, index);
+    if (diffSummary) {
+      flushPending();
+      blocks.push({ type: 'diff', value: diffSummary.summary });
+      index = diffSummary.nextIndex;
+      continue;
+    }
+    pending.push(lines[index]);
+    index += 1;
+  }
+
+  flushPending();
+  return blocks.length ? blocks : [{ type: 'markdown', value: text }];
+}
+
+function MarkdownBlock({ content, onPreviewImage }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={MARKDOWN_PLUGINS}
+      components={{
+        a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
+        img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} onPreviewImage={onPreviewImage} />
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function MarkdownLink({ href, children }) {
+  const raw = String(href || '').trim();
+  if (isLocalFileReference(raw)) {
+    return <FileReference path={raw} label={childrenToText(children)} />;
+  }
+  const normalizedHref = normalizeInlineHref(raw);
+  return (
+    <a href={normalizedHref} target="_blank" rel="noreferrer noopener">
+      {children}
+    </a>
+  );
+}
+
+function MarkdownImage({ src, alt, onPreviewImage }) {
+  const url = String(src || '').trim();
+  const label = alt || pathDisplayName(url);
+  if (!isPreviewableImageUrl(url)) {
+    return <FileReference path={url} label={label} />;
+  }
+  return <GeneratedImage part={{ alt: label, url }} onPreviewImage={onPreviewImage} />;
+}
+
+function FileReference({ path, label }) {
+  return (
+    <span className="markdown-file-ref">
+      <FileText size={14} />
+      <span>{label || pathDisplayName(path)}</span>
+      <code>{path}</code>
+    </span>
+  );
+}
+
+function CitationBlock({ block }) {
+  const parsed = parseMemoryCitation(block);
+  if (!parsed.entries.length && !parsed.rolloutIds.length) {
+    return <pre className="citation-block">{block}</pre>;
+  }
+  return (
+    <div className="citation-card">
+      <div className="citation-title">Citations</div>
+      {parsed.entries.map((entry, index) => (
+        <div key={`citation-entry-${index}`} className="citation-entry">
+          <strong>{entry.source}</strong>
+          {entry.note ? <span>{entry.note}</span> : null}
+        </div>
+      ))}
+      {parsed.rolloutIds.length ? (
+        <div className="citation-rollouts">
+          {parsed.rolloutIds.map((id) => (
+            <code key={id}>{id}</code>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function parseMemoryCitation(block) {
+  const entriesText = block.match(/<citation_entries>\s*([\s\S]*?)\s*<\/citation_entries>/)?.[1] || '';
+  const rolloutText = block.match(/<rollout_ids>\s*([\s\S]*?)\s*<\/rollout_ids>/)?.[1] || '';
+  const entries = entriesText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [source, notePart] = line.split('|note=');
+      return {
+        source: source || line,
+        note: notePart ? notePart.replace(/^\[/, '').replace(/\]$/, '') : ''
+      };
+    });
+  const rolloutIds = rolloutText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return { entries, rolloutIds };
+}
+
+function collectDiffSummary(lines, startIndex) {
+  const header = String(lines[startIndex] || '').trim();
+  if (!/^\d+\s+files?\s+changed\b/i.test(header)) {
+    return null;
+  }
+  const files = [];
+  let index = startIndex + 1;
+  while (index < lines.length && lines[index].trim()) {
+    const line = lines[index].trim();
+    const match = line.match(/^(.+?)\s+([+-]\d+)\s+([+-]\d+)$/);
+    if (!match) {
+      break;
+    }
+    files.push({ path: match[1].trim(), additions: Number(match[2]), deletions: Math.abs(Number(match[3])) });
+    index += 1;
+  }
+  return { summary: { header, files }, nextIndex: index };
+}
+
+function parseDiffSummary(output) {
+  const lines = String(output || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const changedLine = lines.find((line) => /\bfiles?\s+changed\b/i.test(line));
+  if (!changedLine) {
+    return null;
+  }
+  const files = [];
+  for (const line of lines) {
+    if (line === changedLine) {
+      continue;
+    }
+    const compact = line.match(/^(.+?)\s+([+-]\d+)\s+([+-]\d+)$/);
+    if (compact) {
+      files.push({ path: compact[1].trim(), additions: Number(compact[2]), deletions: Math.abs(Number(compact[3])) });
+      continue;
+    }
+    const stat = line.match(/^(.+?)\s+\|\s+\d+\s+([+\-]+)$/);
+    if (stat) {
+      files.push({
+        path: stat[1].trim(),
+        additions: (stat[2].match(/\+/g) || []).length,
+        deletions: (stat[2].match(/-/g) || []).length
+      });
+    }
+  }
+  return { header: changedLine, files };
+}
+
+function DiffSummaryBlock({ summary }) {
+  const headerTotals = String(summary.header || '').match(/\+(\d+)\s+-(\d+)/);
+  const fileAdditions = summary.files?.reduce((total, file) => total + Math.max(0, Number(file.additions) || 0), 0) || 0;
+  const fileDeletions = summary.files?.reduce((total, file) => total + Math.max(0, Number(file.deletions) || 0), 0) || 0;
+  const additions = fileAdditions || Number(headerTotals?.[1]) || 0;
+  const deletions = fileDeletions || Number(headerTotals?.[2]) || 0;
+  return (
+    <div className="diff-card">
+      <div className="diff-card-title">
+        <strong>{summary.header || `${summary.files?.length || 0} files changed`}</strong>
+        <span className="diff-add">+{additions}</span>
+        <span className="diff-del">-{deletions}</span>
+      </div>
+      {summary.files?.length ? (
+        <div className="diff-file-list">
+          {summary.files.slice(0, 32).map((file, index) => (
+            <div key={`${file.path}-${index}`} className="diff-file-row">
+              <span>{file.path}</span>
+              <em className="diff-add">+{Math.max(0, Number(file.additions) || 0)}</em>
+              <em className="diff-del">-{Math.max(0, Number(file.deletions) || 0)}</em>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || '');
+  if (!maxLength || text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength)}\n...`;
 }
 
 function renderInlineWithBreaks(text, keyPrefix) {

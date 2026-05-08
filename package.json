@@ -5,6 +5,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "dev:server": "node server/index.js",
     "dev:client": "vite --host 0.0.0.0 --config client/vite.config.js",
     "build": "vite build --config client/vite.config.js",

@@ -219,6 +219,7 @@ npm run start:env
 
 ## 常用脚本
 
+- `npm run dev`：同时启动后端 watch 和 Vite 前端 HMR
 - `npm run build`：构建 PWA 到 `client/dist`
 - `npm start`：启动 API、WebSocket 和构建后的 PWA
 - `npm run start:env`：读取 `.env` 后启动
