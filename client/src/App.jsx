@@ -13,8 +13,11 @@ import {
   Folder,
   GitBranch,
   GitCommitHorizontal,
+  GitPullRequestCreateArrow,
+  Hand,
   Headphones,
   Image,
+  Laptop,
   Loader2,
   Menu,
   Mic,
@@ -29,7 +32,9 @@ import {
   RefreshCw,
   Search,
   Settings,
+  ShieldAlert,
   ShieldCheck,
+  ShieldQuestion,
   Square,
   Terminal,
   Trash2,
@@ -160,7 +165,7 @@ const REALTIME_VOICE_BARGE_IN_SUSTAIN_MS = 180;
 const STALE_ACTIVITY_STATUS_MS = 2 * 60 * 60 * 1000;
 
 const RUN_MODE_OPTIONS = [
-  { value: 'local', label: 'Local', shortLabel: 'Local' },
+  { value: 'local', label: 'Work locally', shortLabel: 'Local' },
   { value: 'newWorktree', label: 'New worktree', shortLabel: 'Worktree' }
 ];
 
@@ -228,17 +233,17 @@ async function copyTextToClipboard(text) {
 }
 
 const PERMISSION_OPTIONS = [
-  { value: 'default', label: '默认权限' },
-  { value: 'acceptEdits', label: '自动接受编辑' },
-  { value: 'bypassPermissions', label: '完全访问', danger: true }
+  { value: 'default', label: 'Default permissions' },
+  { value: 'acceptEdits', label: 'Auto-review' },
+  { value: 'bypassPermissions', label: 'Full access', danger: true }
 ];
 const DEFAULT_PERMISSION_MODE = 'bypassPermissions';
 
 const REASONING_OPTIONS = [
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'xhigh', label: '超高' }
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra High' }
 ];
 
 function formatTime(value) {
@@ -434,15 +439,32 @@ function shortModelName(model) {
 }
 
 function permissionLabel(value) {
-  return PERMISSION_OPTIONS.find((option) => option.value === value)?.label || '默认权限';
+  return PERMISSION_OPTIONS.find((option) => option.value === value)?.label || 'Default permissions';
+}
+
+function PermissionModeIcon({ value, size = 18 }) {
+  if (value === 'bypassPermissions') {
+    return <ShieldAlert size={size} />;
+  }
+  if (value === 'acceptEdits') {
+    return <ShieldQuestion size={size} />;
+  }
+  return <Hand size={size} />;
 }
 
 function runModeLabel(value) {
-  return RUN_MODE_OPTIONS.find((option) => option.value === value)?.label || 'Local';
+  return RUN_MODE_OPTIONS.find((option) => option.value === value)?.label || 'Work locally';
 }
 
 function runModeShortLabel(value) {
   return RUN_MODE_OPTIONS.find((option) => option.value === value)?.shortLabel || 'Local';
+}
+
+function RunModeIcon({ value, size = 18 }) {
+  if (value === 'newWorktree') {
+    return <GitPullRequestCreateArrow size={size} />;
+  }
+  return <Laptop size={size} />;
 }
 
 function reasoningLabel(value) {
@@ -679,6 +701,55 @@ function createDraftSession(project) {
 function isDraftSession(session) {
   const id = typeof session === 'string' ? session : session?.id;
   return Boolean(session?.draft || id?.startsWith('draft-'));
+}
+
+function runModeFromPath(value = '') {
+  return String(value || '').includes('/.codex/worktrees/') ? 'newWorktree' : 'local';
+}
+
+function sessionEffectiveRunMode(session, runtime = null, fallback = 'local') {
+  const pathValue = runtime?.workingDirectory || session?.cwd || '';
+  return runtime?.runMode || session?.runMode || (pathValue ? runModeFromPath(pathValue) : '') || fallback;
+}
+
+function workspaceTargetForSelection(project, session, runtime = null) {
+  if (!project) {
+    return null;
+  }
+  const runtimePath = runtime?.workingDirectory || runtime?.targetProjectPath || '';
+  const sessionPath = !isDraftSession(session) ? session?.cwd || '' : '';
+  const targetPath = runtimePath || sessionPath || project.path;
+  return {
+    ...project,
+    path: targetPath || project.path,
+    basePath: project.path,
+    sessionId: !isDraftSession(session) ? session?.id || runtime?.sessionId || '' : '',
+    cwd: targetPath && targetPath !== project.path ? targetPath : '',
+    runMode: sessionEffectiveRunMode(session, runtime, 'local')
+  };
+}
+
+function workspaceTargetQuery(target) {
+  const params = new URLSearchParams();
+  if (target?.id) {
+    params.set('projectId', target.id);
+  }
+  if (target?.sessionId) {
+    params.set('sessionId', target.sessionId);
+  }
+  if (target?.cwd) {
+    params.set('cwd', target.cwd);
+  }
+  return params.toString();
+}
+
+function workspaceTargetBody(target, extra = {}) {
+  return {
+    ...extra,
+    projectId: target?.id || '',
+    sessionId: target?.sessionId || '',
+    cwd: target?.cwd || ''
+  };
 }
 
 function sessionMessagesApiPath(sessionId, { limit = 120, activity = true } = {}) {
@@ -2401,6 +2472,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
   const [branchName, setBranchName] = useState('');
 
   const projectId = project?.id || '';
+  const targetQuery = workspaceTargetQuery(project);
   const title = gitActionTitle(activeView === 'status' ? 'status' : activeView);
   const files = Array.isArray(status?.files) ? status.files : [];
   const canCommit = Boolean(status?.canCommit);
@@ -2414,7 +2486,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
     setBusy(true);
     setError('');
     try {
-      const data = await apiFetch(`/api/git/status?projectId=${encodeURIComponent(projectId)}`);
+      const data = await apiFetch(`/api/git/status?${targetQuery}`);
       const nextStatus = data.status || null;
       setStatus(nextStatus);
       setCommitMessage((current) => current || nextStatus?.defaultCommitMessage || '');
@@ -2424,7 +2496,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
     } finally {
       setBusy(false);
     }
-  }, [open, projectId, project]);
+  }, [open, projectId, project, targetQuery]);
 
   const loadGitDiff = useCallback(async () => {
     if (!open || !projectId) {
@@ -2434,7 +2506,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
     setBusyAction('diff');
     setError('');
     try {
-      const data = await apiFetch(`/api/git/diff?projectId=${encodeURIComponent(projectId)}`);
+      const data = await apiFetch(`/api/git/diff?${targetQuery}`);
       setDiff(data.diff || null);
       if (data.diff?.status) {
         setStatus(data.diff.status);
@@ -2445,7 +2517,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
       setBusy(false);
       setBusyAction('');
     }
-  }, [open, projectId]);
+  }, [open, projectId, targetQuery]);
 
   useEffect(() => {
     if (!open) {
@@ -2483,32 +2555,32 @@ function GitPanel({ open, action, project, onClose, onToast }) {
       if (nextAction === 'commit') {
         data = await apiFetch('/api/git/commit', {
           method: 'POST',
-          body: { projectId, message: commitMessage }
+          body: workspaceTargetBody(project, { message: commitMessage })
         });
       } else if (nextAction === 'commit-push') {
         data = await apiFetch('/api/git/commit-push', {
           method: 'POST',
-          body: { projectId, message: commitMessage }
+          body: workspaceTargetBody(project, { message: commitMessage })
         });
       } else if (nextAction === 'push') {
         data = await apiFetch('/api/git/push', {
           method: 'POST',
-          body: { projectId }
+          body: workspaceTargetBody(project)
         });
       } else if (nextAction === 'pull') {
         data = await apiFetch('/api/git/pull', {
           method: 'POST',
-          body: { projectId }
+          body: workspaceTargetBody(project)
         });
       } else if (nextAction === 'sync') {
         data = await apiFetch('/api/git/sync', {
           method: 'POST',
-          body: { projectId }
+          body: workspaceTargetBody(project)
         });
       } else if (nextAction === 'branch') {
         data = await apiFetch('/api/git/branch', {
           method: 'POST',
-          body: { projectId, branchName }
+          body: workspaceTargetBody(project, { branchName })
         });
       }
       setResult(data || {});
@@ -2741,9 +2813,11 @@ function WorkspaceFileRow({ file, staged, onOpen }) {
   );
 }
 
-function WorkspaceDirectoryNode({ projectId, pathValue, label, depth, expanded, onToggle, onOpenFile }) {
+function WorkspaceDirectoryNode({ target, pathValue, label, depth, expanded, onToggle, onOpenFile }) {
   const [state, setState] = useState({ loading: false, error: '', entries: [] });
   const isExpanded = expanded.has(pathValue);
+  const targetQuery = workspaceTargetQuery(target);
+  const projectId = target?.id || '';
 
   useEffect(() => {
     if (!isExpanded || !projectId) {
@@ -2751,7 +2825,7 @@ function WorkspaceDirectoryNode({ projectId, pathValue, label, depth, expanded, 
     }
     let cancelled = false;
     setState((current) => ({ ...current, loading: true, error: '' }));
-    apiFetch(`/api/workspace/directory?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(pathValue)}`)
+    apiFetch(`/api/workspace/directory?${targetQuery}&path=${encodeURIComponent(pathValue)}`)
       .then((result) => {
         if (!cancelled) {
           setState({ loading: false, error: '', entries: Array.isArray(result.directory?.entries) ? result.directory.entries : [] });
@@ -2765,7 +2839,7 @@ function WorkspaceDirectoryNode({ projectId, pathValue, label, depth, expanded, 
     return () => {
       cancelled = true;
     };
-  }, [isExpanded, projectId, pathValue]);
+  }, [isExpanded, projectId, pathValue, targetQuery]);
 
   const childDepth = depth + 1;
   const indent = 12 + depth * 14;
@@ -2794,7 +2868,7 @@ function WorkspaceDirectoryNode({ projectId, pathValue, label, depth, expanded, 
             {state.entries.map((entry) => entry.type === 'directory' ? (
               <WorkspaceDirectoryNode
                 key={entry.path}
-                projectId={projectId}
+                target={target}
                 pathValue={entry.path}
                 label={entry.name}
                 depth={childDepth}
@@ -2843,7 +2917,7 @@ function WorkspaceDirectoryTree({ project, onOpenFile }) {
   return (
     <div className="workspace-directory-tree">
       <WorkspaceDirectoryNode
-        projectId={project?.id || ''}
+        target={project}
         pathValue=""
         label={rootLabel}
         depth={0}
@@ -2877,6 +2951,7 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
   const [displayMode, setDisplayMode] = useState('diff');
   const [state, setState] = useState({ loading: false, error: '', diff: null, file: null });
   const projectId = project?.id || '';
+  const targetQuery = workspaceTargetQuery(project);
   const filePath = selectedFile?.path || '';
   const fileNameValue = filePath.split('/').pop() || filePath || 'File';
   const hasDiff = Boolean(state.diff?.patch);
@@ -2891,10 +2966,10 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
     setDisplayMode('diff');
     setState({ loading: true, error: '', diff: null, file: null });
     Promise.all([
-      apiFetch(`/api/git/file-diff?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(filePath)}${stagedQuery}`)
+      apiFetch(`/api/git/file-diff?${targetQuery}&path=${encodeURIComponent(filePath)}${stagedQuery}`)
         .then((result) => result.diff)
         .catch(() => null),
-      apiFetch(`/api/workspace/file?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(filePath)}`)
+      apiFetch(`/api/workspace/file?${targetQuery}&path=${encodeURIComponent(filePath)}`)
         .then((result) => result.file)
     ])
       .then(([diff, file]) => {
@@ -2913,7 +2988,7 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, filePath, selectedFile?.staged]);
+  }, [projectId, targetQuery, filePath, selectedFile?.staged]);
 
   async function copyFileContent() {
     if (!canCopy) {
@@ -2985,6 +3060,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
   const [gitState, setGitState] = useState({ loading: false, error: '', status: null });
   const [searchState, setSearchState] = useState({ loading: false, error: '', files: [] });
   const projectId = project?.id || '';
+  const targetQuery = workspaceTargetQuery(project);
 
   const loadGitFiles = useCallback(async () => {
     if (!open || !projectId) {
@@ -2992,12 +3068,12 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
     }
     setGitState((current) => ({ ...current, loading: true, error: '' }));
     try {
-      const data = await apiFetch(`/api/git/files?projectId=${encodeURIComponent(projectId)}`);
+      const data = await apiFetch(`/api/git/files?${targetQuery}`);
       setGitState({ loading: false, error: '', status: data.status || null });
     } catch (error) {
       setGitState({ loading: false, error: error.message || '读取 Changes 失败', status: null });
     }
-  }, [open, projectId]);
+  }, [open, projectId, targetQuery]);
 
   useEffect(() => {
     if (!open) {
@@ -3018,7 +3094,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
     const query = searchQuery.trim();
     setSearchState((current) => ({ ...current, loading: true, error: '' }));
     const timer = window.setTimeout(() => {
-      apiFetch(`/api/files/search?projectId=${encodeURIComponent(projectId)}&q=${encodeURIComponent(query)}`)
+      apiFetch(`/api/files/search?${targetQuery}&q=${encodeURIComponent(query)}`)
         .then((result) => {
           if (!cancelled) {
             setSearchState({ loading: false, error: '', files: Array.isArray(result.files) ? result.files : [] });
@@ -3034,7 +3110,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [open, projectId, searchQuery]);
+  }, [open, projectId, targetQuery, searchQuery]);
 
   if (!open) {
     return null;
@@ -3230,7 +3306,15 @@ function TerminalPanel({
         setOutput((current) => `${current}\n[terminal exited]\n`);
       }
     }) || (() => {});
-    const sent = onSendTerminal?.({ type: 'terminal-open', terminalId, projectId, cols: 100, rows: 28 });
+    const sent = onSendTerminal?.({
+      type: 'terminal-open',
+      terminalId,
+      projectId,
+      sessionId: project?.sessionId || '',
+      cwd: project?.cwd || '',
+      cols: 100,
+      rows: 28
+    });
     if (!sent) {
       const message = 'WebSocket 未连接';
       setState('error');
@@ -3241,7 +3325,7 @@ function TerminalPanel({
       onSendTerminal?.({ type: 'terminal-close', terminalId });
       unregister();
     };
-  }, [open, projectId, connectionState, onRegisterTerminal, onSendTerminal]);
+  }, [open, project, projectId, connectionState, onRegisterTerminal, onSendTerminal]);
 
   useEffect(() => {
     outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
@@ -5331,6 +5415,8 @@ function Composer({
   permissionMode,
   onSelectPermission,
   runMode,
+  effectiveRunMode,
+  canSelectRunMode,
   onSelectRunMode,
   attachments,
   onUploadFiles,
@@ -5346,13 +5432,14 @@ function Composer({
   onRestoreQueueDraft,
   onRemoveQueueDraft,
   onSteerQueueDraft,
-  onOpenTerminal,
   onVoiceTranscribe
 }) {
+  const composerWrapRef = useRef(null);
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
   const fileInputRef = useRef(null);
   const [openMenu, setOpenMenu] = useState(null);
+  const [menuAnchor, setMenuAnchor] = useState(null);
   const [skillFilter, setSkillFilter] = useState('');
   const [cursorPosition, setCursorPosition] = useState(0);
   const [fileSearch, setFileSearch] = useState({ query: '', loading: false, results: [] });
@@ -5360,6 +5447,9 @@ function Composer({
   const hasInput = input.trim().length > 0 || attachments.length > 0 || selectedFileMentions.length > 0;
   const modelList = models?.length ? models : [{ value: selectedModel || 'gpt-5.5', label: selectedModel || 'gpt-5.5' }];
   const selectedModelLabel = modelList.find((model) => model.value === selectedModel)?.label || selectedModel || 'gpt-5.5';
+  const selectedModelTriggerLabel = `${shortModelName(selectedModelLabel)} ${reasoningLabel(selectedReasoningEffort)}`;
+  const displayRunMode = effectiveRunMode || runMode;
+  const selectedPermission = PERMISSION_OPTIONS.find((option) => option.value === permissionMode) || PERMISSION_OPTIONS[0];
   const skillList = Array.isArray(skills) ? skills : [];
   const selectedSkillSet = new Set(Array.isArray(selectedSkillPaths) ? selectedSkillPaths : []);
   const selectedSkills = skillList.filter((skill) => selectedSkillSet.has(skill.path));
@@ -5410,8 +5500,39 @@ function Composer({
       return;
     }
     textarea.style.height = '0px';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 132)}px`;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 96)}px`;
   }, [input]);
+
+  useEffect(() => {
+    if (!openMenu) {
+      return undefined;
+    }
+    function closeMenu() {
+      setOpenMenu(null);
+      setMenuAnchor(null);
+    }
+    function handlePointerDown(event) {
+      if (composerWrapRef.current?.contains(event.target)) {
+        return;
+      }
+      closeMenu();
+    }
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        closeMenu();
+      }
+    }
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', closeMenu);
+    window.addEventListener('orientationchange', closeMenu);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', closeMenu);
+      window.removeEventListener('orientationchange', closeMenu);
+    };
+  }, [openMenu]);
 
   useEffect(() => {
     if (composerToken?.type !== 'file' || !selectedProject?.id) {
@@ -5503,8 +5624,39 @@ function Composer({
     }
   }
 
-  function toggleMenu(name) {
-    setOpenMenu((current) => (current === name ? null : name));
+  function menuAnchorFor(name, target) {
+    const rect = target?.getBoundingClientRect?.();
+    if (!rect) {
+      return null;
+    }
+    const align = name === 'model' || name === 'send-mode' ? 'right' : 'left';
+    return {
+      name,
+      align,
+      bottom: Math.max(8, window.innerHeight - rect.top + 6),
+      left: Math.max(8, rect.left),
+      right: Math.max(8, window.innerWidth - rect.right)
+    };
+  }
+
+  function menuStyle(name) {
+    if (!menuAnchor || menuAnchor.name !== name) {
+      return undefined;
+    }
+    const base = { bottom: `${menuAnchor.bottom}px` };
+    return menuAnchor.align === 'right'
+      ? { ...base, right: `${menuAnchor.right}px` }
+      : { ...base, left: `${menuAnchor.left}px` };
+  }
+
+  function toggleMenu(name, event) {
+    if (openMenu === name) {
+      setOpenMenu(null);
+      setMenuAnchor(null);
+    } else {
+      setOpenMenu(name);
+      setMenuAnchor(menuAnchorFor(name, event?.currentTarget));
+    }
     if (name !== 'skill') {
       setSkillFilter('');
     }
@@ -5526,7 +5678,7 @@ function Composer({
   );
 
   return (
-    <form className="composer-wrap" onSubmit={submit}>
+    <form ref={composerWrapRef} className="composer-wrap" onSubmit={submit}>
       <input
         ref={imageInputRef}
         className="file-input"
@@ -5543,7 +5695,7 @@ function Composer({
         onChange={(event) => handleFiles(event, 'file')}
       />
       {openMenu === 'attach' ? (
-        <div className="composer-menu attach-menu">
+        <div className="composer-menu attach-menu" style={menuStyle('attach')}>
           <button type="button" onClick={() => imageInputRef.current?.click()}>
             <Image size={17} />
             相册
@@ -5555,7 +5707,7 @@ function Composer({
         </div>
       ) : null}
       {openMenu === 'permission' ? (
-        <div className="composer-menu permission-menu">
+        <div className="composer-menu permission-menu" style={menuStyle('permission')}>
           {PERMISSION_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -5566,14 +5718,35 @@ function Composer({
                 setOpenMenu(null);
               }}
             >
-              {permissionMode === option.value ? <Check size={16} /> : <span className="menu-spacer" />}
-              {option.label}
+              <PermissionModeIcon value={option.value} size={18} />
+              <span>{option.label}</span>
+              {permissionMode === option.value ? <Check className="menu-check" size={17} /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {openMenu === 'run-mode' && canSelectRunMode ? (
+        <div className="composer-menu run-mode-menu" style={menuStyle('run-mode')}>
+          <div className="menu-section-label">Start in</div>
+          {RUN_MODE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={runMode === option.value ? 'is-selected' : ''}
+              onClick={() => {
+                onSelectRunMode(option.value);
+                setOpenMenu(null);
+              }}
+            >
+              <RunModeIcon value={option.value} size={18} />
+              <span>{option.label}</span>
+              {runMode === option.value ? <Check className="menu-check" size={17} /> : null}
             </button>
           ))}
         </div>
       ) : null}
       {openMenu === 'skill' ? (
-        <div className="composer-menu skill-menu">
+        <div className="composer-menu skill-menu" style={menuStyle('skill')}>
           <div className="skill-search-wrap">
             <Search size={14} />
             <input
@@ -5619,8 +5792,8 @@ function Composer({
         </div>
       ) : null}
       {openMenu === 'model' ? (
-        <div className="composer-menu model-menu">
-          <div className="menu-section-label">模型</div>
+        <div className="composer-menu model-menu" style={menuStyle('model')}>
+          <div className="menu-section-label">Model</div>
           {modelList.map((model) => (
             <button
               key={model.value}
@@ -5631,12 +5804,13 @@ function Composer({
                 setOpenMenu(null);
               }}
             >
-              {selectedModel === model.value ? <Check size={16} /> : <span className="menu-spacer" />}
+              <Bot size={17} />
               <span>{model.label}</span>
+              {selectedModel === model.value ? <Check className="menu-check" size={17} /> : null}
             </button>
           ))}
           <div className="menu-divider" />
-          <div className="menu-section-label">智能</div>
+          <div className="menu-section-label">Reasoning</div>
           {REASONING_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -5647,8 +5821,9 @@ function Composer({
                 setOpenMenu(null);
               }}
             >
-              {selectedReasoningEffort === option.value ? <Check size={16} /> : <span className="menu-spacer" />}
+              <MoreHorizontal size={17} />
               <span>{option.label}</span>
+              {selectedReasoningEffort === option.value ? <Check className="menu-check" size={17} /> : null}
             </button>
           ))}
         </div>
@@ -5828,7 +6003,10 @@ function Composer({
           }}
           onClick={updateCursorFromTextarea}
           onKeyUp={updateCursorFromTextarea}
-          onFocus={() => setOpenMenu(null)}
+          onFocus={() => {
+            setOpenMenu(null);
+            setMenuAnchor(null);
+          }}
           placeholder="给 Codex 发送消息"
         />
         <div className="composer-controls">
@@ -5838,32 +6016,46 @@ function Composer({
               className="composer-icon-control"
               aria-label="添加附件"
               title="添加附件"
-              onClick={() => toggleMenu('attach')}
+              onClick={(event) => toggleMenu('attach', event)}
               disabled={uploading}
             >
               <Paperclip size={18} />
             </button>
             <button
               type="button"
-              className="composer-icon-control"
-              onClick={() => toggleMenu('permission')}
+              className={`composer-icon-control ${openMenu === 'permission' ? 'is-active' : ''} ${selectedPermission?.danger ? 'is-danger' : ''}`}
+              onClick={(event) => toggleMenu('permission', event)}
               aria-label={`Permission mode: ${permissionLabel(permissionMode)}`}
               title={permissionLabel(permissionMode)}
             >
-              <ShieldCheck size={18} />
+              <PermissionModeIcon value={permissionMode} size={18} />
             </button>
             <button
               type="button"
-              className="composer-icon-control"
-              onClick={onOpenTerminal}
+              className={`composer-icon-control ${openMenu === 'run-mode' ? 'is-active' : ''}`}
+              onClick={(event) => {
+                if (canSelectRunMode) {
+                  toggleMenu('run-mode', event);
+                }
+              }}
               disabled={!selectedProject}
-              aria-label="打开 Terminal"
-              title="Terminal"
+              aria-label={`启动模式：${runModeLabel(displayRunMode)}${canSelectRunMode ? '' : '，当前会话不可修改'}`}
+              title={`${runModeLabel(displayRunMode)}${canSelectRunMode ? '' : ' · 当前会话不可修改'}`}
             >
-              <Terminal size={18} />
+              <RunModeIcon value={displayRunMode} size={18} />
             </button>
           </div>
           <div className="control-right">
+            <button
+              type="button"
+              className={`composer-model-control ${openMenu === 'model' ? 'is-active' : ''}`}
+              onClick={(event) => toggleMenu('model', event)}
+              aria-label={`模型：${selectedModelLabel}，思考深度：${reasoningLabel(selectedReasoningEffort)}`}
+              title={selectedModelTriggerLabel}
+            >
+              <span>{selectedModelTriggerLabel}</span>
+              <ChevronDown size={14} />
+            </button>
             <button
               type="button"
               className="composer-icon-control"
@@ -6075,6 +6267,12 @@ export default function App() {
   const selectedRuntime = selectedRunKeys(selectedSession)
     .map((key) => threadRuntimeById[key])
     .find(Boolean) || null;
+  const selectedWorkspaceTarget = useMemo(
+    () => workspaceTargetForSelection(selectedProject, selectedSession, selectedRuntime),
+    [selectedProject, selectedSession, selectedRuntime]
+  );
+  const canSelectRunMode = !selectedSession || isDraftSession(selectedSession);
+  const effectiveRunMode = canSelectRunMode ? runMode : selectedWorkspaceTarget?.runMode || runMode;
   const hasRunningActivity = useMemo(
     () =>
       messages.some(
@@ -7096,6 +7294,12 @@ export default function App() {
         next[key] = {
           status: 'running',
           steerable: payload.steerable !== false,
+          sessionId: payload.sessionId || null,
+          requestedRunMode: payload.requestedRunMode || null,
+          runMode: payload.runMode || null,
+          workingDirectory: payload.workingDirectory || payload.targetProjectPath || null,
+          targetProjectPath: payload.targetProjectPath || payload.workingDirectory || null,
+          worktree: payload.worktree || null,
           updatedAt: payload.timestamp || payload.startedAt || new Date().toISOString()
         };
       }
@@ -7214,6 +7418,12 @@ export default function App() {
         nextRuntime[key] = {
           status: 'running',
           steerable: run.steerable !== false,
+          sessionId: run.sessionId || null,
+          requestedRunMode: run.requestedRunMode || null,
+          runMode: run.runMode || null,
+          workingDirectory: run.workingDirectory || run.targetProjectPath || null,
+          targetProjectPath: run.targetProjectPath || run.workingDirectory || null,
+          worktree: run.worktree || null,
           updatedAt: run.startedAt || new Date().toISOString()
         };
       }
@@ -7733,7 +7943,14 @@ export default function App() {
           return;
         }
         if (!selectedSessionRef.current && payload.sessionId) {
-          setSelectedSession({ id: payload.sessionId, projectId: payload.projectId, title: '新对话' });
+          setSelectedSession({
+            id: payload.sessionId,
+            projectId: payload.projectId,
+            title: '新对话',
+            cwd: payload.workingDirectory || payload.targetProjectPath || null,
+            runMode: payload.runMode || null,
+            worktree: payload.worktree || null
+          });
         }
         return;
       }
@@ -7745,6 +7962,10 @@ export default function App() {
           id: payload.sessionId,
           projectId,
           title: currentSession?.title || '新对话',
+          cwd: payload.workingDirectory || payload.targetProjectPath || currentSession?.cwd || null,
+          runMode: payload.runMode || currentSession?.runMode || null,
+          requestedRunMode: payload.requestedRunMode || currentSession?.requestedRunMode || null,
+          worktree: payload.worktree || currentSession?.worktree || null,
           turnId: payload.turnId || currentSession?.turnId || null,
           updatedAt: new Date().toISOString(),
           draft: false
@@ -8335,6 +8556,10 @@ export default function App() {
       id: realSessionId,
       projectId,
       title: currentSession?.title || '新对话',
+      cwd: turn.workingDirectory || turn.targetProjectPath || currentSession?.cwd || null,
+      runMode: turn.runMode || currentSession?.runMode || null,
+      requestedRunMode: turn.requestedRunMode || currentSession?.requestedRunMode || null,
+      worktree: turn.worktree || currentSession?.worktree || null,
       turnId: turn.turnId || currentSession?.turnId || null,
       updatedAt: turn.completedAt || turn.updatedAt || new Date().toISOString(),
       draft: false
@@ -8737,6 +8962,9 @@ export default function App() {
     const draftSessionId = isDraftSession(sessionForTurn) ? sessionForTurn.id : null;
     const outgoingSessionId = draftSessionId ? null : sessionForTurn?.id || null;
     const optimisticSessionId = draftSessionId || outgoingSessionId || turnId;
+    const runModeForTurn = draftSessionId
+      ? runMode
+      : sessionEffectiveRunMode(sessionForTurn, selectedRuntime, runMode);
     const initialTitle = draftSessionId && !sessionForTurn.titleLocked
       ? titleFromFirstMessage(displayMessage)
       : null;
@@ -8748,7 +8976,13 @@ export default function App() {
       setFileMentions([]);
     }
 
-    markRun({ turnId, sessionId: optimisticSessionId, previousSessionId: draftSessionId || outgoingSessionId });
+    markRun({
+      turnId,
+      sessionId: optimisticSessionId,
+      previousSessionId: draftSessionId || outgoingSessionId,
+      runMode: runModeForTurn,
+      workingDirectory: !draftSessionId ? sessionForTurn?.cwd || selectedRuntime?.workingDirectory || null : null
+    });
     setSelectedSession((current) =>
       current?.id === sessionForTurn?.id
         ? { ...current, turnId, ...autoTitlePatch(initialTitle) }
@@ -8798,7 +9032,7 @@ export default function App() {
           clientTurnId: turnId,
           message: displayMessage,
           permissionMode,
-          runMode,
+          runMode: runModeForTurn,
           model: selectedModel || status.model,
           reasoningEffort: selectedReasoningEffort || status.reasoningEffort || DEFAULT_REASONING_EFFORT,
           selectedSkills: selectedSkillsForTurn(),
@@ -9105,20 +9339,20 @@ export default function App() {
       <GitPanel
         open={gitPanel.open}
         action={gitPanel.action}
-        project={selectedProject}
+        project={selectedWorkspaceTarget}
         onToast={showToast}
         onClose={() => setGitPanel((current) => ({ ...current, open: false }))}
       />
       <WorkspacePanel
         open={workspacePanel.open}
         initialTab={workspacePanel.tab}
-        project={selectedProject}
+        project={selectedWorkspaceTarget}
         onToast={showToast}
         onClose={() => setWorkspacePanel((current) => ({ ...current, open: false }))}
       />
       <TerminalPanel
         open={terminalOpen}
-        project={selectedProject}
+        project={selectedWorkspaceTarget}
         connectionState={connectionState}
         onToast={showToast}
         onRegisterTerminal={registerTerminalHandler}
@@ -9162,6 +9396,8 @@ export default function App() {
         permissionMode={permissionMode}
         onSelectPermission={setPermissionMode}
         runMode={runMode}
+        effectiveRunMode={effectiveRunMode}
+        canSelectRunMode={canSelectRunMode}
         onSelectRunMode={setRunMode}
         attachments={attachments}
         onUploadFiles={handleUploadFiles}
@@ -9177,7 +9413,6 @@ export default function App() {
         onRestoreQueueDraft={restoreQueueDraft}
         onRemoveQueueDraft={removeQueueDraft}
         onSteerQueueDraft={steerQueueDraft}
-        onOpenTerminal={handleOpenTerminal}
         onVoiceTranscribe={openVoiceTranscriptionDialog}
       />
       <VoiceDialogPanel

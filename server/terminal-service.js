@@ -52,15 +52,17 @@ function signalTerminalProcess(child, signal) {
   }
 }
 
-export function createTerminalService({ getProject } = {}) {
+export function createTerminalService({ getProject, getTarget } = {}) {
   if (typeof getProject !== 'function') {
     throw new Error('createTerminalService requires getProject');
   }
 
   const socketTerminals = new WeakMap();
 
-  function requireProject(projectId) {
-    const project = getProject(projectId);
+  function requireTarget(projectId, options = {}) {
+    const project = typeof getTarget === 'function'
+      ? getTarget(projectId, options)
+      : getProject(projectId);
     if (!project?.path) {
       throw terminalError('Project not found', 404);
     }
@@ -117,7 +119,10 @@ export function createTerminalService({ getProject } = {}) {
     }
     closeTerminal(ws, terminalId, { notify: false });
 
-    const project = requireProject(payload.projectId);
+    const project = requireTarget(payload.projectId, {
+      sessionId: payload.sessionId,
+      cwd: payload.cwd
+    });
     const { command, args } = terminalShell();
     const child = spawn(command, args, {
       cwd: project.path,

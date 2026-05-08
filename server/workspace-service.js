@@ -71,21 +71,23 @@ function sortEntries(left, right) {
   return left.name.localeCompare(right.name, 'zh-CN', { sensitivity: 'base' });
 }
 
-export function createWorkspaceService({ getProject } = {}) {
+export function createWorkspaceService({ getProject, getTarget } = {}) {
   if (typeof getProject !== 'function') {
     throw new Error('createWorkspaceService requires getProject');
   }
 
-  function requireProject(projectId) {
-    const project = getProject(projectId);
+  function requireTarget(projectId, options = {}) {
+    const project = typeof getTarget === 'function'
+      ? getTarget(projectId, options)
+      : getProject(projectId);
     if (!project?.path) {
       throw serviceError('Project not found', 404);
     }
     return project;
   }
 
-  async function listDirectory(projectId, requestedPath = '') {
-    const project = requireProject(projectId);
+  async function listDirectory(projectId, requestedPath = '', options = {}) {
+    const project = requireTarget(projectId, options);
     const { root, relativePath, absolutePath } = resolveProjectPath(project, requestedPath);
     const stat = await fs.stat(absolutePath);
     if (!stat.isDirectory()) {
@@ -127,8 +129,8 @@ export function createWorkspaceService({ getProject } = {}) {
     };
   }
 
-  async function readFile(projectId, requestedPath = '') {
-    const project = requireProject(projectId);
+  async function readFile(projectId, requestedPath = '', options = {}) {
+    const project = requireTarget(projectId, options);
     const { relativePath, absolutePath } = resolveProjectPath(project, requestedPath);
     if (!relativePath) {
       throw serviceError('File path is required', 400);

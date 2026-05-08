@@ -4103,19 +4103,19 @@ button {
 }
 
 .composer-menu {
-  position: absolute;
-  bottom: calc(100% + 8px);
+  position: fixed;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 58px);
   z-index: 60;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 150px;
   max-width: min(84vw, 300px);
-  max-height: 42svh;
-  padding: 7px;
+  max-height: 38svh;
+  padding: 5px;
   overflow: auto;
   border: 1px solid rgba(222, 223, 220, 0.9);
-  border-radius: 16px;
+  border-radius: 14px;
   background: var(--glass-strong);
   box-shadow: var(--soft-shadow);
   backdrop-filter: blur(22px) saturate(1.18);
@@ -4126,7 +4126,13 @@ button {
 }
 
 .permission-menu {
-  left: 56px;
+  left: 48px;
+  min-width: 218px;
+}
+
+.run-mode-menu {
+  left: 84px;
+  min-width: 216px;
 }
 
 .skill-menu {
@@ -4135,7 +4141,7 @@ button {
 }
 
 .model-menu {
-  right: 12px;
+  right: 104px;
   min-width: 176px;
 }
 
@@ -4207,7 +4213,7 @@ button {
 }
 
 .menu-section-label {
-  padding: 4px 9px 2px;
+  padding: 4px 8px 2px;
   color: #8a9097;
   font-size: 12px;
   line-height: 16px;
@@ -4215,17 +4221,17 @@ button {
 
 .menu-divider {
   height: 1px;
-  margin: 5px 2px;
+  margin: 4px 2px;
   background: #eceeeb;
 }
 
 .composer-menu button {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
-  min-height: 38px;
-  padding: 8px 9px;
+  min-height: 34px;
+  padding: 6px 8px;
   border: 0;
   border-radius: 8px;
   color: #363c45;
@@ -4235,11 +4241,20 @@ button {
 
 .composer-menu button.is-selected {
   color: #174eb8;
-  background: var(--accent-soft);
+  background: transparent;
 }
 
 .composer-menu button.is-danger {
-  color: var(--danger);
+  color: #ea580c;
+}
+
+.composer-menu button.is-danger.is-selected {
+  color: #ea580c;
+}
+
+.menu-check {
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .composer-menu button:disabled {
@@ -4283,6 +4298,16 @@ button {
 }
 
 .composer-menu button span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-menu button > span,
+.run-mode-menu button > span,
+.model-menu button > span {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4429,15 +4454,15 @@ button {
 .composer textarea {
   display: block;
   width: 100%;
-  min-height: 44px;
-  max-height: 132px;
-  padding: 14px 16px 6px;
+  min-height: 32px;
+  max-height: 96px;
+  padding: 8px 14px 3px;
   resize: none;
   border: 0;
   outline: 0;
   color: var(--text);
   background: transparent;
-  line-height: 1.45;
+  line-height: 1.36;
   font-size: 16px;
 }
 
@@ -4451,7 +4476,7 @@ button {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  padding: 4px 8px 8px;
+  padding: 2px 8px 7px;
 }
 
 .control-left,
@@ -4704,15 +4729,58 @@ button {
 }
 
 .composer-icon-control:active,
-.composer-icon-control:focus-visible {
+.composer-icon-control:focus-visible,
+.composer-icon-control.is-active {
   color: var(--text);
   background: var(--panel-2);
   outline: 0;
 }
 
+.composer-icon-control.is-danger {
+  color: #ea580c;
+}
+
+.composer-icon-control.is-danger:active,
+.composer-icon-control.is-danger:focus-visible,
+.composer-icon-control.is-danger.is-active {
+  color: #ea580c;
+  background: rgba(234, 88, 12, 0.12);
+}
+
 .composer-icon-control:disabled {
   cursor: default;
   opacity: 0.42;
+}
+
+.composer-model-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  max-width: min(42vw, 154px);
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(31, 35, 40, 0.66);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 520;
+  white-space: nowrap;
+}
+
+.composer-model-control span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-model-control:active,
+.composer-model-control:focus-visible,
+.composer-model-control.is-active {
+  color: var(--text);
+  background: var(--panel-2);
+  outline: 0;
 }
 
 .workspace-panel,
@@ -5511,9 +5579,37 @@ button {
 }
 
 [data-theme="dark"] .composer-icon-control:active,
-[data-theme="dark"] .composer-icon-control:focus-visible {
+[data-theme="dark"] .composer-icon-control:focus-visible,
+[data-theme="dark"] .composer-icon-control.is-active {
   color: var(--text);
   background: #303030;
+}
+
+[data-theme="dark"] .composer-model-control {
+  color: rgba(244, 244, 245, 0.72);
+}
+
+[data-theme="dark"] .composer-model-control:active,
+[data-theme="dark"] .composer-model-control:focus-visible,
+[data-theme="dark"] .composer-model-control.is-active {
+  color: var(--text);
+  background: #303030;
+}
+
+[data-theme="dark"] .composer-icon-control.is-danger {
+  color: #fb923c;
+}
+
+[data-theme="dark"] .composer-menu button.is-danger,
+[data-theme="dark"] .composer-menu button.is-danger.is-selected {
+  color: #fb923c;
+}
+
+[data-theme="dark"] .composer-icon-control.is-danger:active,
+[data-theme="dark"] .composer-icon-control.is-danger:focus-visible,
+[data-theme="dark"] .composer-icon-control.is-danger.is-active {
+  color: #fb923c;
+  background: rgba(251, 146, 60, 0.16);
 }
 
 [data-theme="dark"] .workspace-panel {
@@ -5836,6 +5932,10 @@ button {
     max-width: 104px;
   }
 
+  .composer-model-control {
+    max-width: 136px;
+  }
+
   .skill-select {
     max-width: 86px;
   }
@@ -5854,6 +5954,10 @@ button {
 
   .model-select {
     max-width: 86px;
+  }
+
+  .composer-model-control {
+    max-width: 112px;
   }
 
   .skill-select {

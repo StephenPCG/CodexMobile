@@ -199,6 +199,17 @@ function isInternalCodexProjectPath(projectPath) {
   return isSameOrChildPath(projectPath, path.join(CODEX_HOME, 'memories'));
 }
 
+function sessionRunModeForPath(projectPath, mobileSession = null) {
+  const stored = String(mobileSession?.runMode || '').trim();
+  if (stored === 'newWorktree' || stored === 'local') {
+    return stored;
+  }
+  if (projectPath && isSameOrChildPath(projectPath, path.join(CODEX_HOME, 'worktrees'))) {
+    return 'newWorktree';
+  }
+  return 'local';
+}
+
 async function gitCommonDir(projectPath) {
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
@@ -615,6 +626,7 @@ async function sessionFromDesktopThread(
     summary: preview || mobileSession?.summary || title || 'Codex 会话',
     model: mobileSession?.model || null,
     provider: thread.modelProvider || mobileSession?.provider || null,
+    runMode: sessionRunModeForPath(resolvedCwd, mobileSession),
     messageCount: mobileMessages.length,
     updatedAt: isoFromEpochSeconds(thread.updatedAt) || mobileSession?.updatedAt || null,
     source: sourceToString(thread.source),
@@ -915,6 +927,7 @@ async function sessionFromLocalThread(
     summary: preview || mobileSession?.summary || title || 'Codex 会话',
     model: mobileSession?.model || thread.model || null,
     provider: thread.modelProvider || mobileSession?.provider || null,
+    runMode: sessionRunModeForPath(resolvedCwd, mobileSession),
     messageCount: Number(thread.messageCount) || 0,
     updatedAt: thread.updatedAt || mobileSession?.updatedAt || null,
     source: sourceToString(thread.source),
@@ -1283,6 +1296,7 @@ export function listProjectSessions(projectId) {
     summary: session.summary,
     model: session.model,
     provider: session.provider,
+    runMode: session.runMode || sessionRunModeForPath(session.cwd),
     source: session.source,
     parentSessionId: session.parentSessionId || null,
     isSubAgent: Boolean(session.isSubAgent),

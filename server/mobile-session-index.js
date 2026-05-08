@@ -77,7 +77,7 @@ export async function deleteMobileSession(sessionId) {
   return true;
 }
 
-export async function registerMobileSession({ id, projectPath, projectless = false, title, summary, titleLocked = false, updatedAt, messages }) {
+export async function registerMobileSession({ id, projectPath, projectless = false, title, summary, titleLocked = false, updatedAt, messages, runMode }) {
   if (!id || (!projectPath && !projectless) || String(id).startsWith('draft-') || String(id).startsWith('codex-')) {
     return null;
   }
@@ -95,6 +95,7 @@ export async function registerMobileSession({ id, projectPath, projectless = fal
     title: existing?.title || fallbackTitle(title, summary),
     titleLocked: Boolean(existing?.titleLocked || titleLocked),
     summary: summary || title || existing?.summary || 'CodexMobile 对话',
+    runMode: runMode === 'newWorktree' ? 'newWorktree' : (existing?.runMode || 'local'),
     updatedAt: now,
     source: existing?.source || 'codexmobile'
   };

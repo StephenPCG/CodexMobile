@@ -85,14 +85,78 @@ const staticService = createStaticService({
   generatedRoot: GENERATED_ROOT,
   httpsRootCaPath: HTTPS_ROOT_CA_PATH
 });
-const gitService = createGitService({ getProject });
-const workspaceService = createWorkspaceService({ getProject });
-const terminalService = createTerminalService({ getProject });
+const gitService = createGitService({ getProject, getTarget: getProjectSessionTarget });
+const workspaceService = createWorkspaceService({ getProject, getTarget: getProjectSessionTarget });
+const terminalService = createTerminalService({ getProject, getTarget: getProjectSessionTarget });
 const pushService = createPushService({
   statePath: PUSH_STATE,
   subject: PUSH_SUBJECT
 });
 let statusConfigFallback = null;
+
+function isSameOrChildPath(childPath, parentPath) {
+  const child = path.resolve(childPath || '');
+  const parent = path.resolve(parentPath || '');
+  if (!child || !parent) {
+    return false;
+  }
+  if (child === parent) {
+    return true;
+  }
+  const parentWithSep = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+  return child.startsWith(parentWithSep);
+}
+
+function isCodexWorktreePath(value) {
+  const resolved = path.resolve(String(value || ''));
+  return resolved.split(path.sep).includes('.codex') && resolved.split(path.sep).includes('worktrees');
+}
+
+function getProjectSessionTarget(projectId, { sessionId = '', cwd = '' } = {}) {
+  const project = getProject(projectId);
+  if (!project?.path) {
+    return null;
+  }
+  const sessionIdText = String(sessionId || '').trim();
+  const session = sessionIdText && !sessionIdText.startsWith('draft-') ? getSession(sessionIdText) : null;
+  const sessionPath = session?.projectId === project.id && session?.cwd ? session.cwd : '';
+  const requestedPath = String(cwd || '').trim();
+  const targetPath = requestedPath || sessionPath;
+  if (!targetPath) {
+    return project;
+  }
+  const resolvedTarget = path.resolve(targetPath);
+  const allowed =
+    isSameOrChildPath(resolvedTarget, project.path) ||
+    isCodexWorktreePath(resolvedTarget) ||
+    (sessionPath && path.resolve(sessionPath) === resolvedTarget);
+  if (!allowed) {
+    const error = new Error('Workspace target is outside the selected project/session');
+    error.statusCode = 403;
+    throw error;
+  }
+  return {
+    ...project,
+    path: resolvedTarget,
+    basePath: project.path,
+    sessionId: session?.id || sessionIdText || null,
+    runMode: session?.runMode || (isCodexWorktreePath(resolvedTarget) ? 'newWorktree' : 'local')
+  };
+}
+
+function requestTargetOptionsFromUrl(url) {
+  return {
+    sessionId: url.searchParams.get('sessionId') || '',
+    cwd: url.searchParams.get('cwd') || ''
+  };
+}
+
+function requestTargetOptionsFromBody(body = {}) {
+  return {
+    sessionId: body.sessionId || '',
+    cwd: body.cwd || ''
+  };
+}
 
 async function getStatusConfigFallback() {
   if (!statusConfigFallback) {
@@ -524,7 +588,7 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && pathname === '/api/git/status') {
     const projectId = url.searchParams.get('projectId');
     try {
-      sendJson(res, 200, { success: true, status: await gitService.status(projectId) });
+      sendJson(res, 200, { success: true, status: await gitService.status(projectId, requestTargetOptionsFromUrl(url)) });
     } catch (error) {
       console.warn(`[git] status failed project=${projectId || ''}: ${error.message}`);
       sendGitError(res, error, 'Failed to read Git status');
@@ -535,7 +599,7 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && pathname === '/api/git/diff') {
     const projectId = url.searchParams.get('projectId');
     try {
-      sendJson(res, 200, { success: true, diff: await gitService.diff(projectId) });
+      sendJson(res, 200, { success: true, diff: await gitService.diff(projectId, requestTargetOptionsFromUrl(url)) });
     } catch (error) {
       console.warn(`[git] diff failed project=${projectId || ''}: ${error.message}`);
       sendGitError(res, error, 'Failed to read Git diff');
@@ -546,7 +610,7 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && pathname === '/api/git/files') {
     const projectId = url.searchParams.get('projectId');
     try {
-      sendJson(res, 200, { success: true, status: await gitService.statusFiles(projectId) });
+      sendJson(res, 200, { success: true, status: await gitService.statusFiles(projectId, requestTargetOptionsFromUrl(url)) });
     } catch (error) {
       console.warn(`[git] files failed project=${projectId || ''}: ${error.message}`);
       sendGitError(res, error, 'Failed to read Git files');
@@ -559,7 +623,7 @@ async function handleApi(req, res, url) {
     const filePath = url.searchParams.get('path') || '';
     const staged = url.searchParams.get('staged') === 'true' || url.searchParams.get('staged') === '1';
     try {
-      sendJson(res, 200, { success: true, diff: await gitService.diffFile(projectId, filePath, { staged }) });
+      sendJson(res, 200, { success: true, diff: await gitService.diffFile(projectId, filePath, { staged, ...requestTargetOptionsFromUrl(url) }) });
     } catch (error) {
       console.warn(`[git] file diff failed project=${projectId || ''} path=${filePath}: ${error.message}`);
       sendGitError(res, error, 'Failed to read file diff');
@@ -570,7 +634,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/git/branch') {
     const body = await readBody(req);
     try {
-      const result = await gitService.createBranch(body.projectId, body.branchName);
+      const result = await gitService.createBranch(body.projectId, body.branchName, requestTargetOptionsFromBody(body));
       sendJson(res, 200, { success: true, ...result });
     } catch (error) {
       console.warn(`[git] branch failed project=${body.projectId || ''}: ${error.message}`);
@@ -582,7 +646,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/git/commit') {
     const body = await readBody(req);
     try {
-      const result = await gitService.commit(body.projectId, body.message);
+      const result = await gitService.commit(body.projectId, body.message, requestTargetOptionsFromBody(body));
       sendJson(res, 200, { success: true, ...result });
     } catch (error) {
       console.warn(`[git] commit failed project=${body.projectId || ''}: ${error.message}`);
@@ -596,7 +660,8 @@ async function handleApi(req, res, url) {
     try {
       const result = await gitService.push(body.projectId, {
         remote: body.remote,
-        branch: body.branch
+        branch: body.branch,
+        ...requestTargetOptionsFromBody(body)
       });
       sendJson(res, 200, { success: true, ...result });
     } catch (error) {
@@ -611,7 +676,8 @@ async function handleApi(req, res, url) {
     try {
       const result = await gitService.pull(body.projectId, {
         remote: body.remote,
-        branch: body.branch
+        branch: body.branch,
+        ...requestTargetOptionsFromBody(body)
       });
       sendJson(res, 200, { success: true, ...result });
     } catch (error) {
@@ -624,7 +690,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/git/sync') {
     const body = await readBody(req);
     try {
-      const result = await gitService.sync(body.projectId);
+      const result = await gitService.sync(body.projectId, requestTargetOptionsFromBody(body));
       sendJson(res, 200, { success: true, ...result });
     } catch (error) {
       console.warn(`[git] sync failed project=${body.projectId || ''}: ${error.message}`);
@@ -636,7 +702,7 @@ async function handleApi(req, res, url) {
   if (method === 'POST' && pathname === '/api/git/commit-push') {
     const body = await readBody(req);
     try {
-      const result = await gitService.commitPush(body.projectId, body.message);
+      const result = await gitService.commitPush(body.projectId, body.message, requestTargetOptionsFromBody(body));
       sendJson(res, 200, { success: true, ...result });
     } catch (error) {
       console.warn(`[git] commit-push failed project=${body.projectId || ''}: ${error.message}`);
@@ -847,12 +913,12 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'GET' && pathname === '/api/files/search') {
-    const project = getProject(url.searchParams.get('projectId') || '');
-    if (!project) {
-      sendJson(res, 404, { error: 'Project not found' });
-      return;
-    }
     try {
+      const project = getProjectSessionTarget(url.searchParams.get('projectId') || '', requestTargetOptionsFromUrl(url));
+      if (!project) {
+        sendJson(res, 404, { error: 'Project not found' });
+        return;
+      }
       const files = await searchProjectFiles(project, url.searchParams.get('q') || '');
       sendJson(res, 200, { files });
     } catch (error) {
@@ -865,7 +931,7 @@ async function handleApi(req, res, url) {
     const projectId = url.searchParams.get('projectId') || '';
     const requestedPath = url.searchParams.get('path') || '';
     try {
-      sendJson(res, 200, { success: true, directory: await workspaceService.listDirectory(projectId, requestedPath) });
+      sendJson(res, 200, { success: true, directory: await workspaceService.listDirectory(projectId, requestedPath, requestTargetOptionsFromUrl(url)) });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to list directory' });
     }
@@ -876,7 +942,7 @@ async function handleApi(req, res, url) {
     const projectId = url.searchParams.get('projectId') || '';
     const requestedPath = url.searchParams.get('path') || '';
     try {
-      sendJson(res, 200, { success: true, file: await workspaceService.readFile(projectId, requestedPath) });
+      sendJson(res, 200, { success: true, file: await workspaceService.readFile(projectId, requestedPath, requestTargetOptionsFromUrl(url)) });
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to read file' });
     }

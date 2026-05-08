@@ -246,13 +246,15 @@ export function truncateGitOutput(value = '', maxChars = MAX_DIFF_CHARS) {
   };
 }
 
-export function createGitService({ getProject, runner = runGit } = {}) {
+export function createGitService({ getProject, getTarget, runner = runGit } = {}) {
   if (typeof getProject !== 'function') {
     throw new Error('createGitService requires getProject');
   }
 
-  async function projectCwd(projectId) {
-    const project = getProject(projectId);
+  async function projectCwd(projectId, options = {}) {
+    const project = typeof getTarget === 'function'
+      ? getTarget(projectId, options)
+      : getProject(projectId);
     if (!project?.path) {
       throw serviceError('Project not found', 404);
     }
@@ -260,8 +262,8 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     return project.path;
   }
 
-  async function status(projectId) {
-    const cwd = await projectCwd(projectId);
+  async function status(projectId, options = {}) {
+    const cwd = await projectCwd(projectId, options);
     const result = await runner(cwd, ['status', '--short', '--branch']);
     const parsed = parseGitStatusShort(result.stdout);
     return {
@@ -270,18 +272,18 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     };
   }
 
-  async function createBranch(projectId, branchName) {
-    const cwd = await projectCwd(projectId);
+  async function createBranch(projectId, branchName, options = {}) {
+    const cwd = await projectCwd(projectId, options);
     const name = normalizeBranchName(branchName);
     await runner(cwd, ['switch', '-c', name]);
     return {
       branch: name,
-      status: await status(projectId)
+      status: await status(projectId, options)
     };
   }
 
-  async function diff(projectId) {
-    const cwd = await projectCwd(projectId);
+  async function diff(projectId, options = {}) {
+    const cwd = await projectCwd(projectId, options);
     const [summary, patch] = await Promise.all([
       runner(cwd, ['diff', 'HEAD', '--stat']),
       runner(cwd, ['diff', 'HEAD', '--'])
@@ -292,12 +294,12 @@ export function createGitService({ getProject, runner = runGit } = {}) {
       patch: truncated.text,
       truncated: truncated.truncated,
       originalLength: truncated.originalLength,
-      status: await status(projectId)
+      status: await status(projectId, options)
     };
   }
 
-  async function statusFiles(projectId) {
-    const cwd = await projectCwd(projectId);
+  async function statusFiles(projectId, options = {}) {
+    const cwd = await projectCwd(projectId, options);
     const [statusResult, stagedResult, unstagedResult] = await Promise.all([
       runner(cwd, ['status', '--short', '--branch']),
       runner(cwd, ['diff', '--cached', '--numstat']),
@@ -350,8 +352,8 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     };
   }
 
-  async function diffFile(projectId, filePath, { staged = false } = {}) {
-    const cwd = await projectCwd(projectId);
+  async function diffFile(projectId, filePath, { staged = false, ...options } = {}) {
+    const cwd = await projectCwd(projectId, options);
     const relativePath = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '').trim();
     if (!relativePath) {
       throw serviceError('File path is required', 400);
@@ -384,9 +386,9 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     };
   }
 
-  async function commit(projectId, message) {
-    const cwd = await projectCwd(projectId);
-    const before = await status(projectId);
+  async function commit(projectId, message, options = {}) {
+    const cwd = await projectCwd(projectId, options);
+    const before = await status(projectId, options);
     if (before.clean) {
       throw serviceError('没有可提交的改动', 409);
     }
@@ -398,13 +400,13 @@ export function createGitService({ getProject, runner = runGit } = {}) {
       message: commitMessage,
       hash,
       output: result.stdout.trim() || result.stderr.trim(),
-      status: await status(projectId)
+      status: await status(projectId, options)
     };
   }
 
-  async function push(projectId, { remote = 'origin', branch = null } = {}) {
-    const cwd = await projectCwd(projectId);
-    const current = await status(projectId);
+  async function push(projectId, { remote = 'origin', branch = null, ...options } = {}) {
+    const cwd = await projectCwd(projectId, options);
+    const current = await status(projectId, options);
     const targetBranch = String(branch || current.branch || '').trim();
     if (!targetBranch) {
       throw serviceError('当前不在有效分支上', 409);
@@ -417,12 +419,12 @@ export function createGitService({ getProject, runner = runGit } = {}) {
       remote,
       branch: targetBranch,
       output: result.stdout.trim() || result.stderr.trim(),
-      status: await status(projectId)
+      status: await status(projectId, options)
     };
   }
 
-  async function pull(projectId, { remote = null, branch = null } = {}) {
-    const cwd = await projectCwd(projectId);
+  async function pull(projectId, { remote = null, branch = null, ...options } = {}) {
+    const cwd = await projectCwd(projectId, options);
     const args = ['pull', '--ff-only'];
     if (remote && branch) {
       args.push(String(remote), String(branch));
@@ -430,16 +432,16 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     const result = await runner(cwd, args, { timeoutMs: 120_000 });
     return {
       output: result.stdout.trim() || result.stderr.trim(),
-      status: await status(projectId)
+      status: await status(projectId, options)
     };
   }
 
-  async function sync(projectId) {
-    const pulled = await pull(projectId);
+  async function sync(projectId, options = {}) {
+    const pulled = await pull(projectId, options);
     const afterPull = pulled.status;
     let pushed = null;
     if (afterPull.ahead > 0) {
-      pushed = await push(projectId);
+      pushed = await push(projectId, options);
     }
     return {
       pulled,
@@ -449,9 +451,9 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     };
   }
 
-  async function commitPush(projectId, message) {
-    const committed = await commit(projectId, message);
-    const pushed = await push(projectId);
+  async function commitPush(projectId, message, options = {}) {
+    const committed = await commit(projectId, message, options);
+    const pushed = await push(projectId, options);
     return {
       committed,
       pushed,

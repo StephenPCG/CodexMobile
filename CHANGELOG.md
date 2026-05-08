@@ -21,6 +21,9 @@ All notable changes to CodexMobile are tracked here.
 ### Changed
 
 - Updated the dev workflow so `npm run dev` starts both frontend and backend with hot reload.
+- Scoped Local/New worktree selection to new conversations while showing the active run mode for existing sessions.
+- Routed Changes, Directories, and Terminal views through the selected session working directory, including Codex worktrees.
+- Tightened composer controls with compact model, reasoning, permission, attachment, ASR, and send/stop actions.
 - Improved local Codex session grouping and status recovery when desktop bridge data is unavailable.
 - Kept completed task activity collapsed by default while preserving the full execution text when expanded.
 - Improved mobile activity rendering and reduced noisy lifecycle messages.
