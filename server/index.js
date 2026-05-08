@@ -49,7 +49,9 @@ import { searchProjectFiles } from './file-search.js';
 import { htmlEscape, readBody, sendHtml, sendJson } from './http-utils.js';
 import { createPushService } from './push-service.js';
 import { createStaticService } from './static-service.js';
+import { createTerminalService } from './terminal-service.js';
 import { readVoiceUpload, saveUpload } from './upload-service.js';
+import { createWorkspaceService } from './workspace-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -84,6 +86,8 @@ const staticService = createStaticService({
   httpsRootCaPath: HTTPS_ROOT_CA_PATH
 });
 const gitService = createGitService({ getProject });
+const workspaceService = createWorkspaceService({ getProject });
+const terminalService = createTerminalService({ getProject });
 const pushService = createPushService({
   statePath: PUSH_STATE,
   subject: PUSH_SUBJECT
@@ -403,7 +407,7 @@ async function refreshCodexCacheForSyncResponse() {
 async function publicStatus(authenticated) {
   const snapshot = getCacheSnapshot();
   const config = snapshot.config || await getStatusConfigFallback() || {};
-  const desktopBridge = await getDesktopBridgeStatus();
+  const desktopBridge = await getDesktopBridgeStatus({ probeHeadless: false, probeAppServer: false });
   const codexCli = await getCodexExecutableInfo();
   return {
     connected: true,
@@ -535,6 +539,30 @@ async function handleApi(req, res, url) {
     } catch (error) {
       console.warn(`[git] diff failed project=${projectId || ''}: ${error.message}`);
       sendGitError(res, error, 'Failed to read Git diff');
+    }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/git/files') {
+    const projectId = url.searchParams.get('projectId');
+    try {
+      sendJson(res, 200, { success: true, status: await gitService.statusFiles(projectId) });
+    } catch (error) {
+      console.warn(`[git] files failed project=${projectId || ''}: ${error.message}`);
+      sendGitError(res, error, 'Failed to read Git files');
+    }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/git/file-diff') {
+    const projectId = url.searchParams.get('projectId');
+    const filePath = url.searchParams.get('path') || '';
+    const staged = url.searchParams.get('staged') === 'true' || url.searchParams.get('staged') === '1';
+    try {
+      sendJson(res, 200, { success: true, diff: await gitService.diffFile(projectId, filePath, { staged }) });
+    } catch (error) {
+      console.warn(`[git] file diff failed project=${projectId || ''} path=${filePath}: ${error.message}`);
+      sendGitError(res, error, 'Failed to read file diff');
     }
     return;
   }
@@ -833,6 +861,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (method === 'GET' && pathname === '/api/workspace/directory') {
+    const projectId = url.searchParams.get('projectId') || '';
+    const requestedPath = url.searchParams.get('path') || '';
+    try {
+      sendJson(res, 200, { success: true, directory: await workspaceService.listDirectory(projectId, requestedPath) });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to list directory' });
+    }
+    return;
+  }
+
+  if (method === 'GET' && pathname === '/api/workspace/file') {
+    const projectId = url.searchParams.get('projectId') || '';
+    const requestedPath = url.searchParams.get('path') || '';
+    try {
+      sendJson(res, 200, { success: true, file: await workspaceService.readFile(projectId, requestedPath) });
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || 'Failed to read file' });
+    }
+    return;
+  }
+
   if (method === 'DELETE' && parts.length === 5 && parts[0] === 'api' && parts[1] === 'sessions' && parts[3] === 'messages') {
     const sessionId = decodeURIComponent(parts[2]);
     const messageId = decodeURIComponent(parts[4]);
@@ -989,7 +1039,13 @@ async function main() {
 
     wss.handleUpgrade(req, socket, head, async (ws) => {
       sockets.add(ws);
-      ws.on('close', () => sockets.delete(ws));
+      ws.on('message', (message) => {
+        terminalService.handleSocketMessage(ws, message);
+      });
+      ws.on('close', () => {
+        sockets.delete(ws);
+        terminalService.closeSocket(ws);
+      });
       ws.send(JSON.stringify({ type: 'connected', status: await publicStatus(true) }));
     });
   };

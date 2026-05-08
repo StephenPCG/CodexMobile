@@ -6,10 +6,9 @@ test('connectionRecoveryState maps connection states to recovery cards', () => {
   assert.equal(connectionRecoveryState({ authenticated: false }).state, 'pairing');
   assert.equal(connectionRecoveryState({ connectionState: 'connecting' }).state, 'reconnecting');
   assert.equal(connectionRecoveryState({ connectionState: 'disconnected' }).state, 'disconnected');
-  assert.equal(connectionRecoveryState({ syncing: true }).state, 'syncing');
 });
 
-test('connectionRecoveryState reports desktop bridge problems but stays quiet when healthy', () => {
+test('connectionRecoveryState stays quiet for background sync and desktop bridge state', () => {
   assert.deepEqual(
     connectionRecoveryState({
       connectionState: 'connected',
@@ -21,7 +20,8 @@ test('connectionRecoveryState reports desktop bridge problems but stays quiet wh
     connectionRecoveryState({
       connectionState: 'connected',
       desktopBridge: { mode: 'desktop-ipc', connected: false, reason: 'not open' }
-    }).state,
-    'desktop-unavailable'
+    }),
+    null
   );
+  assert.equal(connectionRecoveryState({ connectionState: 'connected', syncing: true }), null);
 });

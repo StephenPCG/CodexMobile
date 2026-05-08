@@ -6,6 +6,8 @@ All notable changes to CodexMobile are tracked here.
 
 ### Added
 
+- Added mobile workspace tools for Changes, Directories, file previews, and diff viewing.
+- Added a browser Terminal panel with multi-tab-safe backend terminal sessions.
 - Added a queue panel for running conversations: queued drafts can be viewed, restored, deleted, or sent immediately as steer input.
 - Added composer shortcuts with `/` commands for status, context compaction, code review, and sub-agent workflows.
 - Added `$skill` autocomplete backed by the existing skills list.
@@ -18,6 +20,8 @@ All notable changes to CodexMobile are tracked here.
 
 ### Changed
 
+- Updated the dev workflow so `npm run dev` starts both frontend and backend with hot reload.
+- Improved local Codex session grouping and status recovery when desktop bridge data is unavailable.
 - Kept completed task activity collapsed by default while preserving the full execution text when expanded.
 - Improved mobile activity rendering and reduced noisy lifecycle messages.
 - Rewrote README to describe CodexMobile as a local Codex mobile workbench rather than a thin upstream UI fork.

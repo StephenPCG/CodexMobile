@@ -606,7 +606,7 @@ export function createChatService({
   }
 
   async function assertDesktopBridgeAvailable() {
-    const bridge = getDesktopBridgeStatus ? await getDesktopBridgeStatus({ force: true }) : null;
+    const bridge = getDesktopBridgeStatus ? await getDesktopBridgeStatus({ force: true, probeHeadless: false, probeAppServer: false }) : null;
     if (bridge && !bridge.connected) {
       const error = new Error(bridge.reason || '桌面端 Codex 未连接，无法发送消息。');
       error.statusCode = 503;

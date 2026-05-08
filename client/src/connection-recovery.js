@@ -36,39 +36,5 @@ export function connectionRecoveryState({
     };
   }
 
-  if (syncing) {
-    return {
-      state: 'syncing',
-      title: '正在同步',
-      detail: '正在刷新桌面线程和本地缓存。',
-      primaryAction: 'status',
-      primaryLabel: '查看状态'
-    };
-  }
-
-  if (desktopBridge && desktopBridge.connected === false) {
-    return {
-      state: 'desktop-unavailable',
-      title: '桌面端未连接',
-      detail: desktopBridge.reason || '打开桌面端 Codex 后可以继续实时同步。',
-      primaryAction: 'sync',
-      primaryLabel: '刷新同步',
-      secondaryAction: 'status',
-      secondaryLabel: '查看状态'
-    };
-  }
-
-  if (desktopBridge?.mode === 'unavailable') {
-    return {
-      state: 'backend-unavailable',
-      title: '后台不可用',
-      detail: desktopBridge.reason || 'CodexMobile 后台可访问，但桌面桥接不可用。',
-      primaryAction: 'sync',
-      primaryLabel: '刷新同步',
-      secondaryAction: 'status',
-      secondaryLabel: '查看状态'
-    };
-  }
-
   return null;
 }

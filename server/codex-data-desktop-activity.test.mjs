@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
-import { messagesFromDesktopThread } from './codex-data.js';
+import { messagesFromDesktopThread, messagesFromLocalSessionFile } from './codex-data.js';
 
 test('messagesFromDesktopThread preserves running desktop file activity', () => {
   const messages = messagesFromDesktopThread({
@@ -59,4 +62,46 @@ test('messagesFromDesktopThread uses mobile labels for completed desktop command
   assert.equal(activityMessage.activities[0].kind, 'command_execution');
   assert.equal(activityMessage.activities[0].status, 'completed');
   assert.equal(activityMessage.activities[0].label, '本地任务已处理');
+});
+
+test('messagesFromLocalSessionFile exposes patch changes as a diff message after final answer', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codexmobile-session-'));
+  const filePath = path.join(dir, 'rollout.jsonl');
+  const cwd = path.join(dir, 'project');
+  await fs.mkdir(cwd);
+  await fs.writeFile(filePath, [
+    JSON.stringify({ timestamp: '2026-05-08T00:00:00.000Z', type: 'session_meta', payload: { id: 'session-1', cwd } }),
+    JSON.stringify({ timestamp: '2026-05-08T00:00:01.000Z', type: 'turn_context', payload: { turn_id: 'turn-1', cwd } }),
+    JSON.stringify({
+      timestamp: '2026-05-08T00:00:02.000Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '修一下' }] }
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-08T00:00:03.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'patch_apply_end',
+        turn_id: 'turn-1',
+        changes: {
+          [path.join(cwd, 'server/index.js')]: {
+            type: 'update',
+            unified_diff: '@@ -1 +1 @@\n-old\n+new\n'
+          }
+        }
+      }
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-08T00:00:04.000Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '改好了' }] }
+    })
+  ].join('\n'), 'utf8');
+
+  const messages = await messagesFromLocalSessionFile({ id: 'session-1', cwd, filePath });
+
+  assert.deepEqual(messages.map((message) => message.role), ['user', 'assistant', 'diff']);
+  assert.equal(messages[2].fileChanges[0].path, 'server/index.js');
+  assert.equal(messages[2].fileChanges[0].additions, 1);
+  assert.equal(messages[2].fileChanges[0].deletions, 1);
 });

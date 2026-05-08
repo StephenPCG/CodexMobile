@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -34,6 +36,108 @@ function gitError(error, fallback = 'Git 操作失败') {
   const wrapped = serviceError(message || fallback, 500);
   wrapped.cause = error;
   return wrapped;
+}
+
+function directoryName(filePath = '') {
+  const dir = path.posix.dirname(String(filePath || '').replace(/\\/g, '/'));
+  return dir === '.' ? '' : dir;
+}
+
+function fileName(filePath = '') {
+  return path.posix.basename(String(filePath || '').replace(/\\/g, '/')) || filePath || 'file';
+}
+
+function statusKind(value = '') {
+  const status = String(value || '').trim();
+  if (!status || status === '?') {
+    return 'modified';
+  }
+  if (status.includes('U') || status === 'AA' || status === 'DD' || status === 'AU' || status === 'UD' || status === 'DU') {
+    return 'conflicted';
+  }
+  if (status.includes('R')) {
+    return 'renamed';
+  }
+  if (status.includes('D')) {
+    return 'deleted';
+  }
+  if (status.includes('A')) {
+    return 'added';
+  }
+  return 'modified';
+}
+
+function normalizeNumstatPath(rawPath = '') {
+  const value = String(rawPath || '').trim().replace(/\\/g, '/');
+  if (!value.includes(' => ')) {
+    return value;
+  }
+  const braced = value.match(/^(.*)\{(.+)\s+=>\s+(.+)\}(.*)$/);
+  if (braced) {
+    return `${braced[1]}${braced[3]}${braced[4]}`.replace(/\/+/g, '/');
+  }
+  return value.split(' => ').pop().trim();
+}
+
+function parseNumstat(output = '') {
+  const stats = new Map();
+  for (const line of String(output || '').split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    const parts = line.split('\t');
+    if (parts.length < 3) {
+      continue;
+    }
+    const added = parts[0] === '-' ? 0 : Number(parts[0]) || 0;
+    const removed = parts[1] === '-' ? 0 : Number(parts[1]) || 0;
+    const filePath = normalizeNumstatPath(parts.slice(2).join('\t'));
+    stats.set(filePath, { added, removed });
+  }
+  return stats;
+}
+
+function toGitFileStatus(file, { staged, statusCode, stats }) {
+  const relativePath = String(file.path || '').replace(/\\/g, '/');
+  const lineStats = stats.get(relativePath) || { added: 0, removed: 0 };
+  return {
+    fileName: fileName(relativePath),
+    filePath: directoryName(relativePath),
+    fullPath: relativePath,
+    originalPath: file.originalPath,
+    rawStatus: file.raw,
+    status: statusKind(statusCode),
+    linesAdded: lineStats.added,
+    linesRemoved: lineStats.removed,
+    isStaged: Boolean(staged)
+  };
+}
+
+async function untrackedPatch(cwd, relativePath) {
+  const normalizedPath = String(relativePath || '').replace(/\\/g, '/');
+  const absolutePath = path.resolve(cwd, normalizedPath);
+  const relative = path.relative(cwd, absolutePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw serviceError('Invalid file path', 400);
+  }
+  const stat = await fs.stat(absolutePath);
+  if (!stat.isFile()) {
+    return '';
+  }
+  if (stat.size > MAX_DIFF_CHARS) {
+    return `diff --git a/${normalizedPath} b/${normalizedPath}\nnew file mode 100644\n--- /dev/null\n+++ b/${normalizedPath}\n@@ -0,0 +1 @@\n+[new file too large to preview: ${stat.size} bytes]`;
+  }
+  const content = await fs.readFile(absolutePath, 'utf8');
+  const lines = content.split(/\r?\n/);
+  const body = lines.map((line) => `+${line}`).join('\n');
+  return [
+    `diff --git a/${normalizedPath} b/${normalizedPath}`,
+    'new file mode 100644',
+    '--- /dev/null',
+    `+++ b/${normalizedPath}`,
+    `@@ -0,0 +1,${Math.max(1, lines.length)} @@`,
+    body
+  ].join('\n');
 }
 
 async function runGit(cwd, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
@@ -192,6 +296,94 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     };
   }
 
+  async function statusFiles(projectId) {
+    const cwd = await projectCwd(projectId);
+    const [statusResult, stagedResult, unstagedResult] = await Promise.all([
+      runner(cwd, ['status', '--short', '--branch']),
+      runner(cwd, ['diff', '--cached', '--numstat']),
+      runner(cwd, ['diff', '--numstat'])
+    ]);
+    const parsed = parseGitStatusShort(statusResult.stdout);
+    const stagedStats = parseNumstat(stagedResult.stdout);
+    const unstagedStats = parseNumstat(unstagedResult.stdout);
+    const stagedFiles = [];
+    const unstagedFiles = [];
+
+    for (const file of parsed.files) {
+      const raw = String(file.raw || '');
+      const indexStatus = raw.slice(0, 1);
+      const worktreeStatus = raw.slice(1, 2);
+      if (raw.startsWith('??')) {
+        unstagedFiles.push(toGitFileStatus(file, {
+          staged: false,
+          statusCode: '??',
+          stats: unstagedStats
+        }));
+        continue;
+      }
+      if (indexStatus && indexStatus !== ' ') {
+        stagedFiles.push(toGitFileStatus(file, {
+          staged: true,
+          statusCode: indexStatus,
+          stats: stagedStats
+        }));
+      }
+      if (worktreeStatus && worktreeStatus !== ' ') {
+        unstagedFiles.push(toGitFileStatus(file, {
+          staged: false,
+          statusCode: worktreeStatus,
+          stats: unstagedStats
+        }));
+      }
+    }
+
+    return {
+      branch: parsed.branch,
+      upstream: parsed.upstream,
+      ahead: parsed.ahead,
+      behind: parsed.behind,
+      clean: parsed.clean,
+      stagedFiles,
+      unstagedFiles,
+      totalStaged: stagedFiles.length,
+      totalUnstaged: unstagedFiles.length
+    };
+  }
+
+  async function diffFile(projectId, filePath, { staged = false } = {}) {
+    const cwd = await projectCwd(projectId);
+    const relativePath = String(filePath || '').replace(/\\/g, '/').replace(/^\/+/, '').trim();
+    if (!relativePath) {
+      throw serviceError('File path is required', 400);
+    }
+    if (!staged) {
+      const untracked = await runner(cwd, ['ls-files', '--others', '--exclude-standard', '--', relativePath]);
+      if (untracked.stdout.split(/\r?\n/).some((line) => line.trim() === relativePath)) {
+        const patch = await untrackedPatch(cwd, relativePath);
+        const truncated = truncateGitOutput(patch);
+        return {
+          path: relativePath,
+          staged: false,
+          patch: truncated.text,
+          truncated: truncated.truncated,
+          originalLength: truncated.originalLength
+        };
+      }
+    }
+    const args = staged
+      ? ['diff', '--cached', '--no-ext-diff', '--', relativePath]
+      : ['diff', '--no-ext-diff', '--', relativePath];
+    const result = await runner(cwd, args);
+    const truncated = truncateGitOutput(result.stdout);
+    return {
+      path: relativePath,
+      staged: Boolean(staged),
+      patch: truncated.text,
+      truncated: truncated.truncated,
+      originalLength: truncated.originalLength
+    };
+  }
+
   async function commit(projectId, message) {
     const cwd = await projectCwd(projectId);
     const before = await status(projectId);
@@ -270,5 +462,5 @@ export function createGitService({ getProject, runner = runGit } = {}) {
     };
   }
 
-  return { status, createBranch, diff, commit, push, pull, sync, commitPush };
+  return { status, statusFiles, createBranch, diff, diffFile, commit, push, pull, sync, commitPush };
 }

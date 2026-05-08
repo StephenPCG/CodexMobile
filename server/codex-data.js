@@ -9,7 +9,14 @@ import { imageMarkdownFromCodexImageGeneration } from './codex-native-images.js'
 import { statusLabel } from './codex-runner.js';
 import { promisify } from 'node:util';
 import { archiveDesktopThread, listDesktopThreads, readDesktopThread, setDesktopThreadName } from './codex-app-server.js';
-import { CODEX_HOME, CODEX_STATE_DB, readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
+import {
+  CODEX_HOME,
+  CODEX_SESSIONS_DIR,
+  CODEX_SESSION_INDEX,
+  CODEX_STATE_DB,
+  readCodexConfig,
+  readCodexWorkspaceState
+} from './codex-config.js';
 import {
   readMobileSessionIndex,
   renameMobileSession
@@ -23,10 +30,34 @@ const DESKTOP_IMAGE_ROOT = path.join(process.cwd(), '.codexmobile', 'desktop-ima
 const PROJECTLESS_PROJECT_ID = '__codexmobile_projectless__';
 const PROJECTLESS_PROJECT_NAME = '普通对话';
 const INCLUDE_MISSING_SUBAGENT_THREADS = process.env.CODEXMOBILE_INCLUDE_MISSING_SUBAGENT_THREADS === '1';
+const ENABLE_DESKTOP_THREAD_SYNC = process.env.CODEXMOBILE_DESKTOP_THREAD_SYNC === '1';
+const INCLUDE_LOCAL_SESSION_LOGS = process.env.CODEXMOBILE_INCLUDE_LOCAL_SESSION_LOGS === '1';
+const SHOW_PROJECTLESS_SESSIONS = process.env.CODEXMOBILE_SHOW_PROJECTLESS_SESSIONS === '1';
+const DESKTOP_THREAD_LIST_FAILURE_CACHE_MS = Math.max(
+  5000,
+  Number(process.env.CODEXMOBILE_DESKTOP_THREAD_LIST_FAILURE_CACHE_MS) || 60_000
+);
+const LOCAL_SESSION_CACHE_MS = Math.max(
+  1000,
+  Number(process.env.CODEXMOBILE_LOCAL_SESSION_CACHE_MS) || 10_000
+);
+const LOCAL_SESSION_SCAN_LIMIT = Math.max(
+  100,
+  Number(process.env.CODEXMOBILE_LOCAL_SESSION_SCAN_LIMIT) || 2500
+);
+const STALE_RUNNING_TURN_MS = Math.max(
+  60_000,
+  Number(process.env.CODEXMOBILE_STALE_RUNNING_TURN_MS) || 2 * 60 * 60 * 1000
+);
 const ROLLOUT_CONTEXT_READ_BYTES = Math.max(
   64 * 1024,
   Number(process.env.CODEXMOBILE_ROLLOUT_CONTEXT_READ_BYTES) || 1024 * 1024
 );
+let desktopThreadListFailure = null;
+let localThreadsCache = {
+  expiresAt: 0,
+  threads: []
+};
 let cache = {
   syncedAt: null,
   config: null,
@@ -474,6 +505,9 @@ function sourceToString(source) {
 }
 
 function isStaleProjectlessDesktopSession(thread, session) {
+  if (session?.projectless && !SHOW_PROJECTLESS_SESSIONS) {
+    return true;
+  }
   if (sourceToString(thread?.source) !== 'vscode' || !session?.projectless) {
     return false;
   }
@@ -595,6 +629,308 @@ async function sessionFromDesktopThread(
   };
 }
 
+function isoFromAnyTimestamp(value) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === 'number') {
+    const millis = value > 10_000_000_000 ? value : value * 1000;
+    const date = new Date(millis);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  const text = String(value || '').trim();
+  if (!text) {
+    return null;
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+async function readSessionIndexTitles() {
+  const entries = new Map();
+  let stream;
+  try {
+    stream = fsSync.createReadStream(CODEX_SESSION_INDEX, { encoding: 'utf8' });
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to read local session index:', error.message);
+    }
+    return entries;
+  }
+
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const entry = JSON.parse(line);
+        const id = String(entry?.id || '').trim();
+        if (!id) {
+          continue;
+        }
+        entries.set(id, {
+          title: String(entry.thread_name || entry.title || '').trim(),
+          updatedAt: isoFromAnyTimestamp(entry.updated_at || entry.updatedAt)
+        });
+      } catch {
+        // Ignore malformed JSONL rows.
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to scan local session index:', error.message);
+    }
+  }
+  return entries;
+}
+
+async function listLocalSessionFiles(root = CODEX_SESSIONS_DIR) {
+  const files = [];
+
+  async function walk(dir, depth = 0) {
+    if (files.length >= LOCAL_SESSION_SCAN_LIMIT || depth > 8) {
+      return;
+    }
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      if (depth === 0 && error.code !== 'ENOENT') {
+        console.warn('[sessions] Failed to scan local sessions:', error.message);
+      }
+      return;
+    }
+
+    for (const entry of entries) {
+      if (files.length >= LOCAL_SESSION_SCAN_LIMIT) {
+        return;
+      }
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath, depth + 1);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        files.push(entryPath);
+      }
+    }
+  }
+
+  await walk(root);
+  return files;
+}
+
+function textFromLocalMessageContent(content = []) {
+  return (Array.isArray(content) ? content : [])
+    .map((part) => {
+      if (!part || typeof part !== 'object') {
+        return '';
+      }
+      if (['input_text', 'output_text', 'text'].includes(part.type)) {
+        return part.text || '';
+      }
+      if (part.type === 'local_image' || part.type === 'localImage' || part.type === 'image') {
+        return markdownImageInput(part);
+      }
+      if (part.type === 'mention' || part.type === 'skill') {
+        return part.name || part.path || '';
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function isInternalLocalUserContent(content) {
+  const value = String(content || '').trim();
+  return (
+    value.startsWith('<environment_context>') ||
+    value.startsWith('<permissions instructions>') ||
+    value.startsWith('## Memory') ||
+    value.startsWith('<collaboration_mode>') ||
+    value.startsWith('<skills_instructions>')
+  );
+}
+
+async function localThreadFromFile(filePath, sessionIndexTitles = new Map()) {
+  const thread = {
+    id: '',
+    cwd: '',
+    path: filePath,
+    name: '',
+    preview: '',
+    messageCount: 0,
+    updatedAt: null,
+    model: null,
+    modelProvider: null,
+    source: 'jsonl'
+  };
+  let fallbackUpdatedAt = null;
+
+  try {
+    const stats = await fs.stat(filePath);
+    fallbackUpdatedAt = stats.mtime?.toISOString?.() || null;
+  } catch {
+    // The file can disappear while we scan; parsing will fail below if so.
+  }
+
+  try {
+    const stream = fsSync.createReadStream(filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of rl) {
+      if (!line.trim()) {
+        continue;
+      }
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const timestamp = isoFromAnyTimestamp(entry.timestamp);
+      if (timestamp) {
+        thread.updatedAt = timestamp;
+      }
+      const payload = entry?.payload || {};
+      if (entry.type === 'session_meta') {
+        thread.id = String(payload.id || thread.id || '').trim();
+        thread.cwd = String(payload.cwd || thread.cwd || '').trim();
+        thread.source = payload.source || thread.source;
+        thread.modelProvider = payload.model_provider || payload.modelProvider || thread.modelProvider;
+        thread.updatedAt = thread.updatedAt || isoFromAnyTimestamp(payload.timestamp);
+        continue;
+      }
+      if (entry.type === 'turn_context') {
+        thread.cwd = String(payload.cwd || thread.cwd || '').trim();
+        thread.model = payload.model || thread.model;
+        continue;
+      }
+      if (entry.type !== 'response_item' || payload.type !== 'message') {
+        continue;
+      }
+      if (!['user', 'assistant'].includes(payload.role)) {
+        continue;
+      }
+      if (payload.role === 'assistant' && payload.phase === 'commentary') {
+        continue;
+      }
+      let text = textFromLocalMessageContent(payload.content);
+      if (payload.role === 'user') {
+        if (isInternalLocalUserContent(text)) {
+          continue;
+        }
+        text = sanitizeVisibleUserMessage(text);
+        if (text && !thread.preview) {
+          thread.preview = text;
+        }
+      }
+      if (text) {
+        thread.messageCount += 1;
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to read local session log:', filePath, error.message);
+    }
+    return null;
+  }
+
+  if (!thread.id) {
+    return null;
+  }
+  const indexEntry = sessionIndexTitles.get(thread.id) || {};
+  thread.name = String(indexEntry.title || '').trim();
+  thread.updatedAt = indexEntry.updatedAt || thread.updatedAt || fallbackUpdatedAt;
+  return thread;
+}
+
+async function listLocalThreadsFromJsonl(sessionIndexTitles = new Map()) {
+  const now = Date.now();
+  if (localThreadsCache.expiresAt > now) {
+    return localThreadsCache.threads;
+  }
+  const files = await listLocalSessionFiles();
+  const threads = [];
+  for (const filePath of files) {
+    const thread = await localThreadFromFile(filePath, sessionIndexTitles);
+    if (thread) {
+      threads.push(thread);
+    }
+  }
+  threads.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  localThreadsCache = {
+    expiresAt: now + LOCAL_SESSION_CACHE_MS,
+    threads
+  };
+  return threads;
+}
+
+async function sessionFromLocalThread(
+  thread,
+  mobileSessionIndex,
+  projectlessThreadIds,
+  projectlessWorkdir,
+  visibleProjectIds,
+  configContext = {},
+  spawnEdge = null,
+  projectLookupContext = null
+) {
+  if (!thread?.id) {
+    return null;
+  }
+  const mobileSession = mobileSessionIndex.get(thread.id);
+  const hasCwd = typeof thread.cwd === 'string' && thread.cwd.trim();
+  const projectlessRegistered = projectlessThreadIds.has(thread.id);
+  const explicitProjectless = !hasCwd && (projectlessRegistered || Boolean(mobileSession?.projectless));
+  const cwd = thread.cwd || mobileSession?.projectPath || (explicitProjectless ? projectlessWorkdir : '');
+  if (!cwd && !explicitProjectless) {
+    return null;
+  }
+  const resolvedCwd = path.resolve(cwd || projectlessWorkdir);
+  const project = projectLookupContext && !explicitProjectless
+    ? await projectForSessionPath(resolvedCwd, projectLookupContext)
+    : null;
+  const projectId = project?.id || projectIdFor(resolvedCwd);
+  const projectless =
+    explicitProjectless ||
+    isDocumentsCodexConversationPath(resolvedCwd) ||
+    (!project && !visibleProjectIds.has(projectId));
+  const preview = sanitizeVisibleUserMessage(thread.preview || mobileSession?.summary || '');
+  const mobileTitle = String(mobileSession?.title || '').trim();
+  const mobileTitleCandidate = mobileTitle && mobileTitle !== '新对话' ? mobileTitle : '';
+  const threadTitle = ['新对话', 'Untitled', 'New chat'].includes(String(thread.name || '').trim())
+    ? ''
+    : String(thread.name || '').trim();
+  const title = String(threadTitle || mobileTitleCandidate || preview.slice(0, 52) || mobileTitle || '新对话').trim();
+  const contextState = await readRolloutContextState(thread.path, thread.id);
+  const subAgentMeta = subAgentMetaFromThread(thread, spawnEdge);
+  return {
+    id: thread.id,
+    cwd: resolvedCwd,
+    projectId: projectless ? PROJECTLESS_PROJECT_ID : projectId,
+    title,
+    titleLocked: Boolean(mobileSession?.titleLocked),
+    titleAutoGenerated: mobileSession ? (mobileSession.titleLocked ? null : 'stored') : null,
+    summary: preview || mobileSession?.summary || title || 'Codex 会话',
+    model: mobileSession?.model || thread.model || null,
+    provider: thread.modelProvider || mobileSession?.provider || null,
+    messageCount: Number(thread.messageCount) || 0,
+    updatedAt: thread.updatedAt || mobileSession?.updatedAt || null,
+    source: sourceToString(thread.source),
+    parentSessionId: subAgentMeta.parentSessionId,
+    isSubAgent: Boolean(subAgentMeta.parentSessionId || subAgentMeta.subAgent),
+    subAgent: subAgentMeta.subAgent,
+    projectless,
+    projectlessRegistered,
+    mobileSessionKnown: Boolean(mobileSession),
+    filePath: thread.path || null,
+    mobileOnly: true,
+    localOnly: true,
+    context: publicContextState(contextState, configContext)
+  };
+}
+
 function addSessionToMaps(session, projectById, sessionsByProject, sessionById) {
   const project = projectById.get(session.projectId);
   if (!project) {
@@ -676,6 +1012,31 @@ function upsertProject(projectMap, projectPath, trustLevel = null, label = null)
   return entry;
 }
 
+async function listDesktopThreadsForRefresh() {
+  if (!ENABLE_DESKTOP_THREAD_SYNC) {
+    return { threads: [], error: null, skipped: true };
+  }
+  const now = Date.now();
+  if (desktopThreadListFailure?.retryAt > now) {
+    const error = new Error(desktopThreadListFailure.message || 'Desktop thread list unavailable');
+    error.cached = true;
+    return { threads: [], error };
+  }
+
+  try {
+    const threads = await listDesktopThreads({ limit: 1000 });
+    desktopThreadListFailure = null;
+    return { threads, error: null };
+  } catch (error) {
+    desktopThreadListFailure = {
+      retryAt: now + DESKTOP_THREAD_LIST_FAILURE_CACHE_MS,
+      message: error.message || 'Desktop thread list unavailable'
+    };
+    console.warn('[sessions] Desktop thread list unavailable; using local session logs for now:', desktopThreadListFailure.message);
+    return { threads: [], error };
+  }
+}
+
 export async function refreshCodexCache() {
   const config = await readCodexConfig();
   const workspaceState = await readCodexWorkspaceState();
@@ -699,7 +1060,7 @@ export async function refreshCodexCache() {
   const visibleProjectIds = new Set();
   const projectlessThreadIds = new Set(workspaceState.projectlessThreadIds || []);
   const projectlessWorkdir = projectlessWorkingDirectory(workspaceState);
-  const hasProjectlessSessions = projectlessThreadIds.size > 0;
+  const hasProjectlessSessions = SHOW_PROJECTLESS_SESSIONS && projectlessThreadIds.size > 0;
   const spawnEdges = INCLUDE_MISSING_SUBAGENT_THREADS ? await readThreadSpawnEdges() : [];
   const spawnEdgeByChildId = new Map(spawnEdges.map((edge) => [edge.childSessionId, edge]));
 
@@ -719,7 +1080,7 @@ export async function refreshCodexCache() {
     visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
   }
 
-  const desktopThreads = await listDesktopThreads({ limit: 1000 });
+  const { threads: desktopThreads, error: desktopListError, skipped: desktopListSkipped } = await listDesktopThreadsForRefresh();
   for (const thread of desktopThreads) {
     if (isArchivedOrDeletedDesktopThread(thread)) {
       continue;
@@ -740,6 +1101,9 @@ export async function refreshCodexCache() {
     if (!session || hiddenSessionIds.has(session.id)) {
       continue;
     }
+    if (session.projectless && !SHOW_PROJECTLESS_SESSIONS) {
+      continue;
+    }
     if (session.projectless) {
       upsertProjectlessProject(projectById, workspaceState);
       visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
@@ -747,6 +1111,39 @@ export async function refreshCodexCache() {
       continue;
     }
     addSessionToMaps(session, projectById, sessionsByProject, sessionById);
+  }
+
+  if (desktopListSkipped || desktopListError || INCLUDE_LOCAL_SESSION_LOGS) {
+    const sessionIndexTitles = await readSessionIndexTitles();
+    const localThreads = await listLocalThreadsFromJsonl(sessionIndexTitles);
+    for (const thread of localThreads) {
+      if (sessionById.has(thread.id) || hiddenSessionIds.has(thread.id)) {
+        continue;
+      }
+      const session = await sessionFromLocalThread(
+        thread,
+        mobileSessionIndex,
+        projectlessThreadIds,
+        projectlessWorkdir,
+        visibleProjectIds,
+        config.context || {},
+        spawnEdgeByChildId.get(thread.id) || null,
+        projectLookupContext
+      );
+      if (!session || hiddenSessionIds.has(session.id)) {
+        continue;
+      }
+      if (session.projectless && !SHOW_PROJECTLESS_SESSIONS) {
+        continue;
+      }
+      if (session.projectless) {
+        upsertProjectlessProject(projectById, workspaceState);
+        visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
+      } else if (!visibleProjectIds.has(session.projectId)) {
+        continue;
+      }
+      addSessionToMaps(session, projectById, sessionsByProject, sessionById);
+    }
   }
 
   for (const edge of spawnEdges) {
@@ -793,6 +1190,9 @@ export async function refreshCodexCache() {
         continue;
       }
       if (!childSession || hiddenSessionIds.has(childSession.id)) {
+        continue;
+      }
+      if (childSession.projectless && !SHOW_PROJECTLESS_SESSIONS) {
         continue;
       }
       if (childSession.projectless) {
@@ -1238,7 +1638,11 @@ function desktopTurnRuntimeStatus(turn, { isLatestTurn = false } = {}) {
   if (['completed', 'success', 'succeeded'].includes(value)) {
     return 'completed';
   }
-  if (value === 'interrupted' && !turn?.completedAt && isLatestTurn && !hasFinalDesktopAssistantMessage(turn)) {
+  const startedAtMs = Number(turn?.startedAt) > 0
+    ? Number(turn.startedAt) * 1000
+    : new Date(turn?.startedAt || 0).getTime();
+  const isFresh = Number.isFinite(startedAtMs) && Date.now() - startedAtMs < STALE_RUNNING_TURN_MS;
+  if (value === 'interrupted' && !turn?.completedAt && isLatestTurn && isFresh && !hasFinalDesktopAssistantMessage(turn)) {
     return 'running';
   }
   if (['failed', 'error', 'cancelled', 'canceled', 'interrupted', 'aborted'].includes(value)) {
@@ -1642,29 +2046,180 @@ export function messagesFromDesktopThread(thread, { includeActivity = false } = 
   return messages;
 }
 
+export async function messagesFromLocalSessionFile(session, { includeActivity = false } = {}) {
+  const messages = [];
+  let currentTurnId = null;
+  let localMessageIndex = 0;
+  const pendingDiffMessages = new Map();
+
+  if (!session?.filePath) {
+    return messages;
+  }
+
+  function diffMessageTimestamp(timestamp) {
+    const base = new Date(timestamp || new Date().toISOString()).getTime();
+    return new Date((Number.isFinite(base) ? base : Date.now()) + 1).toISOString();
+  }
+
+  function upsertPendingDiffMessage(turnId, fileChanges, timestamp) {
+    if (!fileChanges.length) {
+      return;
+    }
+    const id = `diff-${turnId || session.id}`;
+    const previous = pendingDiffMessages.get(id);
+    pendingDiffMessages.set(id, {
+      id,
+      role: 'diff',
+      content: '',
+      turnId: turnId || null,
+      sessionId: session.id,
+      fileChanges: mergeFileChanges(previous?.fileChanges || [], fileChanges),
+      timestamp: previous?.timestamp || diffMessageTimestamp(timestamp)
+    });
+  }
+
+  function flushPendingDiffMessage(turnId, timestamp) {
+    const id = `diff-${turnId || session.id}`;
+    const diffMessage = pendingDiffMessages.get(id);
+    if (!diffMessage) {
+      return;
+    }
+    pendingDiffMessages.delete(id);
+    messages.push({
+      ...diffMessage,
+      timestamp: diffMessageTimestamp(timestamp || diffMessage.timestamp)
+    });
+  }
+
+  try {
+    const stream = fsSync.createReadStream(session.filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of rl) {
+      if (!line.trim()) {
+        continue;
+      }
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = entry?.payload || {};
+      if (entry.type === 'turn_context' && payload.turn_id) {
+        currentTurnId = payload.turn_id;
+        continue;
+      }
+      if (entry.type === 'event_msg') {
+        if (payload.turn_id) {
+          currentTurnId = payload.turn_id;
+        }
+        if (payload.type === 'patch_apply_end') {
+          const fileChanges = fileChangesFromItem({ changes: payload.changes }, { cwd: session.cwd || '' });
+          upsertPendingDiffMessage(payload.turn_id || currentTurnId, fileChanges, entry.timestamp);
+        }
+        continue;
+      }
+      if (entry.type !== 'response_item' || payload.type !== 'message') {
+        continue;
+      }
+      if (!['user', 'assistant'].includes(payload.role)) {
+        continue;
+      }
+      if (payload.role === 'assistant' && payload.phase === 'commentary') {
+        continue;
+      }
+      let content = textFromLocalMessageContent(payload.content);
+      if (!content) {
+        continue;
+      }
+      if (payload.role === 'user') {
+        if (isInternalLocalUserContent(content)) {
+          continue;
+        }
+        content = sanitizeVisibleUserMessage(content);
+      }
+      if (!content) {
+        continue;
+      }
+      localMessageIndex += 1;
+      messages.push({
+        id: payload.id || `${session.id}-local-${localMessageIndex}`,
+        role: payload.role,
+        content,
+        timestamp: isoFromAnyTimestamp(entry.timestamp) || session.updatedAt || new Date().toISOString(),
+        turnId: payload.turn_id || currentTurnId || `${session.id}-local`,
+        sessionId: session.id
+      });
+      if (payload.role === 'assistant') {
+        flushPendingDiffMessage(payload.turn_id || currentTurnId, entry.timestamp);
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn('[sessions] Failed to read local session messages:', session.filePath, error.message);
+    }
+  }
+
+  for (const diffMessage of pendingDiffMessages.values()) {
+    messages.push(diffMessage);
+  }
+
+  return messages;
+}
+
 export async function readSessionMessages(sessionId, { limit = 120, offset = null, latest = true, includeActivity = false } = {}) {
   const deletedIds = await readDeletedMessageIds(sessionId);
+  const session = getSession(sessionId);
 
-  const response = await readDesktopThread(sessionId, { includeTurns: true });
+  let response = null;
+  let desktopReadError = null;
+  if (!session?.mobileOnly) {
+    try {
+      response = await readDesktopThread(sessionId, { includeTurns: true });
+    } catch (error) {
+      desktopReadError = error;
+      if (!session?.filePath) {
+        throw error;
+      }
+      console.warn('[sessions] Desktop thread read unavailable, using local session log:', error.message);
+    }
+  }
+
+  if (response?.thread) {
+    const messages = messagesFromDesktopThread(response.thread, { includeActivity });
+    if (includeActivity) {
+      const collabActivities = await readDesktopCollabActivities(response.thread.path);
+      for (const item of collabActivities) {
+        upsertDesktopActivity(messages, item.turnId, item.activity);
+      }
+    }
+    messages.sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+    const contextState = await readRolloutContextState(response.thread.path, sessionId);
+
+    return {
+      ...paginateMessages(filterDeletedMessages(messages, deletedIds), { limit, offset, latest }),
+      context: publicContextState(contextState, cache.config?.context || {})
+    };
+  }
+
+  if (session?.filePath) {
+    const messages = await messagesFromLocalSessionFile(session, { includeActivity });
+    messages.sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+    const contextState = await readRolloutContextState(session.filePath, sessionId);
+    return {
+      ...paginateMessages(filterDeletedMessages(messages, deletedIds), { limit, offset, latest }),
+      context: publicContextState(contextState, cache.config?.context || {})
+    };
+  }
+
+  if (desktopReadError) {
+    throw desktopReadError;
+  }
   if (!response?.thread) {
     const error = new Error('Desktop thread not found');
     error.statusCode = 404;
     throw error;
   }
-  const messages = messagesFromDesktopThread(response.thread, { includeActivity });
-  if (includeActivity) {
-    const collabActivities = await readDesktopCollabActivities(response.thread.path);
-    for (const item of collabActivities) {
-      upsertDesktopActivity(messages, item.turnId, item.activity);
-    }
-  }
-  messages.sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
-  const contextState = await readRolloutContextState(response.thread.path, sessionId);
-
-  return {
-    ...paginateMessages(filterDeletedMessages(messages, deletedIds), { limit, offset, latest }),
-    context: publicContextState(contextState, cache.config?.context || {})
-  };
 }
 
 export function getHostName() {

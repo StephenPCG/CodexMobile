@@ -7,11 +7,18 @@ import { resolveCodexExecutable } from './codex-executable.js';
 import { broadcastDesktopThreadArchived, probeDesktopIpc } from './desktop-ipc-client.js';
 
 const DEFAULT_CODEX_APP_BINARY = '/Applications/Codex.app/Contents/Resources/codex';
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = positiveTimeout(process.env.CODEXMOBILE_APP_SERVER_REQUEST_TIMEOUT_MS, 30_000);
+const DEFAULT_INITIALIZE_TIMEOUT_MS = positiveTimeout(process.env.CODEXMOBILE_APP_SERVER_INITIALIZE_TIMEOUT_MS, 5_000);
 const DEFAULT_CONTROL_SOCKET = path.join(os.homedir(), '.codex', 'app-server-control', 'app-server-control.sock');
 const BRIDGE_STATUS_CACHE_MS = 2500;
+const BRIDGE_FAILURE_STATUS_CACHE_MS = positiveTimeout(process.env.CODEXMOBILE_BRIDGE_FAILURE_STATUS_CACHE_MS, 30_000);
 
 let bridgeStatusCache = null;
+
+function positiveTimeout(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.max(1000, number) : fallback;
+}
 
 function resolveCodexBinary() {
   try {
@@ -202,6 +209,9 @@ export class CodexAppServerClient {
         this.stderr = this.stderr.slice(-12_000);
       }
     });
+    this.child.stdin.on('error', (error) => {
+      this.rejectAll(error);
+    });
 
     this.child.on('error', (error) => {
       this.rejectAll(error);
@@ -221,7 +231,7 @@ export class CodexAppServerClient {
     await this.request('initialize', {
       clientInfo: this.clientInfo,
       capabilities: { experimentalApi: true }
-    });
+    }, { timeoutMs: DEFAULT_INITIALIZE_TIMEOUT_MS });
     this.notify('initialized');
     return this;
   }
@@ -345,13 +355,19 @@ function isArchivedOrDeletedDesktopThread(thread = null) {
 
 export async function createCodexAppServerClient(options = {}) {
   const client = new CodexAppServerClient(options);
-  await client.initialize();
-  return client;
+  try {
+    await client.initialize();
+    return client;
+  } catch (error) {
+    client.close();
+    throw error;
+  }
 }
 
-export async function getDesktopBridgeStatus({ force = false } = {}) {
+export async function getDesktopBridgeStatus({ force = false, probeHeadless = true, probeAppServer = true } = {}) {
   const now = Date.now();
-  if (!force && bridgeStatusCache && now - bridgeStatusCache.checkedAt < BRIDGE_STATUS_CACHE_MS) {
+  const cacheMs = bridgeStatusCache?.status?.connected ? BRIDGE_STATUS_CACHE_MS : BRIDGE_FAILURE_STATUS_CACHE_MS;
+  if (!force && bridgeStatusCache && now - bridgeStatusCache.checkedAt < cacheMs) {
     return bridgeStatusCache.status;
   }
   const transport = resolveAppServerTransport(process.env, { allowHeadlessLocal: true });
@@ -397,6 +413,39 @@ export async function getDesktopBridgeStatus({ force = false } = {}) {
   if (transport.mode === 'unavailable') {
     bridgeStatusCache = { checkedAt: now, status: base };
     return base;
+  }
+  if (!probeAppServer) {
+    const isHeadless = transport.mode === 'headless-local';
+    const status = {
+      ...base,
+      connected: isHeadless,
+      reason: isHeadless ? transport.reason : '桌面端桥接未验证',
+      capabilities: {
+        read: false,
+        sendToOpenDesktopThread: false,
+        createThread: isHeadless,
+        headless: isHeadless,
+        backgroundCodex: isHeadless
+      }
+    };
+    bridgeStatusCache = { checkedAt: now, status };
+    return status;
+  }
+  if (transport.mode === 'headless-local' && !probeHeadless) {
+    const status = {
+      ...base,
+      connected: true,
+      reason: transport.reason,
+      capabilities: {
+        read: false,
+        sendToOpenDesktopThread: false,
+        createThread: true,
+        headless: true,
+        backgroundCodex: true
+      }
+    };
+    bridgeStatusCache = { checkedAt: now, status };
+    return status;
   }
 
   const client = new CodexAppServerClient({

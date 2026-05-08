@@ -22,9 +22,15 @@ const env = normalizeEnv({
   CODEXMOBILE_API_PORT: backendPort,
   CODEXMOBILE_CLIENT_PORT: clientPort
 });
+const serverWatchArgs = [
+  '--watch-path=server',
+  fs.existsSync(path.join(root, 'shared')) ? '--watch-path=shared' : '',
+  '--watch-preserve-output',
+  'server/index.js'
+].filter(Boolean);
 
 const children = [
-  startProcess('server', process.execPath, ['--watch', 'server/index.js'], env),
+  startProcess('server', process.execPath, serverWatchArgs, env),
   startProcess('client', process.execPath, [
     viteBin,
     '--host',

@@ -157,6 +157,7 @@ const REALTIME_VOICE_BUFFER_SIZE = 2048;
 const REALTIME_VOICE_MIN_TURN_MS = 500;
 const REALTIME_VOICE_BARGE_IN_LEVEL_THRESHOLD = 0.026;
 const REALTIME_VOICE_BARGE_IN_SUSTAIN_MS = 180;
+const STALE_ACTIVITY_STATUS_MS = 2 * 60 * 60 * 1000;
 
 const RUN_MODE_OPTIONS = [
   { value: 'local', label: 'Local', shortLabel: 'Local' },
@@ -726,6 +727,10 @@ function buildComposerRunStatus(messages, running, now = Date.now()) {
   const activeStep = [...visibleSteps].reverse().find((step) => step.status === 'running' || step.status === 'queued') || null;
   const latestStep = activeStep || visibleSteps[visibleSteps.length - 1] || null;
   const startedAt = activity?.startedAt || activity?.timestamp || now;
+  const startedAtMs = new Date(startedAt).getTime();
+  if (!running && Number.isFinite(startedAtMs) && now - startedAtMs > STALE_ACTIVITY_STATUS_MS) {
+    return null;
+  }
   const duration = formatDuration(startedAt, now);
   let label = '正在思考';
 
@@ -1748,7 +1753,7 @@ function Drawer({
                     <button
                       type="button"
                       className="thread-main"
-                      onClick={() => onSelectSession(session)}
+                      onClick={() => onSelectSession(project, session)}
                     >
                       <span className="thread-title-line">
                         <span>{session.title || '对话'}</span>
@@ -1995,6 +2000,8 @@ function TopBar({
   connectionState,
   desktopBridge,
   onMenu,
+  onOpenWorkspace,
+  onOpenTerminal,
   onOpenDocs,
   onGitAction,
   notificationSupported,
@@ -2072,6 +2079,26 @@ function TopBar({
         </span>
       </div>
       <div className="top-actions">
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => onOpenWorkspace?.('changes')}
+          disabled={!selectedProject}
+          aria-label="打开文件和变更"
+          title="Files"
+        >
+          <Folder size={21} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={onOpenTerminal}
+          disabled={!selectedProject}
+          aria-label="打开 Terminal"
+          title="Terminal"
+        >
+          <Terminal size={21} />
+        </button>
         <div className="top-menu-wrap" ref={menuRef}>
           <button
             type="button"
@@ -2671,6 +2698,592 @@ function GitPanel({ open, action, project, onClose, onToast }) {
           <button type="button" onClick={onClose}>关闭</button>
         </div>
       </div>
+    </section>
+  );
+}
+
+function changeStatusLabel(status) {
+  const value = String(status || '');
+  if (value === 'added') return 'A';
+  if (value === 'deleted') return 'D';
+  if (value === 'renamed') return 'R';
+  if (value === 'untracked') return '?';
+  if (value === 'conflicted') return 'U';
+  return 'M';
+}
+
+function workspaceFileIcon(type, name = '') {
+  if (type === 'directory') {
+    return <Folder size={22} />;
+  }
+  return <FileText size={21} />;
+}
+
+function WorkspaceFileRow({ file, staged, onOpen }) {
+  const pathLabel = file.filePath || file.path?.split('/').slice(0, -1).join('/') || 'project root';
+  const fullPath = file.fullPath || file.relativePath || file.path || '';
+  const fileNameValue = file.fileName || file.name || fullPath.split('/').pop() || fullPath;
+  const added = Number(file.linesAdded || 0);
+  const removed = Number(file.linesRemoved || 0);
+  return (
+    <button type="button" className="workspace-file-row" onClick={() => onOpen(fullPath, staged)}>
+      <span className="workspace-file-icon">{workspaceFileIcon(file.type, fileNameValue)}</span>
+      <span className="workspace-file-main">
+        <strong>{fileNameValue}</strong>
+        <small>{pathLabel}</small>
+      </span>
+      <span className="workspace-file-stats">
+        {added ? <em className="diff-add">+{added}</em> : null}
+        {removed ? <em className="diff-del">-{removed}</em> : null}
+      </span>
+      {file.status ? <span className={`workspace-status-badge is-${file.status}`}>{changeStatusLabel(file.status)}</span> : null}
+    </button>
+  );
+}
+
+function WorkspaceDirectoryNode({ projectId, pathValue, label, depth, expanded, onToggle, onOpenFile }) {
+  const [state, setState] = useState({ loading: false, error: '', entries: [] });
+  const isExpanded = expanded.has(pathValue);
+
+  useEffect(() => {
+    if (!isExpanded || !projectId) {
+      return undefined;
+    }
+    let cancelled = false;
+    setState((current) => ({ ...current, loading: true, error: '' }));
+    apiFetch(`/api/workspace/directory?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(pathValue)}`)
+      .then((result) => {
+        if (!cancelled) {
+          setState({ loading: false, error: '', entries: Array.isArray(result.directory?.entries) ? result.directory.entries : [] });
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setState({ loading: false, error: error.message || '读取目录失败', entries: [] });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isExpanded, projectId, pathValue]);
+
+  const childDepth = depth + 1;
+  const indent = 12 + depth * 14;
+  const childIndent = 12 + childDepth * 14;
+
+  return (
+    <div className="workspace-dir-node">
+      <button
+        type="button"
+        className="workspace-dir-row"
+        style={{ paddingLeft: indent }}
+        onClick={() => onToggle(pathValue)}
+        aria-expanded={isExpanded}
+      >
+        <ChevronRight size={16} />
+        <Folder size={22} />
+        <span>{label}</span>
+      </button>
+      {isExpanded ? (
+        state.loading ? (
+          <div className="workspace-empty" style={{ paddingLeft: childIndent }}>正在读取目录...</div>
+        ) : state.error ? (
+          <div className="workspace-error-inline" style={{ paddingLeft: childIndent }}>{state.error}</div>
+        ) : state.entries.length ? (
+          <div>
+            {state.entries.map((entry) => entry.type === 'directory' ? (
+              <WorkspaceDirectoryNode
+                key={entry.path}
+                projectId={projectId}
+                pathValue={entry.path}
+                label={entry.name}
+                depth={childDepth}
+                expanded={expanded}
+                onToggle={onToggle}
+                onOpenFile={onOpenFile}
+              />
+            ) : (
+              <button
+                key={entry.path}
+                type="button"
+                className="workspace-dir-row is-file"
+                style={{ paddingLeft: childIndent }}
+                onClick={() => onOpenFile(entry.path)}
+              >
+                <span className="workspace-dir-spacer" />
+                <FileText size={21} />
+                <span>{entry.name}</span>
+                {entry.size !== null ? <small>{formatBytes(entry.size)}</small> : null}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="workspace-empty" style={{ paddingLeft: childIndent }}>空目录</div>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+function WorkspaceDirectoryTree({ project, onOpenFile }) {
+  const [expanded, setExpanded] = useState(() => new Set(['']));
+  const rootLabel = project?.name || compactPath(project?.path || '') || 'project';
+  const toggle = useCallback((pathValue) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(pathValue)) {
+        next.delete(pathValue);
+      } else {
+        next.add(pathValue);
+      }
+      return next;
+    });
+  }, []);
+
+  return (
+    <div className="workspace-directory-tree">
+      <WorkspaceDirectoryNode
+        projectId={project?.id || ''}
+        pathValue=""
+        label={rootLabel}
+        depth={0}
+        expanded={expanded}
+        onToggle={toggle}
+        onOpenFile={onOpenFile}
+      />
+    </div>
+  );
+}
+
+function WorkspaceDiffDisplay({ patch }) {
+  const rows = parseUnifiedDiffLines(patch || '');
+  if (!rows.length) {
+    return <div className="workspace-empty">No changes to display.</div>;
+  }
+  return (
+    <div className="workspace-diff-view">
+      {rows.map((row, index) => (
+        <div key={`${index}-${row.oldLine}-${row.newLine}`} className={`workspace-diff-row is-${row.type}`}>
+          <span className="workspace-diff-num">{row.oldLine}</span>
+          <span className="workspace-diff-num">{row.newLine}</span>
+          <code>{row.text || ' '}</code>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
+  const [displayMode, setDisplayMode] = useState('diff');
+  const [state, setState] = useState({ loading: false, error: '', diff: null, file: null });
+  const projectId = project?.id || '';
+  const filePath = selectedFile?.path || '';
+  const fileNameValue = filePath.split('/').pop() || filePath || 'File';
+  const hasDiff = Boolean(state.diff?.patch);
+  const canCopy = Boolean(state.file?.content && !state.file?.binary);
+
+  useEffect(() => {
+    if (!projectId || !filePath) {
+      return undefined;
+    }
+    let cancelled = false;
+    const stagedQuery = selectedFile?.staged === undefined ? '' : `&staged=${selectedFile.staged ? '1' : '0'}`;
+    setDisplayMode('diff');
+    setState({ loading: true, error: '', diff: null, file: null });
+    Promise.all([
+      apiFetch(`/api/git/file-diff?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(filePath)}${stagedQuery}`)
+        .then((result) => result.diff)
+        .catch(() => null),
+      apiFetch(`/api/workspace/file?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(filePath)}`)
+        .then((result) => result.file)
+    ])
+      .then(([diff, file]) => {
+        if (!cancelled) {
+          setState({ loading: false, error: '', diff, file });
+          if (!diff?.patch) {
+            setDisplayMode('file');
+          }
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setState({ loading: false, error: error.message || '读取文件失败', diff: null, file: null });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, filePath, selectedFile?.staged]);
+
+  async function copyFileContent() {
+    if (!canCopy) {
+      return;
+    }
+    const copied = await copyTextToClipboard(state.file.content);
+    onToast?.({
+      level: copied ? 'success' : 'error',
+      title: copied ? '已复制文件内容' : '复制失败'
+    });
+  }
+
+  return (
+    <div className="workspace-panel-view">
+      <header className="workspace-panel-header">
+        <button className="icon-button" type="button" onClick={onBack} aria-label="返回文件列表">
+          <ChevronLeft size={22} />
+        </button>
+        <div className="workspace-panel-title">
+          <strong>{fileNameValue}</strong>
+          <span>{filePath || 'Unknown path'}</span>
+        </div>
+        <button className="icon-button" type="button" onClick={() => copyTextToClipboard(filePath)} aria-label="复制路径">
+          <Copy size={18} />
+        </button>
+      </header>
+
+      <div className="workspace-file-toolbar">
+        {hasDiff ? (
+          <>
+            <button type="button" className={displayMode === 'diff' ? 'is-active' : ''} onClick={() => setDisplayMode('diff')}>Diff</button>
+            <button type="button" className={displayMode === 'file' ? 'is-active' : ''} onClick={() => setDisplayMode('file')}>File</button>
+          </>
+        ) : (
+          <button type="button" className="is-active">File</button>
+        )}
+        <span />
+        <button type="button" onClick={copyFileContent} disabled={!canCopy}>
+          <Copy size={15} />
+        </button>
+      </div>
+
+      <div className="workspace-panel-scroll">
+        {state.loading ? (
+          <div className="workspace-empty">正在读取文件...</div>
+        ) : state.error ? (
+          <div className="docs-panel-error">{state.error}</div>
+        ) : displayMode === 'diff' && hasDiff ? (
+          <WorkspaceDiffDisplay patch={state.diff.patch} />
+        ) : state.file?.binary ? (
+          <div className="workspace-empty">这个文件看起来是二进制文件，无法预览。</div>
+        ) : state.file?.content ? (
+          <pre className="workspace-file-content"><code>{state.file.content}</code></pre>
+        ) : (
+          <div className="workspace-empty">文件为空。</div>
+        )}
+        {state.file?.truncated ? (
+          <div className="workspace-empty">文件较大，仅显示前 {formatBytes(state.file.maxBytes)}。</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToast }) {
+  const [activeTab, setActiveTab] = useState(initialTab === 'directories' ? 'directories' : 'changes');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [gitState, setGitState] = useState({ loading: false, error: '', status: null });
+  const [searchState, setSearchState] = useState({ loading: false, error: '', files: [] });
+  const projectId = project?.id || '';
+
+  const loadGitFiles = useCallback(async () => {
+    if (!open || !projectId) {
+      return;
+    }
+    setGitState((current) => ({ ...current, loading: true, error: '' }));
+    try {
+      const data = await apiFetch(`/api/git/files?projectId=${encodeURIComponent(projectId)}`);
+      setGitState({ loading: false, error: '', status: data.status || null });
+    } catch (error) {
+      setGitState({ loading: false, error: error.message || '读取 Changes 失败', status: null });
+    }
+  }, [open, projectId]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setActiveTab(initialTab === 'directories' ? 'directories' : 'changes');
+    setSearchQuery('');
+    setSelectedFile(null);
+    loadGitFiles();
+  }, [open, initialTab, projectId, loadGitFiles]);
+
+  useEffect(() => {
+    if (!open || !projectId || !searchQuery.trim()) {
+      setSearchState({ loading: false, error: '', files: [] });
+      return undefined;
+    }
+    let cancelled = false;
+    const query = searchQuery.trim();
+    setSearchState((current) => ({ ...current, loading: true, error: '' }));
+    const timer = window.setTimeout(() => {
+      apiFetch(`/api/files/search?projectId=${encodeURIComponent(projectId)}&q=${encodeURIComponent(query)}`)
+        .then((result) => {
+          if (!cancelled) {
+            setSearchState({ loading: false, error: '', files: Array.isArray(result.files) ? result.files : [] });
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setSearchState({ loading: false, error: error.message || '搜索失败', files: [] });
+          }
+        });
+    }, 140);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, projectId, searchQuery]);
+
+  if (!open) {
+    return null;
+  }
+
+  function openFile(pathValue, staged) {
+    if (!pathValue) {
+      return;
+    }
+    setSelectedFile({ path: pathValue, staged });
+  }
+
+  if (selectedFile) {
+    return (
+      <section className="workspace-panel" role="dialog" aria-modal="true" aria-label="文件预览">
+        <WorkspaceFileView
+          project={project}
+          selectedFile={selectedFile}
+          onBack={() => setSelectedFile(null)}
+          onToast={onToast}
+        />
+      </section>
+    );
+  }
+
+  const status = gitState.status;
+  const stagedFiles = Array.isArray(status?.stagedFiles) ? status.stagedFiles : [];
+  const unstagedFiles = Array.isArray(status?.unstagedFiles) ? status.unstagedFiles : [];
+  const searching = Boolean(searchQuery.trim());
+
+  return (
+    <section className="workspace-panel" role="dialog" aria-modal="true" aria-label="文件和变更">
+      <header className="workspace-panel-header">
+        <button className="icon-button" type="button" onClick={onClose} aria-label="返回">
+          <ChevronLeft size={22} />
+        </button>
+        <div className="workspace-panel-title">
+          <strong>Files</strong>
+          <span>{project?.path || project?.name || ''}</span>
+        </div>
+        <button className="icon-button" type="button" onClick={activeTab === 'changes' ? loadGitFiles : undefined} aria-label="刷新">
+          <RefreshCw size={18} />
+        </button>
+      </header>
+
+      <div className="workspace-search">
+        <Search size={16} />
+        <input
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.target.value)}
+          placeholder="Search files"
+          autoCapitalize="none"
+          autoCorrect="off"
+        />
+      </div>
+
+      <div className="workspace-tabs" role="tablist">
+        <button type="button" role="tab" className={activeTab === 'changes' ? 'is-active' : ''} onClick={() => setActiveTab('changes')}>
+          Changes
+        </button>
+        <button type="button" role="tab" className={activeTab === 'directories' ? 'is-active' : ''} onClick={() => setActiveTab('directories')}>
+          Directories
+        </button>
+      </div>
+
+      {!searching && activeTab === 'changes' && status ? (
+        <div className="workspace-git-summary">
+          <GitBranch size={16} />
+          <strong>{status.branch || 'detached'}</strong>
+          <span>{status.totalStaged || 0} staged, {status.totalUnstaged || 0} unstaged</span>
+        </div>
+      ) : null}
+
+      <div className="workspace-panel-scroll">
+        {searching ? (
+          searchState.loading ? (
+            <div className="workspace-empty">正在搜索文件...</div>
+          ) : searchState.error ? (
+            <div className="docs-panel-error">{searchState.error}</div>
+          ) : searchState.files.length ? (
+            searchState.files.map((file) => (
+              <WorkspaceFileRow key={file.relativePath || file.path} file={{ ...file, fullPath: file.relativePath, fileName: file.name, filePath: file.relativePath?.split('/').slice(0, -1).join('/') }} onOpen={openFile} />
+            ))
+          ) : (
+            <div className="workspace-empty">没有匹配的文件。</div>
+          )
+        ) : activeTab === 'directories' ? (
+          <WorkspaceDirectoryTree project={project} onOpenFile={openFile} />
+        ) : gitState.loading ? (
+          <div className="workspace-empty">正在读取 Changes...</div>
+        ) : gitState.error ? (
+          <div className="docs-panel-error">{gitState.error}</div>
+        ) : stagedFiles.length || unstagedFiles.length ? (
+          <div className="workspace-changes-list">
+            {stagedFiles.length ? (
+              <div>
+                <div className="workspace-section-label is-staged">Staged Changes ({stagedFiles.length})</div>
+                {stagedFiles.map((file) => <WorkspaceFileRow key={`staged-${file.fullPath}`} file={file} staged={true} onOpen={openFile} />)}
+              </div>
+            ) : null}
+            {unstagedFiles.length ? (
+              <div>
+                <div className="workspace-section-label is-unstaged">Unstaged Changes ({unstagedFiles.length})</div>
+                {unstagedFiles.map((file) => <WorkspaceFileRow key={`unstaged-${file.fullPath}`} file={file} staged={false} onOpen={openFile} />)}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="workspace-empty">No changes detected. Use Directories to browse files.</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function stripAnsi(value = '') {
+  return String(value || '').replace(
+    // eslint-disable-next-line no-control-regex
+    /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g,
+    ''
+  );
+}
+
+function makeTerminalId() {
+  return globalThis.crypto?.randomUUID?.() || `terminal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function TerminalPanel({
+  open,
+  project,
+  connectionState,
+  onClose,
+  onToast,
+  onRegisterTerminal,
+  onSendTerminal
+}) {
+  const terminalIdRef = useRef(makeTerminalId());
+  const outputRef = useRef(null);
+  const toastShownRef = useRef(false);
+  const onToastRef = useRef(onToast);
+  const [state, setState] = useState('idle');
+  const [output, setOutput] = useState('');
+  const [command, setCommand] = useState('');
+  const projectId = project?.id || '';
+
+  useEffect(() => {
+    onToastRef.current = onToast;
+  }, [onToast]);
+
+  const sendTerminal = useCallback((payload) => {
+    if (!terminalIdRef.current) {
+      return false;
+    }
+    return Boolean(onSendTerminal?.({ terminalId: terminalIdRef.current, ...payload }));
+  }, [onSendTerminal]);
+
+  useEffect(() => {
+    if (!open || !projectId) {
+      return undefined;
+    }
+    if (connectionState !== 'connected') {
+      setState('connecting');
+      setOutput('Waiting for CodexMobile WebSocket...');
+      return undefined;
+    }
+    const terminalId = makeTerminalId();
+    terminalIdRef.current = terminalId;
+    toastShownRef.current = false;
+    setState('connecting');
+    setOutput('');
+    const notifyConnectionFailed = (message) => {
+      if (toastShownRef.current) {
+        return;
+      }
+      toastShownRef.current = true;
+      onToastRef.current?.({ level: 'error', title: 'Terminal 连接失败', body: message || '' });
+    };
+    const unregister = onRegisterTerminal?.(terminalId, (payload) => {
+      if (payload.terminalId && payload.terminalId !== terminalId) {
+        return;
+      }
+      if (payload.type === 'terminal-ready') {
+        setState('connected');
+      } else if (payload.type === 'terminal-output') {
+        setOutput((current) => `${current}${stripAnsi(payload.data)}`);
+      } else if (payload.type === 'terminal-error') {
+        const message = payload.message || 'Terminal error';
+        setState('error');
+        setOutput((current) => `${current}\n${message}\n`);
+        notifyConnectionFailed(message);
+      } else if (payload.type === 'terminal-exit') {
+        setState('closed');
+        setOutput((current) => `${current}\n[terminal exited]\n`);
+      }
+    }) || (() => {});
+    const sent = onSendTerminal?.({ type: 'terminal-open', terminalId, projectId, cols: 100, rows: 28 });
+    if (!sent) {
+      const message = 'WebSocket 未连接';
+      setState('error');
+      setOutput(message);
+      notifyConnectionFailed(message);
+    }
+    return () => {
+      onSendTerminal?.({ type: 'terminal-close', terminalId });
+      unregister();
+    };
+  }, [open, projectId, connectionState, onRegisterTerminal, onSendTerminal]);
+
+  useEffect(() => {
+    outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
+  }, [output]);
+
+  if (!open) {
+    return null;
+  }
+
+  function submitCommand(event) {
+    event.preventDefault();
+    if (!command.trim()) {
+      return;
+    }
+    sendTerminal({ type: 'terminal-input', data: `${command}\n` });
+    setCommand('');
+  }
+
+  return (
+    <section className="terminal-panel" role="dialog" aria-modal="true" aria-label="Terminal">
+      <header className="workspace-panel-header terminal-panel-header">
+        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭 Terminal">
+          <ChevronLeft size={22} />
+        </button>
+        <div className="workspace-panel-title">
+          <strong>Terminal</strong>
+          <span>{project?.path || project?.name || ''}</span>
+        </div>
+        <span className={`terminal-state is-${state}`}>{state}</span>
+      </header>
+      <pre ref={outputRef} className="terminal-output">{output || 'Connecting terminal...'}</pre>
+      <form className="terminal-input-row" onSubmit={submitCommand}>
+        <button type="button" onClick={() => sendTerminal({ type: 'terminal-input', data: '\x03' })}>Ctrl-C</button>
+        <input
+          value={command}
+          onChange={(event) => setCommand(event.target.value)}
+          placeholder="Run a command"
+          autoCapitalize="none"
+          autoCorrect="off"
+        />
+        <button type="submit" disabled={state !== 'connected'}><ArrowUp size={16} /></button>
+      </form>
     </section>
   );
 }
@@ -3362,6 +3975,24 @@ function ActivityFileSummary({ summary }) {
             <ActivityDiffView diffs={file.diffs} />
           </details>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function DiffMessage({ message }) {
+  const fileChanges = normalizeFileChangesForView(message.fileChanges || []);
+  const summary = buildActivityFileSummary([{ fileChanges }]);
+  if (!summary) {
+    return null;
+  }
+  return (
+    <div className="message-row is-assistant">
+      <div className="message-stack">
+        <div className="message-bubble diff-message-bubble">
+          <ActivityFileSummary summary={summary} />
+          {message.timestamp ? <time>{formatTime(message.timestamp)}</time> : null}
+        </div>
       </div>
     </div>
   );
@@ -4714,7 +5345,9 @@ function Composer({
   queueDrafts,
   onRestoreQueueDraft,
   onRemoveQueueDraft,
-  onSteerQueueDraft
+  onSteerQueueDraft,
+  onOpenTerminal,
+  onVoiceTranscribe
 }) {
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -5095,7 +5728,7 @@ function Composer({
           {runStatus.duration ? <span className="composer-run-time">{runStatus.duration}</span> : null}
         </div>
       ) : null}
-      {!sendState.disabled || sendState.mode !== 'unavailable' ? null : (
+      {!hasInput || !sendState.disabled || sendState.mode !== 'unavailable' ? null : (
         <div className="composer-run-status is-warning" role="status" aria-live="polite">
           <span className="composer-run-dot" />
           <span className="composer-run-main">
@@ -5104,7 +5737,7 @@ function Composer({
           </span>
         </div>
       )}
-      {sendState.mode !== 'create-unavailable' ? null : (
+      {!hasInput || sendState.mode !== 'create-unavailable' ? null : (
         <div className="composer-run-status is-warning" role="status" aria-live="polite">
           <span className="composer-run-dot" />
           <span className="composer-run-main">
@@ -5200,28 +5833,46 @@ function Composer({
         />
         <div className="composer-controls">
           <div className="control-left">
-            <button type="button" className="ghost-icon" aria-label="添加" onClick={() => toggleMenu('attach')} disabled={uploading}>
-              <Plus size={21} />
+            <button
+              type="button"
+              className="composer-icon-control"
+              aria-label="添加附件"
+              title="添加附件"
+              onClick={() => toggleMenu('attach')}
+              disabled={uploading}
+            >
+              <Paperclip size={18} />
             </button>
-            <button type="button" className="permission-pill" onClick={() => toggleMenu('permission')}>
-              {permissionLabel(permissionMode)}
-              <ChevronDown size={15} />
+            <button
+              type="button"
+              className="composer-icon-control"
+              onClick={() => toggleMenu('permission')}
+              aria-label={`Permission mode: ${permissionLabel(permissionMode)}`}
+              title={permissionLabel(permissionMode)}
+            >
+              <ShieldCheck size={18} />
             </button>
-            <button type="button" className="skill-select" onClick={() => toggleMenu('skill')}>
-              <Bot size={14} />
-              <span>{selectedSkillSummary(selectedSkills)}</span>
-              <ChevronDown size={15} />
+            <button
+              type="button"
+              className="composer-icon-control"
+              onClick={onOpenTerminal}
+              disabled={!selectedProject}
+              aria-label="打开 Terminal"
+              title="Terminal"
+            >
+              <Terminal size={18} />
             </button>
           </div>
           <div className="control-right">
-            <ContextStatusButton
-              contextStatus={contextStatus}
-              open={openMenu === 'context'}
-              onToggle={() => toggleMenu('context')}
-            />
-            <button type="button" className="model-select" onClick={() => toggleMenu('model')}>
-              {shortModelName(selectedModelLabel)} {reasoningLabel(selectedReasoningEffort)}
-              <ChevronDown size={15} />
+            <button
+              type="button"
+              className="composer-icon-control"
+              onClick={onVoiceTranscribe}
+              disabled={!selectedProject}
+              aria-label="语音转录"
+              title="语音转录"
+            >
+              <Mic size={18} />
             </button>
             <button
               type="submit"
@@ -5258,6 +5909,8 @@ export default function App() {
   const [docsBusy, setDocsBusy] = useState(false);
   const [docsError, setDocsError] = useState('');
   const [gitPanel, setGitPanel] = useState({ open: false, action: 'commit' });
+  const [workspacePanel, setWorkspacePanel] = useState({ open: false, tab: 'changes' });
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [fileMentions, setFileMentions] = useState([]);
@@ -5267,6 +5920,10 @@ export default function App() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => notificationPreferenceEnabled());
   const [uploading, setUploading] = useState(false);
   const [permissionMode, setPermissionMode] = useState(DEFAULT_PERMISSION_MODE);
+  const [runMode, setRunModeState] = useState(() => {
+    const stored = localStorage.getItem(RUN_MODE_KEY);
+    return RUN_MODE_OPTIONS.some((option) => option.value === stored) ? stored : 'local';
+  });
   const [selectedModel, setSelectedModel] = useState(DEFAULT_STATUS.model);
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState(() => {
     const defaultVersion = localStorage.getItem('codexmobile.reasoningDefaultVersion');
@@ -5288,6 +5945,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [connectionState, setConnectionState] = useState(() => (getToken() ? 'connecting' : 'disconnected'));
   const wsRef = useRef(null);
+  const terminalHandlersRef = useRef(new Map());
   const selectedProjectRef = useRef(null);
   const selectedSessionRef = useRef(null);
   const messagesRef = useRef([]);
@@ -5339,6 +5997,37 @@ export default function App() {
   const [voiceDialogTranscript, setVoiceDialogTranscript] = useState('');
   const [voiceDialogAssistantText, setVoiceDialogAssistantText] = useState('');
   const [voiceDialogHandoffDraft, setVoiceDialogHandoffDraft] = useState('');
+
+  const setRunMode = useCallback((value) => {
+    const next = RUN_MODE_OPTIONS.some((option) => option.value === value) ? value : 'local';
+    localStorage.setItem(RUN_MODE_KEY, next);
+    setRunModeState(next);
+  }, []);
+
+  const registerTerminalHandler = useCallback((terminalId, handler) => {
+    if (!terminalId || typeof handler !== 'function') {
+      return () => {};
+    }
+    terminalHandlersRef.current.set(terminalId, handler);
+    return () => {
+      if (terminalHandlersRef.current.get(terminalId) === handler) {
+        terminalHandlersRef.current.delete(terminalId);
+      }
+    };
+  }, []);
+
+  const sendTerminalMessage = useCallback((payload) => {
+    const ws = wsRef.current;
+    if (ws?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    try {
+      ws.send(JSON.stringify(payload));
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -6210,6 +6899,12 @@ export default function App() {
           setVoiceDialogTranscript(transcript);
           setVoiceDialogMode('sending');
           const turn = await handleVoiceSubmit(transcript);
+          if (turn?.appended) {
+            setVoiceDialogMode('idle');
+            voiceDialogAwaitingTurnRef.current = null;
+            voiceDialogAutoListenRef.current = false;
+            return;
+          }
           voiceDialogAwaitingTurnRef.current = {
             turnId: turn?.turnId,
             message: transcript,
@@ -6314,6 +7009,26 @@ export default function App() {
         } else {
           startVoiceDialogRecording();
         }
+      }
+    }, 80);
+  }
+
+  function openVoiceTranscriptionDialog() {
+    unlockVoiceDialogAudio();
+    voiceDialogOpenRef.current = true;
+    voiceDialogRealtimeRef.current = false;
+    voiceDialogAutoListenRef.current = true;
+    voiceDialogAwaitingTurnRef.current = null;
+    voiceDialogIdeaBufferRef.current = [];
+    setVoiceDialogHandoffDraftValue('');
+    setVoiceDialogOpen(true);
+    setVoiceDialogError('');
+    setVoiceDialogTranscript('');
+    setVoiceDialogAssistantText('');
+    setVoiceDialogMode('idle');
+    window.setTimeout(() => {
+      if (voiceDialogOpenRef.current) {
+        startVoiceDialogRecording();
       }
     }, 80);
   }
@@ -6992,7 +7707,20 @@ export default function App() {
       };
       ws.onerror = () => setConnectionState('disconnected');
       ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
+      let payload = null;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (String(payload?.type || '').startsWith('terminal-')) {
+        const terminalId = payload.terminalId || '';
+        const handler = terminalHandlersRef.current.get(terminalId);
+        if (handler) {
+          handler(payload);
+        }
+        return;
+      }
       if (payload.type === 'connected') {
         setStatus(payload.status || DEFAULT_STATUS);
         setConnectionState(payload.status?.connected ? 'connected' : 'disconnected');
@@ -7299,7 +8027,17 @@ export default function App() {
     }
   }
 
-  async function handleSelectSession(session) {
+  async function handleSelectSession(projectOrSession, maybeSession = null) {
+    const session = maybeSession || projectOrSession;
+    const project =
+      maybeSession
+        ? projectOrSession
+        : projects.find((item) => item.id === session?.projectId) || selectedProjectRef.current || selectedProject;
+    if (project?.id) {
+      selectedProjectRef.current = project;
+      setSelectedProject(project);
+      setExpandedProjectIds((current) => ({ ...current, [project.id]: true }));
+    }
     clearSessionCompleteNotice(session?.id);
     selectedSessionRef.current = session;
     setSelectedSession(session);
@@ -8173,6 +8911,22 @@ export default function App() {
     setGitPanel({ open: true, action });
   }
 
+  function handleOpenWorkspace(tab = 'changes') {
+    if (!selectedProject) {
+      showToast({ level: 'error', title: '请先选择项目' });
+      return;
+    }
+    setWorkspacePanel({ open: true, tab });
+  }
+
+  function handleOpenTerminal() {
+    if (!selectedProject) {
+      showToast({ level: 'error', title: '请先选择项目' });
+      return;
+    }
+    setTerminalOpen(true);
+  }
+
   function restoreVoiceTextToInput(text) {
     const value = String(text || '').trim();
     if (!value) {
@@ -8195,11 +8949,8 @@ export default function App() {
     if (!message) {
       throw new Error('没有识别到文字');
     }
-    return submitCodexMessage({
-      message,
-      attachmentsForTurn: [],
-      restoreTextOnError: true
-    });
+    restoreVoiceTextToInput(message);
+    return { appended: true };
   }
 
   async function handleAbort() {
@@ -8306,6 +9057,8 @@ export default function App() {
         connectionState={connectionState}
         desktopBridge={status.desktopBridge}
         onMenu={() => setDrawerOpen(true)}
+        onOpenWorkspace={handleOpenWorkspace}
+        onOpenTerminal={handleOpenTerminal}
         onOpenDocs={() => setDocsOpen(true)}
         onGitAction={handleGitAction}
         notificationSupported={notificationSupported}
@@ -8355,6 +9108,22 @@ export default function App() {
         project={selectedProject}
         onToast={showToast}
         onClose={() => setGitPanel((current) => ({ ...current, open: false }))}
+      />
+      <WorkspacePanel
+        open={workspacePanel.open}
+        initialTab={workspacePanel.tab}
+        project={selectedProject}
+        onToast={showToast}
+        onClose={() => setWorkspacePanel((current) => ({ ...current, open: false }))}
+      />
+      <TerminalPanel
+        open={terminalOpen}
+        project={selectedProject}
+        connectionState={connectionState}
+        onToast={showToast}
+        onRegisterTerminal={registerTerminalHandler}
+        onSendTerminal={sendTerminalMessage}
+        onClose={() => setTerminalOpen(false)}
       />
       <ConnectionRecoveryCard
         state={recoveryState}
@@ -8408,6 +9177,23 @@ export default function App() {
         onRestoreQueueDraft={restoreQueueDraft}
         onRemoveQueueDraft={removeQueueDraft}
         onSteerQueueDraft={steerQueueDraft}
+        onOpenTerminal={handleOpenTerminal}
+        onVoiceTranscribe={openVoiceTranscriptionDialog}
+      />
+      <VoiceDialogPanel
+        open={voiceDialogOpen}
+        state={voiceDialogState}
+        error={voiceDialogError}
+        transcript={voiceDialogTranscript}
+        assistantText={voiceDialogAssistantText}
+        handoffDraft={voiceDialogHandoffDraft}
+        onHandoffDraftChange={setVoiceDialogHandoffDraftValue}
+        onHandoffSubmit={submitVoiceHandoffToCodex}
+        onHandoffContinue={continueVoiceHandoffCollection}
+        onHandoffCancel={cancelVoiceHandoffConfirmation}
+        onStart={startVoiceDialogRecording}
+        onStop={stopVoiceDialogRecording}
+        onClose={closeVoiceDialog}
       />
       <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />
     </div>
