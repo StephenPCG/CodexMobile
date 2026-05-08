@@ -7054,6 +7054,7 @@ function Composer({
   connectionState,
   voiceState,
   voiceError,
+  voiceTranscription,
   onVoiceTranscribe
 }) {
   const { t, ui } = useI18n();
@@ -7126,6 +7127,7 @@ function Composer({
   const voiceListening = voiceState === 'listening';
   const voiceProcessing = ['transcribing', 'sending'].includes(voiceState);
   const voiceFailed = voiceState === 'error' && Boolean(voiceError);
+  const voiceAvailable = voiceTranscription?.configured !== false;
   const voiceLabel = voiceListening
     ? t('voice.stopTranscribe')
     : voiceProcessing
@@ -7714,16 +7716,18 @@ function Composer({
               <span>{selectedModelTriggerLabel}</span>
               <ChevronDown size={14} />
             </button>
-            <button
-              type="button"
-              className={`composer-icon-control voice-control ${voiceListening ? 'is-listening' : ''} ${voiceProcessing ? 'is-processing' : ''} ${voiceFailed ? 'is-error' : ''}`}
-              onClick={onVoiceTranscribe}
-              disabled={!selectedProject || voiceProcessing}
-              aria-label={voiceLabel}
-              title={voiceFailed ? voiceError : voiceLabel}
-            >
-              {voiceListening ? <VoiceWaveIcon /> : voiceProcessing ? <Loader2 className="spin" size={18} /> : <Mic size={18} />}
-            </button>
+            {voiceAvailable ? (
+              <button
+                type="button"
+                className={`composer-icon-control voice-control ${voiceListening ? 'is-listening' : ''} ${voiceProcessing ? 'is-processing' : ''} ${voiceFailed ? 'is-error' : ''}`}
+                onClick={onVoiceTranscribe}
+                disabled={!selectedProject || voiceProcessing}
+                aria-label={voiceLabel}
+                title={voiceFailed ? voiceError : voiceLabel}
+              >
+                {voiceListening ? <VoiceWaveIcon /> : voiceProcessing ? <Loader2 className="spin" size={18} /> : <Mic size={18} />}
+              </button>
+            ) : null}
             <button
               type="submit"
               className={`send-button ${stopMode ? 'is-running' : ''} ${runningInputMode ? 'is-queueing' : ''}`}
@@ -11312,6 +11316,7 @@ export default function App() {
             connectionState={connectionState}
             voiceState={voiceDialogState}
             voiceError={voiceDialogError}
+            voiceTranscription={status.voiceTranscription}
             onVoiceTranscribe={openVoiceTranscriptionDialog}
           />
         </>

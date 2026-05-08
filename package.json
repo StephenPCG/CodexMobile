@@ -16,6 +16,8 @@
     "cli": "node bin/codex-mobile.mjs",
     "service:install": "node bin/codex-mobile.mjs install-service",
     "service:uninstall": "node bin/codex-mobile.mjs uninstall-service",
+    "asr:install": "node bin/codex-mobile.mjs install-asr-docker",
+    "asr:status": "node bin/codex-mobile.mjs asr-status",
     "start:env": "node --env-file=.env server/index.js",
     "start:bg": "node scripts/start-server.mjs",
     "mac:autostart": "node scripts/install-macos-autostart.mjs",

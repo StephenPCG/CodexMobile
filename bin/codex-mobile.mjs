@@ -25,6 +25,8 @@ Usage:
   codex-mobile start [--config ~/.codex-mobile/config.yaml]
   codex-mobile install-service [--config ~/.codex-mobile/config.yaml]
   codex-mobile uninstall-service
+  codex-mobile install-asr-docker [--rebuild] [--recreate]
+  codex-mobile asr-status
   codex-mobile config-path
   codex-mobile --version
 `;
@@ -41,6 +43,10 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === '--no-start') {
       options.start = false;
+    } else if (arg === '--rebuild') {
+      options.rebuild = true;
+    } else if (arg === '--recreate') {
+      options.recreate = true;
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     }
@@ -265,6 +271,37 @@ function uninstallService() {
   throw new Error(`uninstall-service is not supported on ${process.platform}`);
 }
 
+function runScript(scriptPath, args = [], { env = process.env } = {}) {
+  const result = spawnSync(process.execPath, [scriptPath, ...args], {
+    cwd: ROOT_DIR,
+    env,
+    stdio: 'inherit'
+  });
+  if (result.status !== 0) {
+    process.exitCode = result.status || 1;
+  }
+}
+
+function installAsrDocker(options) {
+  const configPath = resolveConfigPath(options.config);
+  loadCodexMobileConfig({ configPath, create: true });
+  if (options.rebuild) {
+    process.env.CODEXMOBILE_ASR_REBUILD = '1';
+  }
+  if (options.recreate) {
+    process.env.CODEXMOBILE_ASR_RECREATE = '1';
+  }
+  runScript(path.join(ROOT_DIR, 'scripts', 'start-asr.mjs'));
+}
+
+async function printAsrStatus(options) {
+  const configPath = resolveConfigPath(options.config);
+  loadCodexMobileConfig({ configPath, create: true });
+  const { asrDockerStatus } = await import('../server/asr-docker.js');
+  const status = await asrDockerStatus({ force: true });
+  console.log(JSON.stringify(status, null, 2));
+}
+
 async function main() {
   const { command, options } = parseArgs(process.argv.slice(2));
   if (options.help || command === 'help' || command === '--help' || command === '-h') {
@@ -291,6 +328,14 @@ async function main() {
   }
   if (command === 'uninstall-service' || command === 'remove-service') {
     uninstallService();
+    return;
+  }
+  if (command === 'install-asr-docker') {
+    installAsrDocker(options);
+    return;
+  }
+  if (command === 'asr-status') {
+    await printAsrStatus(options);
     return;
   }
   throw new Error(`Unknown command: ${command}\n\n${usage()}`);

@@ -1,5 +1,6 @@
 import { DEFAULT_OPENAI_COMPATIBLE_BASE_URL, normalizeBaseUrl, readCliProxyApiKeys } from './provider-api.js';
 import { Converter } from 'opencc-js';
+import { asrDockerStatus } from './asr-docker.js';
 
 const LOCAL_TRANSCRIBE_BASE_URL = 'http://127.0.0.1:8000/v1';
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -219,7 +220,16 @@ export async function voiceTranscriptionConfig(codexConfig = {}) {
   };
 }
 
-export function publicVoiceTranscriptionStatus(codexConfig = {}) {
+export async function publicVoiceTranscriptionStatus(codexConfig = {}) {
+  if (truthyEnv(process.env.CODEXMOBILE_TRANSCRIBE_DISABLED)) {
+    return {
+      configured: false,
+      provider: 'disabled',
+      model: '',
+      reason: 'disabled'
+    };
+  }
+
   const explicitBaseUrl = process.env.CODEXMOBILE_TRANSCRIBE_BASE_URL;
   const useOpenAI = truthyEnv(process.env.CODEXMOBILE_TRANSCRIBE_USE_OPENAI);
   const useCodexProvider = truthyEnv(process.env.CODEXMOBILE_TRANSCRIBE_USE_CODEX_PROVIDER);
@@ -228,10 +238,30 @@ export function publicVoiceTranscriptionStatus(codexConfig = {}) {
       ? OPENAI_BASE_URL
       : (useCodexProvider ? codexConfig.baseUrl || DEFAULT_OPENAI_COMPATIBLE_BASE_URL : process.env.CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL || LOCAL_TRANSCRIBE_BASE_URL));
 
+  const provider = providerLabel(baseUrl);
+  const model = process.env.CODEXMOBILE_TRANSCRIBE_MODEL || defaultModelForBaseUrl(baseUrl);
+  const localProvider = !explicitBaseUrl && !useOpenAI && !useCodexProvider;
+  if (localProvider) {
+    const docker = await asrDockerStatus();
+    return {
+      configured: docker.ready,
+      provider,
+      model,
+      docker,
+      reason: docker.ready
+        ? ''
+        : docker.installed
+          ? 'local-asr-not-ready'
+          : 'local-asr-not-installed'
+    };
+  }
+
+  const hasOnlineKey = !useOpenAI || Boolean(process.env.CODEXMOBILE_TRANSCRIBE_API_KEY || process.env.OPENAI_API_KEY);
   return {
-    configured: true,
-    provider: providerLabel(baseUrl),
-    model: process.env.CODEXMOBILE_TRANSCRIBE_MODEL || defaultModelForBaseUrl(baseUrl)
+    configured: Boolean(hasOnlineKey),
+    provider,
+    model,
+    reason: hasOnlineKey ? '' : 'missing-api-key'
   };
 }
 

@@ -1,16 +1,20 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { asrDockerConfig } from '../server/asr-docker.js';
+import { loadCodexMobileConfig } from '../server/runtime-config.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const serviceDir = path.join(root, 'asr-service');
-const cacheDir = path.join(root, '.codexmobile', 'model-cache');
-const containerName = process.env.CODEXMOBILE_ASR_CONTAINER || 'codexmobile-sensevoice-asr';
-const legacyContainerName = process.env.CODEXMOBILE_ASR_LEGACY_CONTAINER || 'codexmobile-asr';
-const image = process.env.CODEXMOBILE_ASR_IMAGE || 'codexmobile-sensevoice-asr:latest';
-const port = process.env.CODEXMOBILE_ASR_PORT || '8000';
-const model = process.env.CODEXMOBILE_TRANSCRIBE_MODEL || 'iic/SenseVoiceSmall';
-const device = process.env.CODEXMOBILE_ASR_DEVICE || 'cpu';
+loadCodexMobileConfig({ create: true });
+const asrConfig = asrDockerConfig();
+const cacheDir = asrConfig.modelCache || path.join(root, '.codexmobile', 'model-cache');
+const containerName = asrConfig.containerName;
+const legacyContainerName = asrConfig.legacyContainerName;
+const image = asrConfig.image;
+const port = asrConfig.port;
+const model = asrConfig.model;
+const device = asrConfig.device;
 const healthTimeoutMs = Number(process.env.CODEXMOBILE_ASR_HEALTH_TIMEOUT_MS || 60000);
 const buildTimeoutMs = Number(process.env.CODEXMOBILE_ASR_BUILD_TIMEOUT_MS || 20 * 60 * 1000);
 const rebuild = ['1', 'true', 'yes', 'on'].includes(String(process.env.CODEXMOBILE_ASR_REBUILD || '').toLowerCase());
@@ -131,7 +135,7 @@ function startContainer() {
     '--restart',
     'unless-stopped',
     '--publish',
-    `${port}:8000`,
+    `127.0.0.1:${port}:8000`,
     '--volume',
     `${cacheDir.replace(/\\/g, '/')}:/models`,
     '--env',

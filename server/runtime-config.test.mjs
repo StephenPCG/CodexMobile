@@ -34,6 +34,8 @@ paths:
   state: ${dir}/state
 codex:
   path: ${dir}/codex
+asr:
+  modelCache: ${dir}/model-cache
 `, 'utf8');
   const env = {
     PORT: '9999'
@@ -50,4 +52,5 @@ codex:
   assert.equal(env.CODEXMOBILE_CONFIG_DIR, dir);
   assert.equal(env.CODEXMOBILE_HOME, path.join(dir, 'state'));
   assert.equal(env.CODEXMOBILE_CODEX_PATH, path.join(dir, 'codex'));
+  assert.equal(env.CODEXMOBILE_ASR_MODEL_CACHE, path.join(dir, 'model-cache'));
 });

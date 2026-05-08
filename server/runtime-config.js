@@ -44,6 +44,21 @@ paths:
 #   managementUrl: http://127.0.0.1:8317
 #   managementKey: ""
 
+# voice:
+#   transcribe:
+#     # local-docker is enabled by default when the ASR container is installed.
+#     # For online providers, set baseUrl/apiKey/model explicitly.
+#     localBaseUrl: http://127.0.0.1:8000/v1
+#     # baseUrl: https://api.openai.com/v1
+#     # apiKey: ""
+#     # model: gpt-4o-mini-transcribe
+
+# asr:
+#   port: 8000
+#   model: iic/SenseVoiceSmall
+#   device: cpu
+#   modelCache: ~/.codex-mobile/model-cache
+
 # Extra legacy env names can live here when no friendly key exists yet.
 # env:
 #   CODEXMOBILE_REALTIME_PROVIDER: dashscope
@@ -85,8 +100,14 @@ const CONFIG_ENV_MAPPINGS = [
   ['cliproxy.managementUrl', 'CODEXMOBILE_CLIPROXY_MANAGEMENT_URL'],
   ['cliproxy.managementKey', 'CODEXMOBILE_CLIPROXY_MANAGEMENT_KEY'],
   ['voice.transcribe.baseUrl', 'CODEXMOBILE_TRANSCRIBE_BASE_URL'],
+  ['voice.transcribe.localBaseUrl', 'CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL'],
   ['voice.transcribe.apiKey', 'CODEXMOBILE_TRANSCRIBE_API_KEY'],
   ['voice.transcribe.model', 'CODEXMOBILE_TRANSCRIBE_MODEL'],
+  ['voice.transcribe.language', 'CODEXMOBILE_TRANSCRIBE_LANGUAGE'],
+  ['voice.transcribe.prompt', 'CODEXMOBILE_TRANSCRIBE_PROMPT'],
+  ['voice.transcribe.useOpenAI', 'CODEXMOBILE_TRANSCRIBE_USE_OPENAI'],
+  ['voice.transcribe.useCodexProvider', 'CODEXMOBILE_TRANSCRIBE_USE_CODEX_PROVIDER'],
+  ['voice.transcribe.disabled', 'CODEXMOBILE_TRANSCRIBE_DISABLED'],
   ['voice.speech.baseUrl', 'CODEXMOBILE_SPEECH_BASE_URL'],
   ['voice.speech.apiKey', 'CODEXMOBILE_SPEECH_API_KEY'],
   ['voice.speech.model', 'CODEXMOBILE_SPEECH_MODEL'],
@@ -101,7 +122,8 @@ const CONFIG_ENV_MAPPINGS = [
   ['image.model', 'CODEXMOBILE_IMAGE_MODEL'],
   ['asr.port', 'CODEXMOBILE_ASR_PORT'],
   ['asr.model', 'CODEXMOBILE_TRANSCRIBE_MODEL'],
-  ['asr.device', 'CODEXMOBILE_ASR_DEVICE']
+  ['asr.device', 'CODEXMOBILE_ASR_DEVICE'],
+  ['asr.modelCache', 'CODEXMOBILE_ASR_MODEL_CACHE']
 ];
 
 function stripInlineComment(value) {
@@ -249,7 +271,7 @@ export function loadCodexMobileConfig({ configPath = configPathFromEnv(), create
 
   for (const [configKey, envKey] of CONFIG_ENV_MAPPINGS) {
     const value = readPath(config, configKey);
-    if (/_(PATH|ROOT|HOME|DIR)$/.test(envKey) || envKey === 'CLIPROXYAPI_CONFIG') {
+    if (/_(PATH|ROOT|HOME|DIR|CACHE)$/.test(envKey) || envKey === 'CLIPROXYAPI_CONFIG') {
       setPathEnvDefault(env, envKey, value);
     } else {
       setEnvDefault(env, envKey, value);

@@ -5,6 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { resolveCodexExecutable } from './codex-executable.js';
 import { broadcastDesktopThreadArchived, probeDesktopIpc } from './desktop-ipc-client.js';
+import { registerManagedProcess } from './process-manager.js';
 
 const DEFAULT_CODEX_APP_BINARY = '/Applications/Codex.app/Contents/Resources/codex';
 const DEFAULT_REQUEST_TIMEOUT_MS = positiveTimeout(process.env.CODEXMOBILE_APP_SERVER_REQUEST_TIMEOUT_MS, 30_000);
@@ -240,6 +241,7 @@ export class CodexAppServerClient {
     }, { allowHeadlessLocal });
     this.child = null;
     this.readline = null;
+    this.unregisterChild = null;
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = '';
@@ -263,6 +265,9 @@ export class CodexAppServerClient {
       env: this.env,
       stdio: ['pipe', 'pipe', 'pipe']
     });
+    this.unregisterChild = registerManagedProcess(this.child, {
+      name: `codex app-server ${this.transport.mode}`
+    });
 
     this.readline = readline.createInterface({
       input: this.child.stdout,
@@ -285,6 +290,8 @@ export class CodexAppServerClient {
       this.resolveClosed?.({ code: null, signal: null, error });
     });
     this.child.on('close', (code, signal) => {
+      this.unregisterChild?.();
+      this.unregisterChild = null;
       const error = responseError(
         this.stderr.trim() || `Codex app-server exited with ${code ?? signal ?? 'unknown status'}`
       );
@@ -406,6 +413,8 @@ export class CodexAppServerClient {
     if (this.child && !this.child.killed) {
       this.child.kill();
     }
+    this.unregisterChild?.();
+    this.unregisterChild = null;
   }
 }
 

@@ -10,6 +10,8 @@ All notable changes to CodexMobile are tracked here.
 - Added a `codex-mobile` CLI with foreground `start`, macOS launchd service install, and Linux systemd user service install.
 - Added `~/.codex-mobile/config.yaml` loading plus home-directory state, upload, generated image, and log defaults for installed deployments.
 - Added a Homebrew formula template for tap-based installs and updates.
+- Added main-process child tracking and shutdown cleanup for Codex app-server, Terminal shells, lark-cli, and local speech helper processes.
+- Added `codex-mobile install-asr-docker` and `codex-mobile asr-status` for optional local SenseVoice ASR setup.
 - Added backend Codex quota caching with startup, scheduled hourly, and manual refresh paths.
 - Added an xterm-based browser Terminal with PTY-backed color output, direct keyboard input, a blinking cursor, paste, and mobile quick keys.
 - Added mobile workspace tools for Changes, Directories, file previews, and diff viewing.
@@ -38,6 +40,7 @@ All notable changes to CodexMobile are tracked here.
 - Moved Feishu Docs into Settings, simplified the top More menu Git actions to Git Panel, and grouped conversation actions with unified wording.
 - Reworked the drawer quota widget into a compact Rate limits remaining card with cached data, update time, and icon-only refresh.
 - Removed the prompt-only slash menu so `/` remains normal text while `$skill` keeps structured skill selection.
+- Hid the composer voice button when the configured transcription provider is unavailable, including missing local ASR Docker.
 - Added top More menu actions for renaming and archiving the current conversation.
 - Reworked voice transcription into an inline composer control that records, processes, and appends text without opening a confirmation dialog.
 - Moved server connection status above the composer.

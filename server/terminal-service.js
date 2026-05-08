@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { registerManagedProcess } from './process-manager.js';
 
 let pty = null;
 try {
@@ -76,6 +77,7 @@ export function createTerminalService({ getProject, getTarget } = {}) {
   }
 
   const socketTerminals = new WeakMap();
+  const allTerminals = new Set();
 
   function requireTarget(projectId, options = {}) {
     const project = typeof getTarget === 'function'
@@ -104,6 +106,8 @@ export function createTerminalService({ getProject, getTarget } = {}) {
     }
     terminals.delete(terminalId);
     terminal.closed = true;
+    allTerminals.delete(terminal);
+    terminal.unregister?.();
     if (terminal.kind === 'pty') {
       try {
         terminal.process.kill();
@@ -168,7 +172,17 @@ export function createTerminalService({ getProject, getTarget } = {}) {
         env: terminalEnv(cols, rows)
       });
 
-      terminals.set(terminalId, { process: child, kind: 'pty', closed: false });
+      const terminal = {
+        process: child,
+        kind: 'pty',
+        closed: false,
+        unregister: registerManagedProcess(child, {
+          name: `terminal pty ${pathBasename(command)}`,
+          kill: (signal) => child.kill(signal)
+        })
+      };
+      terminals.set(terminalId, terminal);
+      allTerminals.add(terminal);
       send(ws, {
         type: 'terminal-ready',
         terminalId,
@@ -186,6 +200,8 @@ export function createTerminalService({ getProject, getTarget } = {}) {
           return;
         }
         terminals.delete(terminalId);
+        allTerminals.delete(terminal);
+        terminal.unregister?.();
         send(ws, { type: 'terminal-exit', terminalId, code: exitCode ?? null, signal: signal ? String(signal) : null });
       });
       return;
@@ -205,7 +221,17 @@ export function createTerminalService({ getProject, getTarget } = {}) {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
-    terminals.set(terminalId, { process: child, kind: 'spawn', closed: false });
+    const terminal = {
+      process: child,
+      kind: 'spawn',
+      closed: false,
+      unregister: registerManagedProcess(child, {
+        name: `terminal shell ${pathBasename(command)}`,
+        killGroup: DETACH_TERMINAL_PROCESS
+      })
+    };
+    terminals.set(terminalId, terminal);
+    allTerminals.add(terminal);
     send(ws, {
       type: 'terminal-ready',
       terminalId,
@@ -239,6 +265,8 @@ export function createTerminalService({ getProject, getTarget } = {}) {
         return;
       }
       terminals.delete(terminalId);
+      allTerminals.delete(terminal);
+      terminal.unregister?.();
       send(ws, { type: 'terminal-exit', terminalId, code, signal });
     });
   }
@@ -308,5 +336,26 @@ export function createTerminalService({ getProject, getTarget } = {}) {
     socketTerminals.delete(ws);
   }
 
-  return { handleSocketMessage, closeSocket };
+  function closeAll() {
+    for (const terminal of [...allTerminals]) {
+      terminal.closed = true;
+      terminal.unregister?.();
+      if (terminal.kind === 'pty') {
+        try {
+          terminal.process.kill();
+        } catch {
+          // Ignore stale terminal cleanup.
+        }
+      } else {
+        signalTerminalProcess(terminal.process, 'SIGTERM');
+      }
+      allTerminals.delete(terminal);
+    }
+  }
+
+  return { handleSocketMessage, closeSocket, closeAll };
+}
+
+function pathBasename(value) {
+  return String(value || '').split(/[\\/]/).pop() || 'shell';
 }

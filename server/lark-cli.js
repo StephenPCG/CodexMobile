@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildFeishuSkillInstruction } from './feishu-skills.js';
+import { registerManagedProcess } from './process-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -301,6 +302,7 @@ async function runLarkCli(args, options = {}) {
     let stderr = '';
     let settled = false;
     let child = null;
+    let unregisterChild = null;
     try {
       child = spawn(spawnOptions.command, spawnOptions.args, {
         cwd,
@@ -308,6 +310,7 @@ async function runLarkCli(args, options = {}) {
         windowsHide: true,
         windowsVerbatimArguments: spawnOptions.windowsVerbatimArguments
       });
+      unregisterChild = registerManagedProcess(child, { name: 'lark-cli' });
     } catch (error) {
       resolve({
         ok: false,
@@ -326,6 +329,7 @@ async function runLarkCli(args, options = {}) {
         return;
       }
       settled = true;
+      unregisterChild?.();
       child.kill();
       resolve({
         ok: false,
@@ -349,6 +353,7 @@ async function runLarkCli(args, options = {}) {
         return;
       }
       settled = true;
+      unregisterChild?.();
       clearTimeout(timeout);
       resolve({
         ok: false,
@@ -365,6 +370,7 @@ async function runLarkCli(args, options = {}) {
         return;
       }
       settled = true;
+      unregisterChild?.();
       clearTimeout(timeout);
       resolve({
         ok: code === 0,
@@ -622,6 +628,7 @@ function extractUserCode(verificationUrl) {
 
 async function startDevicePoll(deviceCode) {
   let child = null;
+  let unregisterChild = null;
   try {
     const command = await resolveLarkCliCommand();
     const spawnOptions = larkCliSpawnOptions(command, ['auth', 'login', '--device-code', deviceCode]);
@@ -630,6 +637,7 @@ async function startDevicePoll(deviceCode) {
       windowsHide: true,
       windowsVerbatimArguments: spawnOptions.windowsVerbatimArguments
     });
+    unregisterChild = registerManagedProcess(child, { name: 'lark-cli auth' });
   } catch (error) {
     authRun.status = 'failed';
     authRun.error = redacted(error.message);
@@ -647,6 +655,7 @@ async function startDevicePoll(deviceCode) {
     authRun.status = status;
     authRun.error = error;
     authRun.process = null;
+    unregisterChild?.();
     statusCache = { at: 0, value: null };
     if (status === 'connected') {
       await setDefaultAsUser();

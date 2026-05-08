@@ -48,6 +48,7 @@ import { createChatService } from './chat-service.js';
 import { getCodexExecutableInfo } from './codex-executable.js';
 import { searchProjectFiles } from './file-search.js';
 import { htmlEscape, readBody, sendHtml, sendJson } from './http-utils.js';
+import { installManagedProcessShutdown, managedProcessSnapshot } from './process-manager.js';
 import { createPushService } from './push-service.js';
 import { createStaticService } from './static-service.js';
 import { createTerminalService } from './terminal-service.js';
@@ -498,12 +499,13 @@ async function publicStatus(authenticated) {
     context: config.context || null,
     codexCli,
     reasoningEffort: DEFAULT_REASONING_EFFORT,
-    voiceTranscription: publicVoiceTranscriptionStatus(config),
+    voiceTranscription: await publicVoiceTranscriptionStatus(config),
     voiceSpeech: publicVoiceSpeechStatus(config),
     voiceRealtime: publicVoiceRealtimeStatus(config),
     docs: await publicDocsStatus(authenticated),
     syncedAt: snapshot.syncedAt,
     activeRuns: [...getActiveRuns(), ...chatService.getActiveImageRuns()],
+    managedProcesses: managedProcessSnapshot(),
     auth: {
       required: true,
       authenticated,
@@ -1106,6 +1108,28 @@ async function main() {
   const server = http.createServer(requestHandler);
   const wss = new WebSocketServer({ noServer: true });
   const realtimeWss = new WebSocketServer({ noServer: true });
+  const closeables = [server, wss, realtimeWss];
+
+  installManagedProcessShutdown({
+    async beforeShutdown() {
+      for (const ws of [...sockets]) {
+        terminalService.closeSocket(ws);
+        try {
+          ws.close(1001, 'server shutting down');
+        } catch {
+          // Ignore stale websocket cleanup.
+        }
+      }
+      terminalService.closeAll?.();
+      await Promise.all(closeables.map((item) => new Promise((resolve) => {
+        try {
+          item.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      })));
+    }
+  });
 
   const handleUpgrade = async (req, socket, head) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
@@ -1163,6 +1187,7 @@ async function main() {
   try {
     const pfx = await fs.readFile(HTTPS_PFX_PATH);
     const httpsServer = https.createServer({ pfx, passphrase: HTTPS_PFX_PASSPHRASE }, requestHandler);
+    closeables.push(httpsServer);
     httpsServer.on('upgrade', handleUpgrade);
     httpsServer.listen(HTTPS_PORT, HOST, () => {
       console.log(`CodexMobile HTTPS listening on https://${HOST}:${HTTPS_PORT}`);

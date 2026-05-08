@@ -289,10 +289,46 @@ codex-mobile uninstall-service
 loginctl enable-linger "$USER"
 ```
 
+`codex-mobile start` 是唯一的主进程入口。生产模式下，浏览器页面、API、WebSocket、Workspace、Git、Terminal 和语音转写入口都通过同一个 HTTP 端口提供。主进程会登记由它拉起的 Codex app-server、Terminal、lark-cli 等子进程；收到 `SIGINT` / `SIGTERM` 时会先关闭 WebSocket 和终端，再终止已登记的子进程，避免服务重启后残留占用资源。
+
+开发模式 `npm run dev` 仍会额外启动 Vite HMR 端口，只用于本地开发。
+
+## ASR 语音转写
+
+CodexMobile 支持三类转写来源：
+
+- 本地 Docker SenseVoice：默认本地 provider，需手动安装。
+- OpenAI 或其它 OpenAI-compatible `/audio/transcriptions` 服务。
+- 通过 `env` 段保留旧的高级配置项。
+
+安装本地 ASR Docker：
+
+```bash
+codex-mobile install-asr-docker
+```
+
+查看 ASR 状态：
+
+```bash
+codex-mobile asr-status
+```
+
+Docker ASR 只绑定本机回环地址，例如 `127.0.0.1:8000`，不会额外暴露给局域网。手机端仍只需要访问 CodexMobile 的主端口。未安装或未就绪时，前端会隐藏语音输入按钮。
+
+也可以改用在线 provider：
+
+```yaml
+voice:
+  transcribe:
+    baseUrl: https://api.openai.com/v1
+    apiKey: ""
+    model: gpt-4o-mini-transcribe
+```
+
 ## 发布打包
 
 - Homebrew：`packaging/homebrew/codex-mobile.rb` 是当前公式模板。正式 tap 发布时建议把 `url` 换成 tag tarball，并填入 `sha256`。
-- Standalone executable：当前项目依赖 `node-pty` 原生模块和 `client/dist` 静态资源，直接打成真正单文件会有 native addon 和资源内嵌边界。优先发布 Homebrew 包；后续可以再补一个基于平台构建产物的 portable bundle 或专门的 SEA/pkg 流程。
+- Standalone / portable：当前重点是单主进程、单公开端口、可清理子进程。项目仍依赖 `node-pty` 原生模块和 `client/dist` 静态资源，真正单二进制需要后续补平台构建产物或 SEA/pkg 流程。
 
 ## 常用脚本
 
@@ -302,6 +338,8 @@ loginctl enable-linger "$USER"
 - `npm run cli -- start`：通过本地 CLI 读取 `~/.codex-mobile/config.yaml` 后启动
 - `npm run service:install`：安装 macOS launchd 或 Linux systemd 用户服务
 - `npm run service:uninstall`：卸载用户服务
+- `npm run asr:install`：构建并启动本地 SenseVoice ASR Docker 容器
+- `npm run asr:status`：查看本地 ASR Docker 状态
 - `npm run start:env`：读取 `.env` 后启动
 - `npm run start:bg`：后台启动服务，日志写入 `.codexmobile`
 - `npm run mac:autostart`：安装 macOS 用户级 LaunchAgent，开机后保持本地桥接服务运行
