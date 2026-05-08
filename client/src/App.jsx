@@ -60,8 +60,6 @@ import { isNearChatBottom, shouldFollowChatOutput } from './chat-scroll.js';
 import { composerSendState } from './send-state.js';
 import {
   detectComposerToken,
-  filteredSlashCommands,
-  slashCommandsForLocale,
   replaceComposerToken
 } from './composer-shortcuts.js';
 import { connectionRecoveryState } from './connection-recovery.js';
@@ -451,6 +449,7 @@ const TRANSLATIONS = {
     'composer.noFileMatch': '没有匹配的文件',
     'composer.selectedSkillCount': '{count} 个技能',
     'composer.skillGeneric': '技能',
+    'composer.removeSkill': '移除技能',
     'composer.queue': '排队消息',
     'composer.checkAttachments': '请查看附件。',
     'composer.checkFileReferences': '请查看引用文件。',
@@ -802,6 +801,7 @@ const TRANSLATIONS = {
     'composer.noFileMatch': 'No matching files',
     'composer.selectedSkillCount': '{count} skills',
     'composer.skillGeneric': 'Skill',
+    'composer.removeSkill': 'Remove skill',
     'composer.queue': 'Queued Messages',
     'composer.checkAttachments': 'Please review the attachments.',
     'composer.checkFileReferences': 'Please review the referenced files.',
@@ -7056,7 +7056,7 @@ function Composer({
   voiceError,
   onVoiceTranscribe
 }) {
-  const { locale, t, ui } = useI18n();
+  const { t, ui } = useI18n();
   const composerWrapRef = useRef(null);
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -7065,9 +7065,9 @@ function Composer({
   const [menuAnchor, setMenuAnchor] = useState(null);
   const [skillFilter, setSkillFilter] = useState('');
   const [cursorPosition, setCursorPosition] = useState(0);
+  const [dismissedTokenKey, setDismissedTokenKey] = useState('');
   const [fileSearch, setFileSearch] = useState({ query: '', loading: false, results: [] });
   const selectedFileMentions = Array.isArray(fileMentions) ? fileMentions : [];
-  const hasInput = input.trim().length > 0 || attachments.length > 0 || selectedFileMentions.length > 0;
   const modelList = models?.length ? models : [{ value: selectedModel || 'gpt-5.5', label: selectedModel || 'gpt-5.5' }];
   const selectedModelLabel = modelList.find((model) => model.value === selectedModel)?.label || selectedModel || 'gpt-5.5';
   const selectedModelTriggerLabel = `${shortModelName(selectedModelLabel)} ${reasoningLabel(selectedReasoningEffort, t)}`;
@@ -7080,9 +7080,9 @@ function Composer({
     () => detectComposerToken(input, cursorPosition || input.length),
     [input, cursorPosition]
   );
-  const slashMatches = composerToken?.type === 'slash'
-    ? filteredSlashCommands(composerToken.query, slashCommandsForLocale(locale))
-    : [];
+  const composerTokenKey = composerToken
+    ? `${composerToken.type}:${composerToken.start}:${composerToken.end}:${composerToken.query}`
+    : '';
   const tokenSkillMatches = composerToken?.type === 'skill'
     ? skillList
       .filter((skill) => {
@@ -7096,6 +7096,12 @@ function Composer({
       })
       .slice(0, 12)
     : [];
+  const tokenPanelOpen = !openMenu && composerToken && composerTokenKey !== dismissedTokenKey && (
+    (composerToken.type === 'skill') ||
+    (composerToken.type === 'file')
+  );
+  const hasInput = input.trim().length > 0 || attachments.length > 0 || selectedFileMentions.length > 0;
+  const hasComposerChips = attachments.length > 0 || selectedFileMentions.length > 0 || selectedSkills.length > 0;
   const sendState = composerSendState({
     running,
     hasInput,
@@ -7172,6 +7178,36 @@ function Composer({
   }, [openMenu]);
 
   useEffect(() => {
+    if (!tokenPanelOpen || !composerTokenKey) {
+      return undefined;
+    }
+    function dismissTokenPanel() {
+      setDismissedTokenKey(composerTokenKey);
+    }
+    function handlePointerDown(event) {
+      if (composerWrapRef.current?.contains(event.target)) {
+        return;
+      }
+      dismissTokenPanel();
+    }
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        dismissTokenPanel();
+      }
+    }
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', dismissTokenPanel);
+    window.addEventListener('orientationchange', dismissTokenPanel);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', dismissTokenPanel);
+      window.removeEventListener('orientationchange', dismissTokenPanel);
+    };
+  }, [tokenPanelOpen, composerTokenKey]);
+
+  useEffect(() => {
     if (composerToken?.type !== 'file' || !selectedProject?.id) {
       setFileSearch({ query: '', loading: false, results: [] });
       return undefined;
@@ -7217,15 +7253,6 @@ function Composer({
       textareaRef.current?.setSelectionRange(position, position);
       setCursorPosition(position);
     });
-  }
-
-  function runSlashCommand(command) {
-    replaceCurrentToken(command.prompt ? `${command.prompt} ` : '');
-    if (command.action === 'open-context') {
-      setOpenMenu('context');
-    } else {
-      setOpenMenu(null);
-    }
   }
 
   function selectTokenSkill(skill) {
@@ -7307,12 +7334,6 @@ function Composer({
     event.target.value = '';
     setOpenMenu(null);
   }
-
-  const tokenPanelOpen = !openMenu && composerToken && (
-    (composerToken.type === 'slash' && slashMatches.length > 0) ||
-    (composerToken.type === 'skill') ||
-    (composerToken.type === 'file')
-  );
 
   return (
     <form ref={composerWrapRef} className="composer-wrap" onSubmit={submit}>
@@ -7472,17 +7493,6 @@ function Composer({
       ) : null}
       {tokenPanelOpen ? (
         <div className="composer-menu shortcut-menu" role="listbox">
-          {composerToken.type === 'slash' ? (
-            slashMatches.map((command) => (
-              <button key={command.id} type="button" onClick={() => runSlashCommand(command)}>
-                <Terminal size={16} />
-                <span>
-                  <strong>{command.title}</strong>
-                  <small>{command.aliases.join(' ')}</small>
-                </span>
-              </button>
-            ))
-          ) : null}
           {composerToken.type === 'skill' ? (
             tokenSkillMatches.length ? tokenSkillMatches.map((skill) => (
               <button key={skill.path} type="button" onClick={() => selectTokenSkill(skill)}>
@@ -7611,8 +7621,17 @@ function Composer({
         <strong>{connection.label}</strong>
       </div>
       <div className="composer">
-        {attachments.length || selectedFileMentions.length ? (
+        {hasComposerChips ? (
           <div className="attachment-tray">
+            {selectedSkills.map((skill) => (
+              <span key={skill.path} className="attachment-chip skill-mention-chip">
+                <Bot size={14} />
+                <span>{skill.label || skill.name || t('composer.skillGeneric')}</span>
+                <button type="button" onClick={() => onToggleSkill(skill.path)} aria-label={t('composer.removeSkill')}>
+                  <Trash2 size={13} />
+                </button>
+              </span>
+            ))}
             {attachments.map((attachment) => (
               <span key={attachment.id} className="attachment-chip">
                 <Paperclip size={14} />

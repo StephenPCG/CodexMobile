@@ -4595,6 +4595,11 @@ button {
   background: rgba(235, 242, 255, 0.92);
 }
 
+.skill-mention-chip {
+  color: #174073;
+  background: rgba(232, 242, 255, 0.95);
+}
+
 .queued-drafts-panel {
   display: grid;
   gap: 6px;
@@ -5824,6 +5829,11 @@ button {
 
 [data-theme="dark"] .file-mention-chip {
   background: #263044;
+}
+
+[data-theme="dark"] .skill-mention-chip {
+  color: #dbeafe;
+  background: #22314a;
 }
 
 [data-theme="dark"] .attachment-chip button {
