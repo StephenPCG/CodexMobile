@@ -6,6 +6,7 @@ import { buildCodexTurnInput, imageMarkdownFromCodexImageGeneration } from './co
 import { buildCodexLarkCliContext } from './lark-cli.js';
 import { detectFeishuSkillKeys } from './feishu-skills.js';
 import { prepareCodexRunTarget } from './codex-worktree.js';
+import { fileChangesFromItem } from './file-changes.js';
 
 const activeRuns = new Map();
 const NON_ASCII_PATH_PATTERN = /[^\u0000-\u007F]/;
@@ -185,8 +186,9 @@ function detailFromItem(item) {
   if (item.tool || item.server) {
     return [item.server, item.tool].filter(Boolean).join(' / ');
   }
-  if (Array.isArray(item.changes)) {
-    return item.changes.map((change) => `${change.kind || 'update'} ${change.path}`).join('\n');
+  const fileChanges = fileChangesFromItem(item, options);
+  if (fileChanges.length) {
+    return fileChanges.map((change) => `${change.kind || 'update'} ${change.path}`).join('\n');
   }
   if (item.message) {
     return item.message;
@@ -384,8 +386,9 @@ function codexErrorDiagnostics(error) {
   };
 }
 
-function emitActivity(emit, { sessionId, turnId, messageId, item, kind, status }) {
-  const detail = detailFromItem(item);
+function emitActivity(emit, { sessionId, turnId, messageId, item, kind, status, cwd = '' }) {
+  const detail = detailFromItem(item, { cwd });
+  const fileChanges = fileChangesFromItem(item, { cwd });
   emit({
     type: 'activity-update',
     sessionId,
@@ -765,6 +768,7 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   try {
     target = await prepareCodexRunTarget({ projectPath, runMode, sessionId });
     workingDirectory = await ensureAsciiWorkingDirectory(target.workingDirectory);
+    state.workingDirectory = workingDirectory;
     Object.assign(run, {
       requestedRunMode: target.requestedMode,
       runMode: target.effectiveMode,

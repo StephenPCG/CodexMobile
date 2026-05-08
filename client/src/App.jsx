@@ -591,6 +591,75 @@ function useResolvedImageSource(url, retryKey) {
   return resolved;
 }
 
+function diffStatsFromText(diff) {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of String(diff || '').split(/\r?\n/)) {
+    if (line.startsWith('+++') || line.startsWith('---')) {
+      continue;
+    }
+    if (line.startsWith('+')) {
+      additions += 1;
+    } else if (line.startsWith('-')) {
+      deletions += 1;
+    }
+  }
+  return { additions, deletions };
+}
+
+function normalizeFileChangeForView(change) {
+  if (!change || typeof change !== 'object') {
+    return null;
+  }
+  const filePath = change.path || change.file || change.name;
+  if (!filePath) {
+    return null;
+  }
+  const unifiedDiff = change.unifiedDiff || change.unified_diff || change.diff || '';
+  const stats = diffStatsFromText(unifiedDiff);
+  return {
+    path: String(filePath),
+    oldPath: change.oldPath || change.old_path || null,
+    movePath: change.movePath || change.move_path || null,
+    kind: change.kind || change.type || 'modified',
+    additions: Number.isFinite(Number(change.additions)) ? Number(change.additions) : stats.additions,
+    deletions: Number.isFinite(Number(change.deletions)) ? Number(change.deletions) : stats.deletions,
+    unifiedDiff
+  };
+}
+
+function normalizeFileChangesForView(changes) {
+  if (!Array.isArray(changes)) {
+    return [];
+  }
+  return changes.map(normalizeFileChangeForView).filter(Boolean);
+}
+
+function mergeFileChangesForView(existing = [], incoming = []) {
+  const merged = new Map();
+  for (const change of [...normalizeFileChangesForView(existing), ...normalizeFileChangesForView(incoming)]) {
+    merged.set(change.path, {
+      ...merged.get(change.path),
+      ...change
+    });
+  }
+  return [...merged.values()];
+}
+
+function fileChangeKindLabel(kind) {
+  const value = String(kind || '').toLowerCase();
+  if (value === 'add' || value === 'create' || value === 'added') {
+    return 'added';
+  }
+  if (value === 'delete' || value === 'remove' || value === 'deleted') {
+    return 'deleted';
+  }
+  if (value === 'rename' || value === 'move') {
+    return 'renamed';
+  }
+  return 'modified';
+}
+
 function createClientTurnId() {
   return globalThis.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -1291,6 +1360,31 @@ function upsertActivityMessage(current, payload) {
   return [...current, nextMessage];
 }
 
+function upsertDiffMessage(current, payload) {
+  const fileChanges = normalizeFileChangesForView(payload.fileChanges);
+  if (!fileChanges.length) {
+    return current;
+  }
+  const id = `diff-${payload.turnId || payload.sessionId || payload.messageId || 'current'}`;
+  const existingIndex = current.findIndex((message) => message.id === id);
+  const previous = existingIndex >= 0 ? current[existingIndex] : null;
+  const nextMessage = {
+    id,
+    role: 'diff',
+    content: '',
+    turnId: payload.turnId || previous?.turnId || null,
+    sessionId: payload.sessionId || previous?.sessionId || null,
+    fileChanges: mergeFileChangesForView(previous?.fileChanges || [], fileChanges),
+    timestamp: payload.timestamp || previous?.timestamp || new Date().toISOString()
+  };
+  if (existingIndex >= 0) {
+    const next = [...current];
+    next[existingIndex] = nextMessage;
+    return next;
+  }
+  return [...current, nextMessage];
+}
+
 function completeStatusMessage(current, payload) {
   const id = statusMessageId(payload);
   return current.filter((message) => message.id !== id);
@@ -1341,7 +1435,7 @@ function upsertAssistantMessage(current, payload) {
   if (existingIndex >= 0) {
     const next = [...withCompletedActivity];
     next[existingIndex] = nextMessage;
-    return next;
+    return [...next, ...relatedDiffMessages];
   }
   return [...withCompletedActivity, nextMessage];
 }
@@ -4222,6 +4316,9 @@ function ChatMessage({ message, now, onPreviewImage, onDeleteMessage }) {
   if (message.role === 'activity') {
     return <ActivityMessage message={message} now={now} />;
   }
+  if (message.role === 'diff') {
+    return <DiffMessage message={message} />;
+  }
   const isUser = message.role === 'user';
   const canAct = message.role === 'user' || message.role === 'assistant';
   const userMedia = isUser ? splitMessageImages(message.content) : { text: message.content, images: [] };
@@ -7046,7 +7143,7 @@ export default function App() {
         if (!payloadMatchesCurrentConversation(payload)) {
           return;
         }
-        setMessages((current) => upsertActivityMessage(current, payload));
+        setMessages((current) => upsertDiffMessage(upsertActivityMessage(current, payload), payload));
         return;
       }
       if (payload.type === 'context-status-update') {

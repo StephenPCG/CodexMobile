@@ -14,6 +14,7 @@ import {
   readMobileSessionIndex,
   renameMobileSession
 } from './mobile-session-index.js';
+import { fileChangesFromItem, mergeFileChanges } from './file-changes.js';
 
 const execFileAsync = promisify(execFile);
 const DELETED_MESSAGES_PATH = path.join(process.cwd(), '.codexmobile', 'state', 'deleted-messages.json');
