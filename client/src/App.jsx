@@ -40,7 +40,6 @@ import {
   Trash2,
   UploadCloud,
   Volume2,
-  Wifi,
   X
 } from 'lucide-react';
 import { CanvasAddon } from '@xterm/addon-canvas';
@@ -690,10 +689,12 @@ function createClientTurnId() {
   return globalThis.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function createDraftSession(project) {
+const NEW_DRAFT_CACHE_PREFIX = 'codexmobile.newDraft.';
+
+function createDraftSession(project, options = {}) {
   const now = new Date().toISOString();
   return {
-    id: `draft-${project.id}-${Date.now()}`,
+    id: options.stable ? `draft-${project.id}` : `draft-${project.id}-${Date.now()}`,
     projectId: project.id,
     title: '新对话',
     summary: '等待第一条消息',
@@ -706,6 +707,100 @@ function createDraftSession(project) {
 function isDraftSession(session) {
   const id = typeof session === 'string' ? session : session?.id;
   return Boolean(session?.draft || id?.startsWith('draft-'));
+}
+
+function isConcreteSessionId(value) {
+  const text = String(value || '');
+  return Boolean(text && !text.startsWith('draft-') && !text.startsWith('codex-'));
+}
+
+function safeDecodePathSegment(value) {
+  try {
+    return decodeURIComponent(value || '');
+  } catch {
+    return value || '';
+  }
+}
+
+function parseAppRoute(pathname = '') {
+  const source =
+    pathname ||
+    (typeof window !== 'undefined' ? window.location.pathname : '/') ||
+    '/';
+  const parts = source.split('/').filter(Boolean).map(safeDecodePathSegment);
+  if (!parts.length) {
+    return { type: 'welcome' };
+  }
+  if (parts[0] !== 'projects' || !parts[1]) {
+    return { type: 'welcome' };
+  }
+  if (parts[2] === 'threads' && parts[3]) {
+    return { type: 'thread', projectId: parts[1], sessionId: parts[3] };
+  }
+  return { type: 'project-new', projectId: parts[1] };
+}
+
+function projectNewRoutePath(projectId) {
+  return `/projects/${encodeURIComponent(projectId)}/new`;
+}
+
+function sessionRoutePath(projectId, sessionId) {
+  return `/projects/${encodeURIComponent(projectId)}/threads/${encodeURIComponent(sessionId)}`;
+}
+
+function newDraftCacheKey(projectId) {
+  return `${NEW_DRAFT_CACHE_PREFIX}${projectId}`;
+}
+
+function readNewDraftCache(projectId) {
+  if (!projectId || typeof localStorage === 'undefined') {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(newDraftCacheKey(projectId)) || '{}');
+    if (!parsed || typeof parsed !== 'object') {
+      return {};
+    }
+    return {
+      input: typeof parsed.input === 'string' ? parsed.input : '',
+      attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
+      fileMentions: Array.isArray(parsed.fileMentions) ? parsed.fileMentions : [],
+      runMode: RUN_MODE_OPTIONS.some((option) => option.value === parsed.runMode) ? parsed.runMode : ''
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeNewDraftCache(projectId, draft) {
+  if (!projectId || typeof localStorage === 'undefined') {
+    return;
+  }
+  try {
+    localStorage.setItem(
+      newDraftCacheKey(projectId),
+      JSON.stringify({
+        input: String(draft?.input || ''),
+        attachments: Array.isArray(draft?.attachments) ? draft.attachments : [],
+        fileMentions: Array.isArray(draft?.fileMentions) ? draft.fileMentions : [],
+        runMode: draft?.runMode || 'local',
+        updatedAt: new Date().toISOString()
+      })
+    );
+  } catch {
+    // Storage can fail in private mode; losing a draft cache is non-fatal.
+  }
+}
+
+function clearNewDraftCache(projectId) {
+  if (!projectId || typeof localStorage === 'undefined') {
+    return;
+  }
+  try {
+    localStorage.removeItem(newDraftCacheKey(projectId));
+  } catch {
+    // Ignore localStorage failures.
+  }
 }
 
 function runModeFromPath(value = '') {
@@ -2079,24 +2174,28 @@ function bridgeConnectionLabel(connectionState, desktopBridge) {
 function TopBar({
   selectedProject,
   selectedSession,
-  connectionState,
-  desktopBridge,
+  runMode = 'local',
   onMenu,
   onOpenWorkspace,
   onOpenTerminal,
   onOpenDocs,
   onGitAction,
+  onRenameSession,
+  onArchiveSession,
   notificationSupported,
   notificationEnabled,
   onEnableNotifications,
   gitDisabled = false
 }) {
-  const status = bridgeConnectionLabel(connectionState, desktopBridge);
   const [menuOpen, setMenuOpen] = useState(false);
   const [copiedThreadId, setCopiedThreadId] = useState(false);
   const menuRef = useRef(null);
   const copiedTimerRef = useRef(null);
   const canCopyThreadId = Boolean(selectedSession?.id && !isDraftSession(selectedSession));
+  const canOperateThread = Boolean(selectedProject?.id && selectedSession?.id);
+  const threadTitle = String(selectedSession?.title || (selectedProject ? '新对话' : 'CodexMobile')).trim();
+  const projectTitle = String(selectedProject?.name || '未选择项目').trim();
+  const subtitle = `${projectTitle} · ${runModeShortLabel(runMode)}`;
 
   useEffect(() => {
     if (!menuOpen) {
@@ -2143,6 +2242,26 @@ function TopBar({
     onOpenDocs?.();
   }
 
+  function handleOpenWorkspace(tab) {
+    setMenuOpen(false);
+    onOpenWorkspace?.(tab);
+  }
+
+  function handleOpenTerminal() {
+    setMenuOpen(false);
+    onOpenTerminal?.();
+  }
+
+  function handleRenameThread() {
+    setMenuOpen(false);
+    onRenameSession?.(selectedProject, selectedSession);
+  }
+
+  function handleArchiveThread() {
+    setMenuOpen(false);
+    onArchiveSession?.(selectedProject, selectedSession);
+  }
+
   function handleEnableNotifications() {
     setMenuOpen(false);
     onEnableNotifications?.();
@@ -2154,33 +2273,15 @@ function TopBar({
         <Menu size={22} />
       </button>
       <div className="top-title">
-        <strong>{selectedProject?.name || 'CodexMobile'}</strong>
-        <span className={`connection-status ${status.className}`}>
-          <Wifi size={13} />
-          {status.label}
-        </span>
+        <strong title={threadTitle}>{threadTitle}</strong>
+        <small title={subtitle}>
+          <span>{projectTitle}</span>
+          <span className="top-title-separator">·</span>
+          <RunModeIcon value={runMode} size={13} />
+          <span>{runModeShortLabel(runMode)}</span>
+        </small>
       </div>
       <div className="top-actions">
-        <button
-          type="button"
-          className="icon-button"
-          onClick={() => onOpenWorkspace?.('changes')}
-          disabled={!selectedProject}
-          aria-label="打开文件和变更"
-          title="Files"
-        >
-          <Folder size={21} />
-        </button>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onOpenTerminal}
-          disabled={!selectedProject}
-          aria-label="打开 Terminal"
-          title="Terminal"
-        >
-          <Terminal size={21} />
-        </button>
         <div className="top-menu-wrap" ref={menuRef}>
           <button
             type="button"
@@ -2193,10 +2294,28 @@ function TopBar({
           </button>
           {menuOpen ? (
             <div className="top-menu-popover" role="menu" aria-label="更多操作">
-              <div className="top-menu-title">
-                <MoreHorizontal size={16} />
-                <span>更多</span>
-              </div>
+              <button type="button" role="menuitem" onClick={() => handleOpenWorkspace('changes')} disabled={!selectedProject}>
+                <GitPullRequestCreateArrow size={16} />
+                <span>Changes</span>
+              </button>
+              <button type="button" role="menuitem" onClick={() => handleOpenWorkspace('directories')} disabled={!selectedProject}>
+                <Folder size={16} />
+                <span>Directories</span>
+              </button>
+              <button type="button" role="menuitem" onClick={handleOpenTerminal} disabled={!selectedProject}>
+                <Terminal size={16} />
+                <span>Terminal</span>
+              </button>
+              <div className="top-menu-divider" />
+              <button type="button" role="menuitem" onClick={handleRenameThread} disabled={!canOperateThread}>
+                <Pencil size={16} />
+                <span>修改 thread 标题</span>
+              </button>
+              <button type="button" role="menuitem" className="is-danger" onClick={handleArchiveThread} disabled={!canOperateThread}>
+                <Archive size={16} />
+                <span>归档 thread</span>
+              </button>
+              <div className="top-menu-divider" />
               <button type="button" role="menuitem" onClick={handleCopyThreadId} disabled={!canCopyThreadId}>
                 {copiedThreadId ? <Check size={16} /> : <Copy size={16} />}
                 <span>{copiedThreadId ? '已复制对话 ID' : '复制对话 ID'}</span>
@@ -2239,6 +2358,119 @@ function TopBar({
         </div>
       </div>
     </header>
+  );
+}
+
+function SessionActionModal({ action, onClose, onConfirm }) {
+  const [title, setTitle] = useState(action?.session?.title || '新对话');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setTitle(action?.session?.title || '新对话');
+    setBusy(false);
+    setError('');
+  }, [action]);
+
+  if (!action) {
+    return null;
+  }
+
+  const isRename = action.type === 'rename';
+  const threadTitle = action.session?.title || '对话';
+  async function submit(event) {
+    event?.preventDefault?.();
+    if (busy) {
+      return;
+    }
+    const nextTitle = title.trim();
+    if (isRename && !nextTitle) {
+      setError('标题不能为空');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await onConfirm(isRename ? nextTitle : undefined);
+    } catch (confirmError) {
+      setBusy(false);
+      setError(confirmError.message || '操作失败');
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <form
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isRename ? '修改 thread 标题' : '归档 thread'}
+        onSubmit={submit}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className={`modal-icon ${isRename ? '' : 'is-danger'}`}>
+          {isRename ? <Pencil size={22} /> : <Archive size={22} />}
+        </div>
+        <div className="modal-body">
+          <h2>{isRename ? '修改 thread 标题' : '归档 thread'}</h2>
+          {isRename ? (
+            <label className="modal-field">
+              <span>标题</span>
+              <input
+                autoFocus
+                value={title}
+                maxLength={52}
+                onChange={(event) => setTitle(event.target.value)}
+              />
+            </label>
+          ) : (
+            <p>
+              归档“{threadTitle}”后会从列表中移除，并同步到可用的 Codex 后端。
+            </p>
+          )}
+          {error ? <p className="modal-error">{error}</p> : null}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="modal-secondary" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button type="submit" className={isRename ? 'modal-primary' : 'modal-danger'} disabled={busy}>
+            {busy ? '处理中...' : isRename ? '保存' : '归档'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function WelcomePane({ projects, onNewConversation }) {
+  const visibleProjects = Array.isArray(projects) ? projects.slice(0, 6) : [];
+  return (
+    <main className="welcome-pane">
+      <div className="welcome-content">
+        <div className="welcome-mark">
+          <MessageSquarePlus size={28} />
+        </div>
+        <h1>CodexMobile</h1>
+        <p>选择一个项目开始新对话，或从左侧菜单打开历史 thread。</p>
+        {visibleProjects.length ? (
+          <div className="welcome-projects" aria-label="项目">
+            {visibleProjects.map((project) => (
+              <button key={project.id} type="button" onClick={() => onNewConversation(project)}>
+                <Folder size={18} />
+                <span>
+                  <strong>{project.name}</strong>
+                  <small>{project.path}</small>
+                </span>
+                <Plus size={17} />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="welcome-empty">还没有可用项目</div>
+        )}
+      </div>
+    </main>
   );
 }
 
@@ -5695,6 +5927,27 @@ function ConnectionRecoveryCard({ state, onRetry, onSync, onPair, onStatus }) {
   );
 }
 
+function composerConnectionStatus(connectionState) {
+  if (connectionState === 'connected') {
+    return { label: 'online', className: 'is-online' };
+  }
+  if (connectionState === 'connecting') {
+    return { label: 'connecting', className: 'is-connecting' };
+  }
+  return { label: 'offline', className: 'is-offline' };
+}
+
+function VoiceWaveIcon() {
+  return (
+    <span className="voice-wave-icon" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
 function Composer({
   input,
   setInput,
@@ -5733,6 +5986,9 @@ function Composer({
   onRestoreQueueDraft,
   onRemoveQueueDraft,
   onSteerQueueDraft,
+  connectionState,
+  voiceState,
+  voiceError,
   onVoiceTranscribe
 }) {
   const composerWrapRef = useRef(null);
@@ -5794,6 +6050,15 @@ function Composer({
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(query));
   });
+  const connection = composerConnectionStatus(connectionState);
+  const voiceListening = voiceState === 'listening';
+  const voiceProcessing = ['transcribing', 'sending'].includes(voiceState);
+  const voiceFailed = voiceState === 'error' && Boolean(voiceError);
+  const voiceLabel = voiceListening
+    ? '停止语音转录'
+    : voiceProcessing
+      ? '正在处理语音'
+      : '语音转录';
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -6270,6 +6535,10 @@ function Composer({
           </button>
         </div>
       ) : null}
+      <div className={`composer-connection-status ${connection.className}`} role="status" aria-live="polite">
+        <span />
+        <strong>{connection.label}</strong>
+      </div>
       <div className="composer">
         {attachments.length || selectedFileMentions.length ? (
           <div className="attachment-tray">
@@ -6331,20 +6600,18 @@ function Composer({
             >
               <PermissionModeIcon value={permissionMode} size={18} />
             </button>
-            <button
-              type="button"
-              className={`composer-icon-control ${openMenu === 'run-mode' ? 'is-active' : ''}`}
-              onClick={(event) => {
-                if (canSelectRunMode) {
-                  toggleMenu('run-mode', event);
-                }
-              }}
-              disabled={!selectedProject}
-              aria-label={`启动模式：${runModeLabel(displayRunMode)}${canSelectRunMode ? '' : '，当前会话不可修改'}`}
-              title={`${runModeLabel(displayRunMode)}${canSelectRunMode ? '' : ' · 当前会话不可修改'}`}
-            >
-              <RunModeIcon value={displayRunMode} size={18} />
-            </button>
+            {canSelectRunMode ? (
+              <button
+                type="button"
+                className={`composer-icon-control ${openMenu === 'run-mode' ? 'is-active' : ''}`}
+                onClick={(event) => toggleMenu('run-mode', event)}
+                disabled={!selectedProject}
+                aria-label={`启动模式：${runModeLabel(displayRunMode)}`}
+                title={runModeLabel(displayRunMode)}
+              >
+                <RunModeIcon value={displayRunMode} size={18} />
+              </button>
+            ) : null}
           </div>
           <div className="control-right">
             <button
@@ -6359,13 +6626,13 @@ function Composer({
             </button>
             <button
               type="button"
-              className="composer-icon-control"
+              className={`composer-icon-control voice-control ${voiceListening ? 'is-listening' : ''} ${voiceProcessing ? 'is-processing' : ''} ${voiceFailed ? 'is-error' : ''}`}
               onClick={onVoiceTranscribe}
-              disabled={!selectedProject}
-              aria-label="语音转录"
-              title="语音转录"
+              disabled={!selectedProject || voiceProcessing}
+              aria-label={voiceLabel}
+              title={voiceFailed ? voiceError : voiceLabel}
             >
-              <Mic size={18} />
+              {voiceListening ? <VoiceWaveIcon /> : voiceProcessing ? <Loader2 className="spin" size={18} /> : <Mic size={18} />}
             </button>
             <button
               type="submit"
@@ -6384,6 +6651,7 @@ function Composer({
 }
 
 export default function App() {
+  const [appRoute, setAppRoute] = useState(() => parseAppRoute());
   const [status, setStatus] = useState(DEFAULT_STATUS);
   const [contextStatus, setContextStatus] = useState(() => normalizeContextStatus(DEFAULT_STATUS.context));
   const [authenticated, setAuthenticated] = useState(Boolean(getToken()));
@@ -6437,6 +6705,8 @@ export default function App() {
   );
   const [syncing, setSyncing] = useState(false);
   const [connectionState, setConnectionState] = useState(() => (getToken() ? 'connecting' : 'disconnected'));
+  const [sessionModal, setSessionModal] = useState(null);
+  const appRouteRef = useRef(appRoute);
   const wsRef = useRef(null);
   const terminalHandlersRef = useRef(new Map());
   const selectedProjectRef = useRef(null);
@@ -7382,6 +7652,9 @@ export default function App() {
         clearVoiceDialogTimer();
         stopVoiceDialogStream();
         voiceDialogRecorderRef.current = null;
+        voiceDialogOpenRef.current = false;
+        setVoiceDialogOpen(false);
+        showToast({ level: 'error', title: '语音转录失败', body: '录音失败' });
         setVoiceDialogErrorBriefly('录音失败');
       };
       recorder.onstop = async () => {
@@ -7399,6 +7672,8 @@ export default function App() {
           setVoiceDialogMode('sending');
           const turn = await handleVoiceSubmit(transcript);
           if (turn?.appended) {
+            voiceDialogOpenRef.current = false;
+            setVoiceDialogOpen(false);
             setVoiceDialogMode('idle');
             voiceDialogAwaitingTurnRef.current = null;
             voiceDialogAutoListenRef.current = false;
@@ -7412,6 +7687,9 @@ export default function App() {
           setVoiceDialogMode('waiting');
         } catch (error) {
           voiceDialogAwaitingTurnRef.current = null;
+          voiceDialogOpenRef.current = false;
+          setVoiceDialogOpen(false);
+          showToast({ level: 'error', title: '语音转录失败', body: error.message || '没有识别到文字' });
           setVoiceDialogErrorBriefly(error.message || '语音对话失败');
         }
       };
@@ -7429,7 +7707,11 @@ export default function App() {
       stopVoiceDialogStream();
       voiceDialogRecorderRef.current = null;
       const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
-      setVoiceDialogErrorBriefly(denied ? '麦克风权限被拒绝' : '录音启动失败');
+      const message = denied ? '麦克风权限被拒绝' : '录音启动失败';
+      voiceDialogOpenRef.current = false;
+      setVoiceDialogOpen(false);
+      showToast({ level: 'error', title: '语音转录失败', body: message });
+      setVoiceDialogErrorBriefly(message);
     }
   }
 
@@ -7513,14 +7795,21 @@ export default function App() {
   }
 
   function openVoiceTranscriptionDialog() {
+    if (voiceDialogRecorderRef.current?.state === 'recording') {
+      stopVoiceDialogRecording();
+      return;
+    }
+    if (['transcribing', 'sending'].includes(voiceDialogStateRef.current)) {
+      return;
+    }
     unlockVoiceDialogAudio();
     voiceDialogOpenRef.current = true;
     voiceDialogRealtimeRef.current = false;
-    voiceDialogAutoListenRef.current = true;
+    voiceDialogAutoListenRef.current = false;
     voiceDialogAwaitingTurnRef.current = null;
     voiceDialogIdeaBufferRef.current = [];
     setVoiceDialogHandoffDraftValue('');
-    setVoiceDialogOpen(true);
+    setVoiceDialogOpen(false);
     setVoiceDialogError('');
     setVoiceDialogTranscript('');
     setVoiceDialogAssistantText('');
@@ -7883,6 +8172,10 @@ export default function App() {
   }, [selectedSession]);
 
   useEffect(() => {
+    appRouteRef.current = appRoute;
+  }, [appRoute]);
+
+  useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
 
@@ -8031,6 +8324,18 @@ export default function App() {
   }, [selectedReasoningEffort]);
 
   useEffect(() => {
+    if (!selectedProject?.id || !selectedSession || !isDraftSession(selectedSession)) {
+      return;
+    }
+    writeNewDraftCache(selectedProject.id, {
+      input,
+      attachments,
+      fileMentions,
+      runMode
+    });
+  }, [attachments, fileMentions, input, runMode, selectedProject?.id, selectedSession]);
+
+  useEffect(() => {
     localStorage.setItem(SELECTED_SKILLS_KEY, JSON.stringify(selectedSkillPaths));
   }, [selectedSkillPaths]);
 
@@ -8066,18 +8371,70 @@ export default function App() {
     return data;
   }, []);
 
+  function navigateAppRoute(path, options = {}) {
+    if (typeof window === 'undefined' || !path) {
+      return;
+    }
+    const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentPath !== path) {
+      const method = options.replace ? 'replaceState' : 'pushState';
+      window.history[method]({}, '', path);
+    }
+    const nextRoute = parseAppRoute(window.location.pathname);
+    appRouteRef.current = nextRoute;
+    setAppRoute(nextRoute);
+  }
+
+  function selectProjectDraft(project, options = {}) {
+    if (!project?.id) {
+      return null;
+    }
+    const draft = createDraftSession(project, { stable: true });
+    const cache = options.ignoreCache ? {} : readNewDraftCache(project.id);
+    selectedProjectRef.current = project;
+    selectedSessionRef.current = draft;
+    setSelectedProject(project);
+    setSelectedSession(draft);
+    setExpandedProjectIds((current) => ({ ...current, [project.id]: true }));
+    setSessionsByProject((current) => {
+      const source = Array.isArray(options.sessions) ? options.sessions : current[project.id] || [];
+      return {
+        ...current,
+        [project.id]: [draft, ...source.filter((session) => session.id !== draft.id)]
+      };
+    });
+    setMessages([]);
+    setContextStatus(emptyContextStatus());
+    setInput(cache.input || '');
+    setAttachments(cache.attachments || []);
+    setFileMentions(cache.fileMentions || []);
+    if (cache.runMode) {
+      setRunModeState(cache.runMode);
+    }
+    if (options.updateRoute) {
+      navigateAppRoute(projectNewRoutePath(project.id), { replace: options.updateRoute === 'replace' });
+    }
+    return draft;
+  }
+
   const loadSessions = useCallback(async (project, options = true) => {
     const settings =
       typeof options === 'boolean'
         ? { chooseLatest: options, preserveSelection: false }
         : {
           chooseLatest: options?.chooseLatest ?? true,
-          preserveSelection: Boolean(options?.preserveSelection)
+          preserveSelection: Boolean(options?.preserveSelection),
+          requestedSessionId: options?.requestedSessionId || '',
+          forceNewDraft: Boolean(options?.forceNewDraft),
+          replaceMissingWithDraft: Boolean(options?.replaceMissingWithDraft)
         };
     if (!project) {
       selectedSessionRef.current = null;
       setSelectedSession(null);
       setMessages([]);
+      setInput('');
+      setAttachments([]);
+      setFileMentions([]);
       setContextStatus(emptyContextStatus());
       return;
     }
@@ -8086,6 +8443,36 @@ export default function App() {
       const data = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}/sessions`);
       const apiSessions = data.sessions || [];
       const currentSession = selectedSessionRef.current;
+      if (settings.forceNewDraft) {
+        setSessionsByProject((current) => ({ ...current, [project.id]: apiSessions }));
+        selectProjectDraft(project, { sessions: apiSessions });
+        return;
+      }
+      if (settings.requestedSessionId) {
+        const requested = apiSessions.find((session) => String(session.id) === String(settings.requestedSessionId));
+        if (requested) {
+          selectedSessionRef.current = requested;
+          setSessionsByProject((current) => ({ ...current, [project.id]: apiSessions }));
+          setSelectedSession(requested);
+          setInput('');
+          setAttachments([]);
+          setFileMentions([]);
+          setContextStatus(normalizeContextStatus(requested.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
+          const messageData = await apiFetch(sessionMessagesApiPath(requested.id));
+          if (selectedSessionRef.current?.id === requested.id) {
+            setMessages(messageData.messages || []);
+            setContextStatus(
+              normalizeContextStatus(messageData.context || requested.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context)
+            );
+          }
+          return;
+        }
+        setSessionsByProject((current) => ({ ...current, [project.id]: apiSessions }));
+        if (settings.replaceMissingWithDraft) {
+          selectProjectDraft(project, { sessions: apiSessions, updateRoute: 'replace' });
+          return;
+        }
+      }
       const preserveCurrent =
         settings.preserveSelection &&
         currentSession?.projectId === project.id &&
@@ -8123,6 +8510,9 @@ export default function App() {
         const next = nextSessions[0] || null;
         selectedSessionRef.current = next;
         setSelectedSession(next);
+        setInput('');
+        setAttachments([]);
+        setFileMentions([]);
         if (next) {
           setContextStatus(normalizeContextStatus(next.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
           const messageData = await apiFetch(sessionMessagesApiPath(next.id));
@@ -8147,25 +8537,62 @@ export default function App() {
 
   const loadProjects = useCallback(async (options = {}) => {
     const preserveSelection = Boolean(options?.preserveSelection);
+    const route = options?.route || parseAppRoute();
+    appRouteRef.current = route;
+    setAppRoute(route);
     const data = await apiFetch('/api/projects');
     const list = data.projects || [];
     setProjects(list);
+    if (route.type === 'welcome') {
+      selectedProjectRef.current = null;
+      selectedSessionRef.current = null;
+      setSelectedProject(null);
+      setSelectedSession(null);
+      setMessages([]);
+      setInput('');
+      setAttachments([]);
+      setFileMentions([]);
+      setContextStatus(emptyContextStatus());
+      return;
+    }
     const currentProject = selectedProjectRef.current;
-    const preferred =
-      (preserveSelection && currentProject
-        ? list.find((project) => project.id === currentProject.id)
-        : null) ||
-      list.find((project) => project.name.toLowerCase() === 'codexmobile') ||
-      list.find((project) => project.path.toLowerCase().includes('codexmobile')) ||
-      list[0] ||
-      null;
+    const routeProject = route.projectId
+      ? list.find((project) => String(project.id) === String(route.projectId))
+      : null;
+    const preferred = route.projectId
+      ? routeProject
+      : (
+        (preserveSelection && currentProject
+          ? list.find((project) => project.id === currentProject.id)
+          : null) ||
+        list.find((project) => project.name.toLowerCase() === 'codexmobile') ||
+        list.find((project) => project.path.toLowerCase().includes('codexmobile')) ||
+        list[0] ||
+        null
+      );
+    if (route.projectId && !routeProject) {
+      navigateAppRoute('/', { replace: true });
+      selectedProjectRef.current = null;
+      selectedSessionRef.current = null;
+      setSelectedProject(null);
+      setSelectedSession(null);
+      setMessages([]);
+      setInput('');
+      setAttachments([]);
+      setFileMentions([]);
+      setContextStatus(emptyContextStatus());
+      return;
+    }
     setSelectedProject(preferred);
     if (preferred) {
       setExpandedProjectIds((current) => ({ ...current, [preferred.id]: true }));
     }
     await loadSessions(preferred, {
       chooseLatest: !preserveSelection || !selectedSessionRef.current,
-      preserveSelection
+      preserveSelection,
+      forceNewDraft: route.type === 'project-new',
+      requestedSessionId: route.type === 'thread' ? route.sessionId : '',
+      replaceMissingWithDraft: route.type === 'thread'
     });
   }, [loadSessions]);
 
@@ -8194,6 +8621,19 @@ export default function App() {
   useEffect(() => {
     bootstrap();
   }, [bootstrap]);
+
+  useEffect(() => {
+    function handlePopState() {
+      const route = parseAppRoute();
+      appRouteRef.current = route;
+      setAppRoute(route);
+      if (authenticated) {
+        loadProjects({ route }).catch(() => null);
+      }
+    }
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [authenticated, loadProjects]);
 
   useEffect(() => {
     if (!authenticated || !getToken()) {
@@ -8272,6 +8712,10 @@ export default function App() {
           draft: false
         };
         markRun(payload);
+        const startedFromDraft =
+          isDraftSession(payload.previousSessionId) ||
+          currentSession?.draft ||
+          (currentSession?.projectId === projectId && isDraftSession(currentSession));
         setSelectedSession((current) => {
           if (!current) {
             return nextSession;
@@ -8293,6 +8737,10 @@ export default function App() {
               : message
           )
         );
+        if (startedFromDraft && projectId) {
+          clearNewDraftCache(projectId);
+          navigateAppRoute(sessionRoutePath(projectId, payload.sessionId), { replace: true });
+        }
         return;
       }
       if (payload.type === 'message-deleted') {
@@ -8565,11 +9013,20 @@ export default function App() {
     setSelectedSession(session);
     const requestedSessionId = session?.id || null;
     if (isDraftSession(session)) {
+      if (project?.id) {
+        selectProjectDraft(project, { updateRoute: 'push' });
+      }
       setMessages([]);
       setContextStatus(emptyContextStatus());
       setDrawerOpen(false);
       return;
     }
+    if (project?.id && session?.id) {
+      navigateAppRoute(sessionRoutePath(project.id, session.id));
+    }
+    setInput('');
+    setAttachments([]);
+    setFileMentions([]);
     setContextStatus(normalizeContextStatus(session?.context || DEFAULT_STATUS.context, DEFAULT_STATUS.context));
     const data = await apiFetch(sessionMessagesApiPath(session.id));
     if (selectedSessionRef.current?.id !== requestedSessionId) {
@@ -8643,13 +9100,13 @@ export default function App() {
     });
   }
 
-  async function handleRenameSession(project, session) {
+  async function performRenameSession(project, session, title) {
     if (!project?.id || !session?.id) {
       return;
     }
 
     const currentTitle = session.title || '对话';
-    const nextTitle = window.prompt('重命名线程', currentTitle)?.trim().slice(0, 52);
+    const nextTitle = String(title || '').trim().slice(0, 52);
     if (!nextTitle || nextTitle === currentTitle) {
       return;
     }
@@ -8679,38 +9136,32 @@ export default function App() {
       applyLocalTitle();
       await refreshProjectSessions(project);
     } catch (error) {
-      window.alert(`重命名失败：${error.message}`);
+      throw new Error(`重命名失败：${error.message}`);
     }
   }
 
-  async function handleDeleteSession(project, session) {
+  async function performArchiveSession(project, session) {
     if (!project?.id || !session?.id) {
       return;
     }
 
-    const title = session.title || '\u5bf9\u8bdd';
-    const confirmed = window.confirm(
-      `\u5f52\u6863\u7ebf\u7a0b\u201c${title}\u201d\uff1f\u8fd9\u4f1a\u540c\u6b65\u5f52\u6863\u7535\u8111\u7aef Codex App \u91cc\u7684\u540c\u4e00\u4e2a\u5bf9\u8bdd\u3002`
-    );
-    if (!confirmed) {
-      return;
-    }
-
+    const wasSelected = selectedSessionRef.current?.id === session.id;
     const removeLocalSession = () => {
       setSessionsByProject((current) => ({
         ...current,
         [project.id]: (current[project.id] || []).filter((item) => item.id !== session.id)
       }));
       if (selectedSessionRef.current?.id === session.id) {
-        setSelectedSession(null);
-        setMessages([]);
-        setAttachments([]);
-        setInput('');
+        selectedSessionRef.current = null;
       }
     };
 
     if (isDraftSession(session)) {
+      clearNewDraftCache(project.id);
       removeLocalSession();
+      if (wasSelected) {
+        selectProjectDraft(project, { updateRoute: 'replace', ignoreCache: true });
+      }
       return;
     }
 
@@ -8720,14 +9171,43 @@ export default function App() {
       });
       removeLocalSession();
       await refreshProjectSessions(project);
+      if (wasSelected) {
+        selectProjectDraft(project, { updateRoute: 'replace' });
+      }
     } catch (error) {
       const message = String(error.message || '');
-      window.alert(
+      throw new Error(
         message.toLowerCase().includes('running')
           ? '\u7ebf\u7a0b\u6b63\u5728\u8fd0\u884c\uff0c\u7a0d\u540e\u518d\u5f52\u6863\u3002'
           : `\u5f52\u6863\u5931\u8d25\uff1a${message}`
       );
     }
+  }
+
+  function handleRenameSession(project, session) {
+    if (!project?.id || !session?.id) {
+      return;
+    }
+    setSessionModal({ type: 'rename', project, session });
+  }
+
+  function handleDeleteSession(project, session) {
+    if (!project?.id || !session?.id) {
+      return;
+    }
+    setSessionModal({ type: 'archive', project, session });
+  }
+
+  async function handleConfirmSessionModal(value) {
+    if (!sessionModal) {
+      return;
+    }
+    if (sessionModal.type === 'rename') {
+      await performRenameSession(sessionModal.project, sessionModal.session, value);
+    } else if (sessionModal.type === 'archive') {
+      await performArchiveSession(sessionModal.project, sessionModal.session);
+    }
+    setSessionModal(null);
   }
 
   async function handleDeleteMessage(message) {
@@ -8772,16 +9252,7 @@ export default function App() {
     if (!project) {
       return;
     }
-    const draft = createDraftSession(project);
-    setSelectedProject(project);
-    setSelectedSession(draft);
-    setContextStatus(emptyContextStatus());
-    setExpandedProjectIds((current) => ({ ...current, [project.id]: true }));
-    setSessionsByProject((current) => upsertSessionInProject(current, project.id, draft));
-    setMessages([]);
-    setAttachments([]);
-    setFileMentions([]);
-    setInput('');
+    selectProjectDraft(project, { updateRoute: 'push' });
     setDrawerOpen(false);
   }
 
@@ -9242,10 +9713,7 @@ export default function App() {
 
     let sessionForTurn = selectedSession;
     if (!sessionForTurn) {
-      sessionForTurn = createDraftSession(project);
-      setSelectedSession(sessionForTurn);
-      setExpandedProjectIds((current) => ({ ...current, [project.id]: true }));
-      setSessionsByProject((current) => upsertSessionInProject(current, project.id, sessionForTurn));
+      sessionForTurn = selectProjectDraft(project, { updateRoute: 'replace' }) || createDraftSession(project);
     }
 
     const turnId = createClientTurnId();
@@ -9333,6 +9801,10 @@ export default function App() {
       });
       const resultTurnId = result.turnId || turnId;
       const resultSessionId = result.sessionId || optimisticSessionId;
+      if (draftSessionId && isConcreteSessionId(resultSessionId)) {
+        clearNewDraftCache(project.id);
+        navigateAppRoute(sessionRoutePath(project.id, resultSessionId), { replace: true });
+      }
       if (result.desktopBridge?.mode === 'desktop-ipc') {
         rememberDesktopIpcPendingRun(resultSessionId, {
           message: displayMessage,
@@ -9564,6 +10036,7 @@ export default function App() {
     desktopBridge: status.desktopBridge,
     syncing
   });
+  const showingWelcome = appRoute.type === 'welcome';
 
   if (!authenticated) {
     return <PairingScreen onPaired={bootstrap} />;
@@ -9574,13 +10047,14 @@ export default function App() {
       <TopBar
         selectedProject={selectedProject}
         selectedSession={selectedSession}
-        connectionState={connectionState}
-        desktopBridge={status.desktopBridge}
+        runMode={effectiveRunMode}
         onMenu={() => setDrawerOpen(true)}
         onOpenWorkspace={handleOpenWorkspace}
         onOpenTerminal={handleOpenTerminal}
         onOpenDocs={() => setDocsOpen(true)}
         onGitAction={handleGitAction}
+        onRenameSession={handleRenameSession}
+        onArchiveSession={handleDeleteSession}
         notificationSupported={notificationSupported}
         notificationEnabled={notificationsEnabled && notificationPermission === 'granted'}
         onEnableNotifications={enableNotifications}
@@ -9643,61 +10117,77 @@ export default function App() {
         onSendTerminal={sendTerminalMessage}
         onClose={() => setTerminalOpen(false)}
       />
-      <ConnectionRecoveryCard
-        state={recoveryState}
-        onRetry={handleRetryConnection}
-        onSync={handleSync}
-        onPair={handleResetPairing}
-        onStatus={handleShowConnectionStatus}
-      />
+      {showingWelcome ? null : (
+        <ConnectionRecoveryCard
+          state={recoveryState}
+          onRetry={handleRetryConnection}
+          onSync={handleSync}
+          onPair={handleResetPairing}
+          onStatus={handleShowConnectionStatus}
+        />
+      )}
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
-      <ChatPane
-        messages={messages}
-        selectedSession={selectedSession}
-        running={running}
-        now={activityClockNow}
-        onPreviewImage={setPreviewImage}
-        onDeleteMessage={handleDeleteMessage}
-      />
-      <Composer
-        input={input}
-        setInput={setInput}
-        selectedProject={selectedProject}
-        selectedSession={selectedSession}
-        onSubmit={handleSubmit}
-        running={running}
-        onAbort={handleAbort}
-        models={status.models}
-        selectedModel={selectedModel}
-        onSelectModel={setSelectedModel}
-        selectedReasoningEffort={selectedReasoningEffort}
-        onSelectReasoningEffort={setSelectedReasoningEffort}
-        skills={status.skills}
-        selectedSkillPaths={selectedSkillPaths}
-        onToggleSkill={toggleSelectedSkill}
-        onSelectSkill={selectSkill}
-        onClearSkills={clearSelectedSkills}
-        permissionMode={permissionMode}
-        onSelectPermission={setPermissionMode}
-        runMode={runMode}
-        effectiveRunMode={effectiveRunMode}
-        canSelectRunMode={canSelectRunMode}
-        onSelectRunMode={setRunMode}
-        attachments={attachments}
-        onUploadFiles={handleUploadFiles}
-        onRemoveAttachment={handleRemoveAttachment}
-        fileMentions={fileMentions}
-        onAddFileMention={addFileMention}
-        onRemoveFileMention={removeFileMention}
-        uploading={uploading}
-        contextStatus={visibleContextStatus}
-        runStatus={composerRunStatus ? { ...composerRunStatus, steerable: selectedRuntime?.steerable !== false } : null}
-        desktopBridge={status.desktopBridge}
-        queueDrafts={queueDrafts}
-        onRestoreQueueDraft={restoreQueueDraft}
-        onRemoveQueueDraft={removeQueueDraft}
-        onSteerQueueDraft={steerQueueDraft}
-        onVoiceTranscribe={openVoiceTranscriptionDialog}
+      {showingWelcome ? (
+        <WelcomePane projects={projects} onNewConversation={handleNewConversation} />
+      ) : (
+        <>
+          <ChatPane
+            messages={messages}
+            selectedSession={selectedSession}
+            running={running}
+            now={activityClockNow}
+            onPreviewImage={setPreviewImage}
+            onDeleteMessage={handleDeleteMessage}
+          />
+          <Composer
+            input={input}
+            setInput={setInput}
+            selectedProject={selectedProject}
+            selectedSession={selectedSession}
+            onSubmit={handleSubmit}
+            running={running}
+            onAbort={handleAbort}
+            models={status.models}
+            selectedModel={selectedModel}
+            onSelectModel={setSelectedModel}
+            selectedReasoningEffort={selectedReasoningEffort}
+            onSelectReasoningEffort={setSelectedReasoningEffort}
+            skills={status.skills}
+            selectedSkillPaths={selectedSkillPaths}
+            onToggleSkill={toggleSelectedSkill}
+            onSelectSkill={selectSkill}
+            onClearSkills={clearSelectedSkills}
+            permissionMode={permissionMode}
+            onSelectPermission={setPermissionMode}
+            runMode={runMode}
+            effectiveRunMode={effectiveRunMode}
+            canSelectRunMode={canSelectRunMode}
+            onSelectRunMode={setRunMode}
+            attachments={attachments}
+            onUploadFiles={handleUploadFiles}
+            onRemoveAttachment={handleRemoveAttachment}
+            fileMentions={fileMentions}
+            onAddFileMention={addFileMention}
+            onRemoveFileMention={removeFileMention}
+            uploading={uploading}
+            contextStatus={visibleContextStatus}
+            runStatus={composerRunStatus ? { ...composerRunStatus, steerable: selectedRuntime?.steerable !== false } : null}
+            desktopBridge={status.desktopBridge}
+            queueDrafts={queueDrafts}
+            onRestoreQueueDraft={restoreQueueDraft}
+            onRemoveQueueDraft={removeQueueDraft}
+            onSteerQueueDraft={steerQueueDraft}
+            connectionState={connectionState}
+            voiceState={voiceDialogState}
+            voiceError={voiceDialogError}
+            onVoiceTranscribe={openVoiceTranscriptionDialog}
+          />
+        </>
+      )}
+      <SessionActionModal
+        action={sessionModal}
+        onClose={() => setSessionModal(null)}
+        onConfirm={handleConfirmSessionModal}
       />
       <VoiceDialogPanel
         open={voiceDialogOpen}

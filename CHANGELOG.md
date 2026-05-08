@@ -19,9 +19,17 @@ All notable changes to CodexMobile are tracked here.
 - Added foreground toast notifications for Git progress, task completion, failures, and user-input prompts.
 - Added Web Push support for installed HTTPS PWAs, including service worker handling and server-side subscription storage.
 - Added a compact connection recovery card for reconnecting, syncing, repairing pairing, and checking status.
+- Added route-addressable welcome, per-project new-thread, and thread pages for refresh-safe navigation.
 
 ### Changed
 
+- Replaced rename/archive browser prompts with in-app modal dialogs.
+- Persisted per-project new-thread composer drafts, including text, attachments, file mentions, and run mode.
+- Show the active Local/Worktree mode in the header subtitle and keep the composer run-mode switch only on new threads.
+- Moved workspace and Terminal entry points into the top More menu, and made the header show thread title above project name.
+- Added top More menu actions for renaming and archiving the current thread.
+- Reworked voice transcription into an inline composer control that records, processes, and appends text without opening a confirmation dialog.
+- Moved server connection status above the composer.
 - Updated the dev workflow so `npm run dev` starts both frontend and backend with hot reload.
 - Scoped Local/New worktree selection to new conversations while showing the active run mode for existing sessions.
 - Routed Changes, Directories, and Terminal views through the selected session working directory, including Codex worktrees.
