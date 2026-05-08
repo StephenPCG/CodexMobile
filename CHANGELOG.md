@@ -40,6 +40,7 @@ All notable changes to CodexMobile are tracked here.
 - Moved Feishu Docs into Settings, simplified the top More menu Git actions to Git Panel, and grouped conversation actions with unified wording.
 - Reworked the drawer quota widget into a compact Rate limits remaining card with cached data, update time, and icon-only refresh.
 - Removed the prompt-only slash menu so `/` remains normal text while `$skill` keeps structured skill selection.
+- Removed local proxy defaults and management fallback; Codex quota now relies on the local Codex auth file, while optional OpenAI-compatible integrations require explicit base URL configuration.
 - Hid the composer voice button when the configured transcription provider is unavailable, including missing local ASR Docker.
 - Added top More menu actions for renaming and archiving the current conversation.
 - Reworked voice transcription into an inline composer control that records, processes, and appends text without opening a confirmation dialog.

@@ -3,14 +3,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readMobileSessionMessages, registerMobileSession } from './mobile-session-index.js';
-import { DEFAULT_OPENAI_COMPATIBLE_BASE_URL, openAICompatibleConfig } from './provider-api.js';
+import { openAICompatibleConfig } from './provider-api.js';
 import { provisionalSessionTitle } from '../shared/session-title.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 export const GENERATED_ROOT = process.env.CODEXMOBILE_GENERATED_ROOT || path.join(ROOT_DIR, '.codexmobile', 'generated');
 
-const DEFAULT_IMAGE_BASE_URL = DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
 const DEFAULT_IMAGE_MODEL = 'gpt-image-2';
 const IMAGE_TIMEOUT_MS = Number(process.env.CODEXMOBILE_IMAGE_TIMEOUT_MS || 420000);
 const IMAGE_MAX_ATTEMPTS = Math.max(1, Number(process.env.CODEXMOBILE_IMAGE_MAX_ATTEMPTS || 3));
@@ -99,9 +98,13 @@ export function isImageRequest(message, attachments = []) {
 async function imageApiConfig(config = {}) {
   const providerConfig = await openAICompatibleConfig({
     baseUrl: process.env.CODEXMOBILE_IMAGE_BASE_URL || config.baseUrl,
-    defaultBaseUrl: DEFAULT_IMAGE_BASE_URL,
     apiKeys: [process.env.CODEXMOBILE_IMAGE_API_KEY]
   });
+  if (!providerConfig.baseUrl) {
+    const error = new Error('图片生成接口未配置');
+    error.statusCode = 503;
+    throw error;
+  }
   return {
     ...providerConfig,
     model: process.env.CODEXMOBILE_IMAGE_MODEL || DEFAULT_IMAGE_MODEL

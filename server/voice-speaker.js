@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 
-import { DEFAULT_OPENAI_COMPATIBLE_BASE_URL, openAICompatibleConfig } from './provider-api.js';
+import { openAICompatibleConfig } from './provider-api.js';
 import { registerManagedProcess } from './process-manager.js';
 
 const DEFAULT_SPEECH_MODEL = 'gpt-4o-mini-tts';
@@ -129,9 +129,13 @@ async function voiceSpeechConfig(config = {}) {
     config.baseUrl;
   const providerConfig = await openAICompatibleConfig({
     baseUrl,
-    defaultBaseUrl: DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
     apiKeys: speechApiKeys()
   });
+  if (!providerConfig.baseUrl) {
+    const error = new Error('语音合成接口未配置');
+    error.statusCode = 503;
+    throw error;
+  }
 
   return {
     ...providerConfig,
@@ -160,12 +164,12 @@ export function publicVoiceSpeechStatus(config = {}) {
   const baseUrl = process.env.CODEXMOBILE_SPEECH_BASE_URL ||
     process.env.CODEXMOBILE_TTS_BASE_URL ||
     config.baseUrl ||
-    DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
+    '';
   const localFallback = localSpeechFallbackEnabled();
   const edge = edgeSpeechEnabled();
 
   return {
-    configured: !truthyEnv(process.env.CODEXMOBILE_SPEECH_DISABLED),
+    configured: !truthyEnv(process.env.CODEXMOBILE_SPEECH_DISABLED) && (edge || Boolean(baseUrl) || localFallback),
     provider: edge ? EDGE_SPEECH_PROVIDER : providerLabel(baseUrl),
     model: edge ? EDGE_SPEECH_FORMAT : process.env.CODEXMOBILE_SPEECH_MODEL ||
       process.env.CODEXMOBILE_TTS_MODEL ||

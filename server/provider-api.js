@@ -1,9 +1,7 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import { CODEX_CONFIG_PATH } from './codex-config.js';
 
-export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = 'http://127.0.0.1:8317/v1';
+export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = '';
 
 function stripQuotes(value) {
   const trimmed = String(value || '').trim();
@@ -28,7 +26,7 @@ export async function readCodexProviderBaseUrl() {
     return null;
   }
 
-  let provider = 'cliproxyapi';
+  let provider = '';
   let currentProvider = null;
   const baseUrls = new Map();
 
@@ -62,45 +60,11 @@ export async function readCodexProviderBaseUrl() {
   return baseUrls.get(provider) || null;
 }
 
-export async function readCliProxyApiKeys(extraKeys = []) {
+export async function readOpenAICompatibleApiKeys(extraKeys = []) {
   const keys = [
     ...extraKeys,
-    process.env.CLIPROXYAPI_API_KEY,
-    process.env.CLI_PROXY_API_KEY
+    process.env.CODEXMOBILE_OPENAI_COMPATIBLE_API_KEY
   ].filter(Boolean);
-  const candidates = [
-    process.env.CLIPROXYAPI_CONFIG,
-    process.platform === 'win32' ? 'D:\\CLIProxyAPI\\config.yaml' : '',
-    path.join(os.homedir(), '.cli-proxy-api', 'config.yaml')
-  ].filter(Boolean);
-
-  for (const configPath of candidates) {
-    let raw = '';
-    try {
-      raw = await fs.readFile(configPath, 'utf8');
-    } catch {
-      continue;
-    }
-
-    let inApiKeys = false;
-    for (const rawLine of raw.split(/\r?\n/)) {
-      const line = rawLine.trimEnd();
-      if (/^api-keys\s*:\s*$/.test(line.trim())) {
-        inApiKeys = true;
-        continue;
-      }
-      if (inApiKeys && /^\S/.test(line)) {
-        break;
-      }
-      const match = inApiKeys ? line.match(/^\s*-\s*(.+?)\s*(?:#.*)?$/) : null;
-      if (match) {
-        const key = stripQuotes(match[1]);
-        if (key && !keys.includes(key)) {
-          keys.push(key);
-        }
-      }
-    }
-  }
 
   if (process.env.OPENAI_API_KEY && !keys.includes(process.env.OPENAI_API_KEY)) {
     keys.push(process.env.OPENAI_API_KEY);
@@ -117,6 +81,6 @@ export async function openAICompatibleConfig({
   const resolvedBaseUrl = baseUrl || (await readCodexProviderBaseUrl()) || defaultBaseUrl;
   return {
     baseUrl: normalizeBaseUrl(resolvedBaseUrl, defaultBaseUrl),
-    apiKeys: await readCliProxyApiKeys(apiKeys)
+    apiKeys: await readOpenAICompatibleApiKeys(apiKeys)
   };
 }

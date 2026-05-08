@@ -115,6 +115,9 @@ export async function generateSessionTitle({
       baseUrl: process.env.CODEXMOBILE_TITLE_BASE_URL,
       apiKeys: [process.env.CODEXMOBILE_TITLE_API_KEY]
     });
+    if (!providerConfig.baseUrl) {
+      return fallback;
+    }
     const apiKeys = providerConfig.apiKeys?.length ? providerConfig.apiKeys : [''];
     for (const apiKey of apiKeys) {
       try {

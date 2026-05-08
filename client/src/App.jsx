@@ -107,7 +107,7 @@ const DEFAULT_STATUS = {
     version: '',
     error: ''
   },
-  provider: 'cliproxyapi',
+  provider: 'codex',
   model: 'gpt-5.5',
   modelShort: '5.5 中',
   reasoningEffort: 'xhigh',

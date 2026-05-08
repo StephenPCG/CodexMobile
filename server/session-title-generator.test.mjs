@@ -28,20 +28,20 @@ test('generateSessionTitle calls a small model and falls back to the local provi
   const title = await generateSessionTitle({
     userMessage: '看一下我们现在codex桌面端它的一个线程是怎么起名的',
     assistantMessage: '现在不是模型智能命名，而是 preview 和 name 字段。',
-    config: { baseUrl: 'http://127.0.0.1:8317/v1', apiKeys: ['test-key'] },
+    config: { baseUrl: 'https://api.example.test/v1', apiKeys: ['test-key'] },
     fetchImpl: okFetch
   });
 
   assert.equal(title, 'Codex 桌面线程命名');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'http://127.0.0.1:8317/v1/chat/completions');
+  assert.equal(calls[0].url, 'https://api.example.test/v1/chat/completions');
   assert.equal(calls[0].body.model, 'gpt-5.4-mini');
   assert.equal(calls[0].headers.authorization, 'Bearer test-key');
 
   const fallback = await generateSessionTitle({
     userMessage: '帮我看一下移动端线程命名逻辑是什么',
     assistantMessage: 'irrelevant',
-    config: { baseUrl: 'http://127.0.0.1:8317/v1', apiKeys: ['test-key'] },
+    config: { baseUrl: 'https://api.example.test/v1', apiKeys: ['test-key'] },
     fetchImpl: async () => ({ ok: false, status: 500, text: async () => 'server error' }),
     logger: null
   });

@@ -407,7 +407,7 @@ export async function readCodexConfig() {
   }
 
   config.modelShort = shortModelName(config.model);
-  config.baseUrl = providerBaseUrls.get(config.provider) || (config.provider === 'cliproxyapi' ? 'http://127.0.0.1:8317/v1' : null);
+  config.baseUrl = providerBaseUrls.get(config.provider) || null;
   config.models = await readCodexModels(config.model);
   config.skills = await readCodexSkills();
   const modelContext = await readCodexModelContext(config.model);

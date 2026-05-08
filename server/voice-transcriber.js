@@ -1,4 +1,4 @@
-import { DEFAULT_OPENAI_COMPATIBLE_BASE_URL, normalizeBaseUrl, readCliProxyApiKeys } from './provider-api.js';
+import { normalizeBaseUrl } from './provider-api.js';
 import { Converter } from 'opencc-js';
 import { asrDockerStatus } from './asr-docker.js';
 
@@ -14,8 +14,6 @@ function normalizeTranscriptText(value) {
   return toSimplified(String(value || ''))
     .replace(/\bcode ex\b/gi, 'Codex')
     .replace(/\bcodex mobile\b/gi, 'CodexMobile')
-    .replace(/\bcli proxy api\b/gi, 'CLIProxyAPI')
-    .replace(/\bclip proxy api\b/gi, 'cliproxyapi')
     .replace(/预设权限/g, '默认权限')
     .replace(/档案/g, '文件')
     .replace(/专案/g, '项目')
@@ -197,18 +195,6 @@ export async function voiceTranscriptionConfig(codexConfig = {}) {
     };
   }
 
-  if (truthyEnv(process.env.CODEXMOBILE_TRANSCRIBE_USE_CODEX_PROVIDER)) {
-    const baseUrl = normalizeBaseUrl(codexConfig.baseUrl || DEFAULT_OPENAI_COMPATIBLE_BASE_URL);
-    return {
-      baseUrl,
-      apiKeys: await readCliProxyApiKeys([]),
-      model: process.env.CODEXMOBILE_TRANSCRIBE_MODEL || defaultModelForBaseUrl(baseUrl),
-      provider: providerLabel(baseUrl),
-      configured: false,
-      source: 'codex-provider'
-    };
-  }
-
   const baseUrl = normalizeBaseUrl(process.env.CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL || LOCAL_TRANSCRIBE_BASE_URL);
   return {
     baseUrl,
@@ -232,15 +218,14 @@ export async function publicVoiceTranscriptionStatus(codexConfig = {}) {
 
   const explicitBaseUrl = process.env.CODEXMOBILE_TRANSCRIBE_BASE_URL;
   const useOpenAI = truthyEnv(process.env.CODEXMOBILE_TRANSCRIBE_USE_OPENAI);
-  const useCodexProvider = truthyEnv(process.env.CODEXMOBILE_TRANSCRIBE_USE_CODEX_PROVIDER);
   const baseUrl = explicitBaseUrl ||
     (useOpenAI
       ? OPENAI_BASE_URL
-      : (useCodexProvider ? codexConfig.baseUrl || DEFAULT_OPENAI_COMPATIBLE_BASE_URL : process.env.CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL || LOCAL_TRANSCRIBE_BASE_URL));
+      : (process.env.CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL || LOCAL_TRANSCRIBE_BASE_URL));
 
   const provider = providerLabel(baseUrl);
   const model = process.env.CODEXMOBILE_TRANSCRIBE_MODEL || defaultModelForBaseUrl(baseUrl);
-  const localProvider = !explicitBaseUrl && !useOpenAI && !useCodexProvider;
+  const localProvider = !explicitBaseUrl && !useOpenAI;
   if (localProvider) {
     const docker = await asrDockerStatus();
     return {

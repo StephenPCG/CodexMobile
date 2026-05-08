@@ -38,12 +38,6 @@ paths:
 #   redirectUri: https://your-device.your-tailnet.ts.net/api/feishu/auth/callback
 #   docsUrl: https://docs.feishu.cn/
 
-# cliproxy:
-#   config: ~/.cli-proxy-api/config.yaml
-#   apiKey: ""
-#   managementUrl: http://127.0.0.1:8317
-#   managementKey: ""
-
 # voice:
 #   transcribe:
 #     # local-docker is enabled by default when the ASR container is installed.
@@ -95,10 +89,6 @@ const CONFIG_ENV_MAPPINGS = [
   ['feishu.appSecret', 'CODEXMOBILE_FEISHU_APP_SECRET'],
   ['feishu.redirectUri', 'CODEXMOBILE_FEISHU_REDIRECT_URI'],
   ['feishu.docsUrl', 'CODEXMOBILE_FEISHU_DOCS_URL'],
-  ['cliproxy.config', 'CLIPROXYAPI_CONFIG'],
-  ['cliproxy.apiKey', 'CLIPROXYAPI_API_KEY'],
-  ['cliproxy.managementUrl', 'CODEXMOBILE_CLIPROXY_MANAGEMENT_URL'],
-  ['cliproxy.managementKey', 'CODEXMOBILE_CLIPROXY_MANAGEMENT_KEY'],
   ['voice.transcribe.baseUrl', 'CODEXMOBILE_TRANSCRIBE_BASE_URL'],
   ['voice.transcribe.localBaseUrl', 'CODEXMOBILE_LOCAL_TRANSCRIBE_BASE_URL'],
   ['voice.transcribe.apiKey', 'CODEXMOBILE_TRANSCRIBE_API_KEY'],
@@ -106,7 +96,6 @@ const CONFIG_ENV_MAPPINGS = [
   ['voice.transcribe.language', 'CODEXMOBILE_TRANSCRIBE_LANGUAGE'],
   ['voice.transcribe.prompt', 'CODEXMOBILE_TRANSCRIBE_PROMPT'],
   ['voice.transcribe.useOpenAI', 'CODEXMOBILE_TRANSCRIBE_USE_OPENAI'],
-  ['voice.transcribe.useCodexProvider', 'CODEXMOBILE_TRANSCRIBE_USE_CODEX_PROVIDER'],
   ['voice.transcribe.disabled', 'CODEXMOBILE_TRANSCRIBE_DISABLED'],
   ['voice.speech.baseUrl', 'CODEXMOBILE_SPEECH_BASE_URL'],
   ['voice.speech.apiKey', 'CODEXMOBILE_SPEECH_API_KEY'],
@@ -271,7 +260,7 @@ export function loadCodexMobileConfig({ configPath = configPathFromEnv(), create
 
   for (const [configKey, envKey] of CONFIG_ENV_MAPPINGS) {
     const value = readPath(config, configKey);
-    if (/_(PATH|ROOT|HOME|DIR|CACHE)$/.test(envKey) || envKey === 'CLIPROXYAPI_CONFIG') {
+    if (/_(PATH|ROOT|HOME|DIR|CACHE)$/.test(envKey)) {
       setPathEnvDefault(env, envKey, value);
     } else {
       setEnvDefault(env, envKey, value);

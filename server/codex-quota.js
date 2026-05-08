@@ -7,33 +7,16 @@ import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
 
-const DEFAULT_CLIPROXY_CONFIG = process.platform === 'win32'
-  ? 'D:\\CLIProxyAPI\\config.yaml'
-  : path.join(os.homedir(), '.cli-proxy-api', 'config.yaml');
-const DEFAULT_AUTH_DIR = path.join(os.homedir(), '.cli-proxy-api');
 const DEFAULT_CODEX_AUTH_PATH = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'auth.json');
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const REQUEST_TIMEOUT_MS = Number(process.env.CODEXMOBILE_QUOTA_REQUEST_TIMEOUT_MS || 8_000);
-const MANAGEMENT_TIMEOUT_MS = Number(process.env.CODEXMOBILE_QUOTA_MANAGEMENT_TIMEOUT_MS || 2_500);
 const STALE_QUOTA_TTL_MS = Number(process.env.CODEXMOBILE_QUOTA_STALE_TTL_MS || 30 * 60_000);
 const QUOTA_REFRESH_INTERVAL_MS = Number(process.env.CODEXMOBILE_QUOTA_REFRESH_INTERVAL_MS || 60 * 60_000);
-const FIXED_PAIRING_CODE_FILE = path.join(process.cwd(), '.codexmobile', 'state', 'pairing-code.txt');
 let lastSuccessfulQuota = null;
 let cachedQuotaResult = null;
 let quotaRefreshPromise = null;
 let cachedQuotaProxyUrl = null;
 let quotaProxyResolved = false;
-
-function stripQuotes(value) {
-  const trimmed = String(value || '').trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
 
 function expandHome(value) {
   const raw = String(value || '').trim();
@@ -49,101 +32,12 @@ function expandHome(value) {
   return raw;
 }
 
-async function readCliproxyConfig() {
-  const configPath = process.env.CLIPROXYAPI_CONFIG || DEFAULT_CLIPROXY_CONFIG;
-  const config = {
-    host: '127.0.0.1',
-    port: 8317,
-    tls: false,
-    authDir: ''
-  };
-  try {
-    const raw = await fs.readFile(configPath, 'utf8');
-    let section = '';
-    for (const rawLine of raw.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) {
-        continue;
-      }
-      const sectionMatch = line.match(/^([A-Za-z0-9_-]+)\s*:\s*$/);
-      if (sectionMatch) {
-        section = sectionMatch[1];
-        continue;
-      }
-      const valueMatch = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.+?)\s*(?:#.*)?$/);
-      if (!valueMatch) {
-        continue;
-      }
-      const key = valueMatch[1];
-      const value = stripQuotes(valueMatch[2]);
-      if (section === 'tls' && key === 'enable') {
-        config.tls = /^true$/i.test(value);
-      } else if (key === 'host') {
-        config.host = value || config.host;
-      } else if (key === 'port') {
-        const port = Number(value);
-        if (Number.isFinite(port) && port > 0) {
-          config.port = port;
-        }
-      } else if (key === 'auth-dir') {
-        config.authDir = path.resolve(expandHome(value));
-      }
-    }
-  } catch {
-    // Defaults are enough for the normal local CLIProxyAPI install.
-  }
-  return config;
-}
-
-async function resolveAuthDir() {
-  const explicit = process.env.CODEXMOBILE_CLIPROXY_AUTH_DIR || process.env.CLIPROXYAPI_AUTH_DIR;
-  if (explicit) {
-    return path.resolve(expandHome(explicit));
-  }
-
-  const config = await readCliproxyConfig();
-  if (config.authDir) {
-    return config.authDir;
-  }
-
-  return DEFAULT_AUTH_DIR;
-}
-
 function resolveCodexAuthPath() {
   const explicit = process.env.CODEXMOBILE_CODEX_AUTH_PATH || process.env.CODEX_AUTH_PATH;
   if (explicit) {
     return path.resolve(expandHome(explicit));
   }
   return DEFAULT_CODEX_AUTH_PATH;
-}
-
-async function resolveManagementBaseUrl() {
-  const explicit = String(process.env.CODEXMOBILE_CLIPROXY_MANAGEMENT_URL || process.env.CLIPROXYAPI_MANAGEMENT_URL || '').trim();
-  if (explicit) {
-    return explicit.replace(/\/+$/, '');
-  }
-  const config = await readCliproxyConfig();
-  const host = !config.host || config.host === '0.0.0.0' ? '127.0.0.1' : config.host;
-  return `${config.tls ? 'https' : 'http'}://${host}:${config.port}`;
-}
-
-async function resolveManagementKey() {
-  for (const value of [
-    process.env.CODEXMOBILE_CLIPROXY_MANAGEMENT_KEY,
-    process.env.CLIPROXYAPI_MANAGEMENT_KEY,
-    process.env.MANAGEMENT_PASSWORD,
-    process.env.CODEXMOBILE_PAIRING_CODE
-  ]) {
-    const trimmed = String(value || '').trim();
-    if (trimmed) {
-      return trimmed;
-    }
-  }
-  try {
-    return (await fs.readFile(FIXED_PAIRING_CODE_FILE, 'utf8')).trim();
-  } catch {
-    return '';
-  }
 }
 
 function maskAccount(value) {
@@ -187,39 +81,6 @@ function normalizePlan(value, fallback = '') {
     return 'Free';
   }
   return text.slice(0, 1).toUpperCase() + text.slice(1);
-}
-
-function planFromFileName(fileName) {
-  const match = String(fileName || '').match(/-([A-Za-z0-9_]+)\.json$/);
-  return match ? match[1] : '';
-}
-
-function authEntryName(entry) {
-  return String(entry?.name || entry?.fileName || entry?.id || '').trim();
-}
-
-function authEntryAccountId(entry) {
-  return String(
-    entry?.id_token?.chatgpt_account_id ||
-    entry?.id_token?.chatgptAccountId ||
-    entry?.metadata?.id_token?.chatgpt_account_id ||
-    entry?.metadata?.id_token?.chatgptAccountId ||
-    entry?.account_id ||
-    entry?.accountId ||
-    ''
-  ).trim();
-}
-
-function authEntryPlan(entry) {
-  return (
-    entry?.plan_type ||
-    entry?.planType ||
-    entry?.id_token?.plan_type ||
-    entry?.id_token?.planType ||
-    entry?.metadata?.id_token?.plan_type ||
-    entry?.metadata?.id_token?.planType ||
-    planFromFileName(authEntryName(entry))
-  );
 }
 
 function numberOrNull(value) {
@@ -436,7 +297,7 @@ function safeErrorMessage(error) {
     return '网络超时，稍后重试';
   }
   if (isConnectionRefused(error)) {
-    return '本地代理或管理服务未启动';
+    return '连接被拒绝，请检查网络或代理配置';
   }
   if (error?.message === 'fetch failed') {
     return '网络连接失败';
@@ -622,83 +483,6 @@ async function requestCodexUsage(credential) {
   }
 }
 
-async function managementJson(baseUrl, managementKey, route, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MANAGEMENT_TIMEOUT_MS);
-  try {
-    const headers = {
-      'X-Management-Key': managementKey,
-      ...(options.headers || {})
-    };
-    const response = await fetch(`${baseUrl}${route}`, {
-      ...options,
-      signal: controller.signal,
-      headers
-    });
-    const text = await response.text();
-    let body = null;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      body = null;
-    }
-    if (!response.ok) {
-      const error = new Error(body?.error || `CLIProxyAPI management HTTP ${response.status}`);
-      error.statusCode = response.status;
-      throw error;
-    }
-    return body;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function managementApiCall(baseUrl, managementKey, authIndex, accountId) {
-  const response = await managementJson(baseUrl, managementKey, '/v0/management/api-call', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      authIndex,
-      method: 'GET',
-      url: CODEX_USAGE_URL,
-      header: {
-        Authorization: 'Bearer $TOKEN$',
-        'Chatgpt-Account-Id': accountId,
-        'Content-Type': 'application/json',
-        'User-Agent': 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal'
-      }
-    })
-  });
-  const statusCode = Number(response?.status_code ?? response?.statusCode ?? 0);
-  const rawBody = response?.body ?? response?.bodyText ?? '';
-  let body = null;
-  try {
-    body = rawBody ? JSON.parse(rawBody) : null;
-  } catch {
-    body = null;
-  }
-  if (statusCode < 200 || statusCode >= 300) {
-    const error = new Error(body?.error?.message || body?.error || `Codex quota HTTP ${statusCode || 'unknown'}`);
-    error.statusCode = statusCode || 502;
-    throw error;
-  }
-  return body;
-}
-
-function baseAccount(fileName, credential) {
-  const email = credential.email || fileName.replace(/^codex-/, '').replace(/-[^-]+\.json$/, '');
-  return {
-    id: safeId(credential.account_id, credential.email, fileName),
-    label: maskAccount(email),
-    plan: normalizePlan(credential.plan_type || credential.planType, planFromFileName(fileName)),
-    disabled: Boolean(credential.disabled),
-    status: 'ok',
-    windows: []
-  };
-}
-
 function baseAccountFromCodexAuth(authPath, credential) {
   const email = credential.email || 'Codex';
   return {
@@ -709,48 +493,6 @@ function baseAccountFromCodexAuth(authPath, credential) {
     status: 'ok',
     windows: []
   };
-}
-
-function baseAccountFromAuthEntry(entry) {
-  const name = authEntryName(entry);
-  const email = entry?.email || entry?.account || entry?.label || name.replace(/^codex-/, '').replace(/-[^-]+\.json$/i, '');
-  return {
-    id: safeId(entry?.auth_index || entry?.authIndex, entry?.id, email, name),
-    label: maskAccount(email),
-    plan: normalizePlan(authEntryPlan(entry), planFromFileName(name)),
-    disabled: Boolean(entry?.disabled),
-    status: 'ok',
-    windows: []
-  };
-}
-
-async function quotaForFile(authDir, fileName) {
-  const filePath = path.join(authDir, fileName);
-  const credential = await readJsonFile(filePath);
-  const account = baseAccount(fileName, credential);
-
-  if (account.disabled) {
-    return { ...account, status: 'disabled', error: '已停用' };
-  }
-  if (!credential.access_token || !credential.account_id) {
-    return { ...account, status: 'failed', error: '凭证缺少额度查询信息' };
-  }
-
-  try {
-    const usage = await requestCodexUsage(credential);
-    return {
-      ...account,
-      plan: normalizePlan(usage?.plan_type ?? usage?.planType, account.plan),
-      status: 'ok',
-      windows: extractQuotaWindows(usage)
-    };
-  } catch (error) {
-    return {
-      ...account,
-      status: 'failed',
-      error: safeErrorMessage(error)
-    };
-  }
 }
 
 async function quotaForCodexAuth() {
@@ -804,107 +546,16 @@ async function quotaForCodexAuth() {
   }
 }
 
-async function quotaForManagementEntry(baseUrl, managementKey, entry) {
-  const account = baseAccountFromAuthEntry(entry);
-  if (account.disabled) {
-    return { ...account, status: 'disabled', error: '已停用' };
-  }
-  const authIndex = String(entry?.auth_index || entry?.authIndex || '').trim();
-  if (!authIndex) {
-    return { ...account, status: 'failed', error: 'missing auth_index' };
-  }
-  const accountId = authEntryAccountId(entry);
-  if (!accountId) {
-    return { ...account, status: 'failed', error: 'missing account_id' };
-  }
-  try {
-    const usage = await managementApiCall(baseUrl, managementKey, authIndex, accountId);
-    return {
-      ...account,
-      plan: normalizePlan(usage?.plan_type ?? usage?.planType, account.plan),
-      status: 'ok',
-      windows: extractQuotaWindows(usage)
-    };
-  } catch (error) {
-    return {
-      ...account,
-      status: 'failed',
-      error: safeErrorMessage(error)
-    };
-  }
-}
-
-async function getCodexQuotaFromManagement() {
-  const managementKey = await resolveManagementKey();
-  if (!managementKey) {
-    return null;
-  }
-  const baseUrl = await resolveManagementBaseUrl();
-  const payload = await managementJson(baseUrl, managementKey, '/v0/management/auth-files');
-  const entries = (Array.isArray(payload?.files) ? payload.files : [])
-    .filter((entry) => {
-      const provider = String(entry?.provider || entry?.type || '').trim().toLowerCase();
-      const name = authEntryName(entry).toLowerCase();
-      return provider === 'codex' || name.startsWith('codex-');
-    });
-  const accounts = await Promise.all(
-    entries.map((entry) => quotaForManagementEntry(baseUrl, managementKey, entry))
-  );
-  return {
-    provider: 'cliproxyapi',
-    source: 'cliproxyapi-management',
-    accounts
-  };
-}
-
 export async function getCodexQuota() {
-  try {
-    const managed = await getCodexQuotaFromManagement();
-    if (managed) {
-      return finalizeQuotaResult(managed);
-    }
-  } catch (error) {
-    console.warn(`[quota] CLIProxyAPI management quota fallback: ${safeErrorMessage(error)}`);
-  }
-
-  const authDir = await resolveAuthDir();
-  let files = [];
-  try {
-    files = (await fs.readdir(authDir))
-      .filter((fileName) => /^codex-.+\.json$/i.test(fileName))
-      .sort((a, b) => a.localeCompare(b));
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      error.statusCode = 500;
-      throw error;
-    }
-  }
-
-  const accounts = await Promise.all(
-    files.map(async (fileName) => {
-      try {
-        return await quotaForFile(authDir, fileName);
-      } catch {
-        return {
-          id: safeId(fileName),
-          label: maskAccount(fileName.replace(/^codex-/, '').replace(/\.json$/, '')),
-          plan: normalizePlan(planFromFileName(fileName)),
-          disabled: false,
-          status: 'failed',
-          error: '凭证读取失败',
-          windows: []
-        };
-      }
-    })
-  );
+  const accounts = [];
   const codexAuthAccount = await quotaForCodexAuth();
-  if (codexAuthAccount && !accounts.some((account) => account.id === codexAuthAccount.id)) {
+  if (codexAuthAccount) {
     accounts.push(codexAuthAccount);
   }
 
   return finalizeQuotaResult({
     provider: 'codex',
-    source: accounts.length ? 'local-auth' : 'none',
+    source: accounts.length ? 'codex-auth' : 'none',
     accounts
   });
 }
