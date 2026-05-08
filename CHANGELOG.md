@@ -29,6 +29,8 @@ All notable changes to CodexMobile are tracked here.
 - Removed ambiguous drawer-level new-thread and manual sync controls; project rows keep explicit new-thread actions while startup sync remains automatic.
 - Reworked Settings Codex details into environment information with host, OS, Codex connection mode, and Codex CLI details.
 - Reduced the empty composer height and softened the connection status label.
+- Render memory citation tails as collapsible cards, hide internal git directives, and proxy local-path Markdown images through the backend.
+- Removed duplicate per-project "+ 新对话" buttons while preserving the draft-style new conversation row.
 - Moved workspace and Terminal entry points into the top More menu, and made the header show thread title above project name.
 - Added top More menu actions for renaming and archiving the current thread.
 - Reworked voice transcription into an inline composer control that records, processes, and appends text without opening a confirmation dialog.

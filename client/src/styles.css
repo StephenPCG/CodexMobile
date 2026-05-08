@@ -1655,26 +1655,6 @@ button {
   border-left-style: dashed;
 }
 
-.thread-new-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  margin: 3px 0 5px;
-  padding: 5px 8px;
-  border: 0;
-  border-radius: 6px;
-  color: #2563eb;
-  background: rgba(37, 99, 235, 0.08);
-  font-size: 12px;
-  font-weight: 650;
-  text-align: left;
-}
-
-.thread-new-row:active {
-  background: rgba(37, 99, 235, 0.14);
-}
-
 .thread-stack {
   display: grid;
   gap: 2px;
@@ -1683,11 +1663,6 @@ button {
 [data-theme="dark"] .thread-list {
   border-color: #343434;
   background: transparent;
-}
-
-[data-theme="dark"] .thread-new-row {
-  color: #93c5fd;
-  background: rgba(96, 165, 250, 0.12);
 }
 
 .thread-row {
@@ -1738,6 +1713,14 @@ button {
   color: #174eb8;
   background: rgba(231, 239, 255, 0.72);
   border-color: rgba(37, 99, 235, 0.38);
+}
+
+.thread-row.is-new-placeholder {
+  cursor: pointer;
+}
+
+.thread-row.is-new-placeholder:active {
+  background: rgba(231, 239, 255, 0.9);
 }
 
 .thread-row.is-running:not(.is-selected) {
@@ -3248,7 +3231,6 @@ button {
 }
 
 .file-diff-header,
-.citation-title,
 .diff-card-title {
   display: flex;
   align-items: center;
@@ -3258,6 +3240,44 @@ button {
   font-size: 13px;
   line-height: 18px;
   font-weight: 750;
+}
+
+.citation-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 750;
+  list-style: none;
+  cursor: pointer;
+}
+
+.citation-title::-webkit-details-marker {
+  display: none;
+}
+
+.citation-title span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.citation-title small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.citation-title svg {
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+
+.citation-card[open] .citation-title svg {
+  transform: rotate(180deg);
 }
 
 .file-diff-header strong {

@@ -525,9 +525,21 @@ function isLocalImageSource(value) {
   }
   return (
     /^file:\/\//i.test(raw) ||
-    /^\/(?:Users|private|var|tmp|Volumes)\//.test(raw) ||
+    /^\//.test(raw) ||
     /^~[\\/]/.test(raw) ||
     /^[A-Za-z]:[\\/]/.test(raw)
+  );
+}
+
+function isPreviewableImageUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return false;
+  }
+  return (
+    /^data:image\//i.test(raw) ||
+    isLocalImageSource(raw) ||
+    /\.(?:png|jpe?g|webp|gif|bmp|svg)(?:[?#].*)?$/i.test(raw)
   );
 }
 
@@ -1963,6 +1975,8 @@ function Drawer({
                 (session) => !session.parentSessionId || !projectSessionIds.has(session.parentSessionId)
               );
               const sessionsOpen = isExpanded || Boolean(normalizedDrawerQuery);
+              const hasVisibleDraft = visibleProjectSessions.some((session) => isDraftSession(session));
+              const showNewThreadPlaceholder = sessionsOpen && !normalizedDrawerQuery && !hasVisibleDraft;
               const renderThreadRow = (session, { isSubAgent = false } = {}) => {
                 const runtime = threadRuntimeById?.[session.id] || null;
                 const sessionRunning = runtime?.status === 'running' || hasRunningKey(runningById, sessionRunKeys(session));
@@ -2065,14 +2079,21 @@ function Drawer({
                   </button>
                   {sessionsOpen ? (
                     <div className="thread-list">
-                      <button
-                        type="button"
-                        className="thread-new-row"
-                        onClick={() => onNewConversation(project)}
-                      >
-                        <Plus size={14} />
-                        <span>新对话</span>
-                      </button>
+                      {showNewThreadPlaceholder ? (
+                        <div className="thread-row is-draft is-new-placeholder">
+                          <button
+                            type="button"
+                            className="thread-main"
+                            onClick={() => onNewConversation(project)}
+                          >
+                            <span className="thread-title-line">
+                              <span>新对话</span>
+                            </span>
+                            <small>待发送</small>
+                          </button>
+                          <ChevronRight size={14} className="thread-row-more" />
+                        </div>
+                      ) : null}
                       {loadingProjectId === project.id ? (
                         <div className="thread-empty">
                           <Loader2 className="spin" size={14} />
@@ -5054,7 +5075,20 @@ function MarkdownContent({ text, onPreviewImage, className = 'message-content' }
 }
 
 function MessageContent({ content, onPreviewImage }) {
-  return <MarkdownContent text={content} onPreviewImage={onPreviewImage} />;
+  const parsed = splitMemoryCitationTail(stripDisplayDirectives(content));
+  return (
+    <>
+      <MarkdownContent text={parsed.text} onPreviewImage={onPreviewImage} />
+      {parsed.citation ? <CitationBlock block={parsed.citation} /> : null}
+    </>
+  );
+}
+
+function stripDisplayDirectives(content) {
+  return String(content || '')
+    .replace(/(^|\n)[^\S\r\n]*::(?:git-[a-z0-9-]+|archive)\{[^\n]*\}[^\S\r\n]*(?=\n|$)/gi, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd();
 }
 
 function CodeBlock({ language, code }) {
@@ -5244,8 +5278,16 @@ function CitationBlock({ block }) {
     return <pre className="citation-block">{block}</pre>;
   }
   return (
-    <div className="citation-card">
-      <div className="citation-title">Citations</div>
+    <details className="citation-card">
+      <summary className="citation-title">
+        <span>Memory citations</span>
+        <small>
+          {parsed.entries.length ? `${parsed.entries.length} entries` : ''}
+          {parsed.entries.length && parsed.rolloutIds.length ? ' · ' : ''}
+          {parsed.rolloutIds.length ? `${parsed.rolloutIds.length} rollouts` : ''}
+        </small>
+        <ChevronDown size={15} />
+      </summary>
       {parsed.entries.map((entry, index) => (
         <div key={`citation-entry-${index}`} className="citation-entry">
           <strong>{entry.source}</strong>
@@ -5259,8 +5301,35 @@ function CitationBlock({ block }) {
           ))}
         </div>
       ) : null}
-    </div>
+    </details>
   );
+}
+
+function splitMemoryCitationTail(content) {
+  const text = String(content || '');
+  const trimmed = text.trimEnd();
+  const fullMatch = trimmed.match(/(?:\n|^)\s*<oai-mem-citation>\s*([\s\S]*?)\s*<\/oai-mem-citation>\s*$/);
+  if (fullMatch) {
+    return {
+      text: trimmed.slice(0, fullMatch.index).trimEnd(),
+      citation: fullMatch[0].trim()
+    };
+  }
+  const entriesMatch = trimmed.match(/(?:\n|^)\s*<citation_entries>\s*[\s\S]*?<\/citation_entries>\s*(?:\s*<rollout_ids>\s*[\s\S]*?<\/rollout_ids>\s*)?$/);
+  if (entriesMatch) {
+    return {
+      text: trimmed.slice(0, entriesMatch.index).trimEnd(),
+      citation: entriesMatch[0].trim()
+    };
+  }
+  const rolloutMatch = trimmed.match(/(?:\n|^)\s*<rollout_ids>\s*[\s\S]*?<\/rollout_ids>\s*$/);
+  if (rolloutMatch) {
+    return {
+      text: trimmed.slice(0, rolloutMatch.index).trimEnd(),
+      citation: rolloutMatch[0].trim()
+    };
+  }
+  return { text, citation: '' };
 }
 
 function parseMemoryCitation(block) {
