@@ -34,3 +34,26 @@ test('resolveAppServerTransport can use a headless local fallback when explicitl
   assert.equal(transport.mode, 'headless-local');
   assert.match(transport.reason, /后台 Codex/);
 });
+
+test('resolveAppServerTransport can prefer headless local over a desktop socket', () => {
+  const transport = resolveAppServerTransport({
+    CODEXMOBILE_CODEX_APP_SERVER_SOCK: '/tmp/codexmobile-missing.sock',
+    CODEXMOBILE_PREFER_HEADLESS_CODEX: '1'
+  }, { allowHeadlessLocal: true });
+
+  assert.equal(transport.strict, false);
+  assert.equal(transport.connected, true);
+  assert.equal(transport.mode, 'headless-local');
+  assert.match(transport.reason, /后台 Codex|headless-local/);
+});
+
+test('resolveAppServerTransport supports an explicit headless transport override', () => {
+  const transport = resolveAppServerTransport({
+    CODEXMOBILE_CODEX_APP_SERVER_SOCK: '/tmp/codexmobile-missing.sock',
+    CODEXMOBILE_CODEX_TRANSPORT: 'headless-local'
+  });
+
+  assert.equal(transport.strict, false);
+  assert.equal(transport.connected, true);
+  assert.equal(transport.mode, 'headless-local');
+});

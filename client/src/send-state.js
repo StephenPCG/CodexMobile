@@ -36,33 +36,22 @@ export function composerSendState({
   sessionIsDraft = false
 } = {}) {
   const bridge = normalizeDesktopBridge(desktopBridge);
-  if (!bridge.connected) {
-    return {
-      disabled: true,
-      label: '桌面端 Codex 未连接',
-      mode: 'unavailable',
-      showMenu: false,
-      canSteer: false,
-      canQueue: false,
-      canInterrupt: false
-    };
-  }
-  if (sessionIsDraft && !desktopBridgeCanCreateThread(bridge)) {
-    return {
-      disabled: true,
-      label: '只能继续桌面端已有对话',
-      mode: 'create-unavailable',
-      showMenu: false,
-      canSteer: false,
-      canQueue: false,
-      canInterrupt: false
-    };
-  }
   if (uploading) {
     return {
       disabled: true,
       label: '正在上传',
       mode: 'uploading',
+      showMenu: false,
+      canSteer: false,
+      canQueue: false,
+      canInterrupt: false
+    };
+  }
+  if (!bridge.connected && !sessionIsDraft) {
+    return {
+      disabled: true,
+      label: '桌面端 Codex 未连接',
+      mode: 'unavailable',
       showMenu: false,
       canSteer: false,
       canQueue: false,

@@ -1076,6 +1076,8 @@ async function main() {
   const codexCli = await getCodexExecutableInfo();
   const codexCliStatus = codexCli.version || codexCli.error || 'unknown version';
   console.log(`Codex CLI: ${codexCliStatus} (${codexCli.source}) ${codexCli.path || ''}`.trim());
+  const codexBridge = await getDesktopBridgeStatus({ force: true, probeHeadless: false, probeAppServer: false });
+  console.log(`Codex communication: ${codexBridge.mode}${codexBridge.reason ? ` (${codexBridge.reason})` : ''}`);
 
   const server = http.createServer(requestHandler);
   const wss = new WebSocketServer({ noServer: true });

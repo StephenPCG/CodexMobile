@@ -78,31 +78,37 @@ test('sendChat rejects when strict desktop bridge is unavailable', async () => {
   assert.equal(broadcasts.length, 0);
 });
 
-test('sendChat rejects desktop-ipc draft sends with a create-thread specific error', async () => {
-  const { service, broadcasts } = makeChatService({
+test('sendChat starts a background thread for desktop-ipc draft sends even without desktop thread creation', async () => {
+  let runPayload = null;
+  const { service } = makeChatService({
     getDesktopBridgeStatus: async () => ({
       strict: true,
       connected: true,
       mode: 'desktop-ipc',
       reason: null,
       capabilities: { sendToOpenDesktopThread: true, createThread: false }
-    })
+    }),
+    runCodexTurn: async (payload, emit) => {
+      runPayload = payload;
+      emit({ type: 'thread-started', sessionId: 'background-thread-1', previousSessionId: payload.draftSessionId, turnId: payload.turnId });
+      emit({ type: 'chat-complete', sessionId: 'background-thread-1', previousSessionId: payload.draftSessionId, turnId: payload.turnId });
+      return 'background-thread-1';
+    }
   });
 
-  await assert.rejects(
-    () => service.sendChat({
-      projectId: 'project-1',
-      draftSessionId: 'draft-project-1-1',
-      message: '手机新建一个同源对话'
-    }),
-    (error) => {
-      assert.equal(error.statusCode, 409);
-      assert.equal(error.code, 'CODEXMOBILE_DESKTOP_CREATE_THREAD_UNAVAILABLE');
-      assert.match(error.message, /不能从手机直接新建桌面端对话/);
-      return true;
-    }
-  );
-  assert.equal(broadcasts.length, 0);
+  const result = await service.sendChat({
+    projectId: 'project-1',
+    draftSessionId: 'draft-project-1-1',
+    message: '手机新建一个同源对话',
+    runMode: 'newWorktree'
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.delivery, 'started');
+  assert.equal(result.desktopBridge.mode, 'headless-local');
+  assert.equal(runPayload.draftSessionId, 'draft-project-1-1');
+  assert.equal(runPayload.runMode, 'newWorktree');
+  assert.equal(runPayload.forceHeadlessLocal, true);
 });
 
 test('sendChat sends existing desktop-ipc threads through the desktop follower bridge', async () => {
@@ -210,6 +216,7 @@ test('sendChat can create a background thread when desktop-ipc cannot create des
   assert.equal(result.delivery, 'started');
   assert.equal(result.desktopBridge.mode, 'headless-local');
   assert.equal(runPayload.draftSessionId, 'draft-project-1-1');
+  assert.equal(runPayload.forceHeadlessLocal, true);
   assert.match(runPayload.message, /从手机后台新建/);
 });
 

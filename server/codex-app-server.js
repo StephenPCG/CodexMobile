@@ -52,6 +52,25 @@ function isEnabled(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
 
+function explicitTransportMode(env = process.env) {
+  const value = String(env.CODEXMOBILE_CODEX_TRANSPORT || env.CODEXMOBILE_CODEX_COMMUNICATION || '').trim();
+  return ['desktop-proxy', 'isolated-dev', 'headless-local', 'unavailable'].includes(value) ? value : '';
+}
+
+function hasExplicitControlSocket(env = process.env) {
+  return Boolean(String(env.CODEXMOBILE_CODEX_APP_SERVER_SOCK || '').trim());
+}
+
+function shouldAutoPreferLocalCodex(env = process.env) {
+  if (isEnabled(env.CODEXMOBILE_PREFER_DESKTOP_CODEX)) {
+    return false;
+  }
+  if (isEnabled(env.CODEXMOBILE_PREFER_HEADLESS_CODEX)) {
+    return true;
+  }
+  return process.platform !== 'darwin' && !hasExplicitControlSocket(env);
+}
+
 function socketStatus(sockPath) {
   if (!sockPath) {
     return { ok: false, reason: '未找到桌面端 Codex app-server control socket' };
@@ -75,16 +94,54 @@ function socketStatus(sockPath) {
 export function resolveAppServerTransport(env = process.env, { allowHeadlessLocal = false } = {}) {
   const allowIsolated = isEnabled(env.CODEXMOBILE_ALLOW_ISOLATED_CODEX);
   const disableHeadless = isEnabled(env.CODEXMOBILE_DISABLE_HEADLESS_CODEX);
+  const explicitMode = explicitTransportMode(env);
   const explicitSocket = String(env.CODEXMOBILE_CODEX_APP_SERVER_SOCK || '').trim();
   const candidateSocket = explicitSocket || DEFAULT_CONTROL_SOCKET;
   const candidate = socketStatus(candidateSocket);
+
+  if (explicitMode === 'headless-local' && !disableHeadless) {
+    return headlessLocalTransport('CODEXMOBILE_CODEX_TRANSPORT=headless-local');
+  }
+  if (explicitMode === 'isolated-dev') {
+    return {
+      mode: 'isolated-dev',
+      strict: false,
+      sockPath: null,
+      connected: true,
+      reason: 'CODEXMOBILE_CODEX_TRANSPORT=isolated-dev'
+    };
+  }
+  if (explicitMode === 'unavailable') {
+    return {
+      mode: 'unavailable',
+      strict: true,
+      sockPath: candidateSocket,
+      connected: false,
+      reason: 'CODEXMOBILE_CODEX_TRANSPORT=unavailable'
+    };
+  }
+
+  const preferLocalCodex = shouldAutoPreferLocalCodex(env);
+  if (preferLocalCodex && allowHeadlessLocal && !disableHeadless) {
+    return headlessLocalTransport('自动检测到非本机 Desktop 环境，使用后台 Codex');
+  }
+  if (preferLocalCodex && allowIsolated) {
+    return {
+      mode: 'isolated-dev',
+      strict: false,
+      sockPath: null,
+      connected: true,
+      reason: '自动检测到非本机 Desktop 环境，使用独立 app-server'
+    };
+  }
+
   if (candidate.ok) {
     return {
       mode: 'desktop-proxy',
       strict: true,
       sockPath: candidate.sockPath,
       connected: true,
-      reason: null
+      reason: explicitMode === 'desktop-proxy' ? 'CODEXMOBILE_CODEX_TRANSPORT=desktop-proxy' : null
     };
   }
   if (allowIsolated) {
@@ -111,6 +168,16 @@ export function resolveAppServerTransport(env = process.env, { allowHeadlessLoca
     sockPath: candidateSocket,
     connected: false,
     reason: candidate.reason
+  };
+}
+
+export function headlessLocalTransport(reason = '手机新建对话使用后台 Codex 执行') {
+  return {
+    mode: 'headless-local',
+    strict: false,
+    sockPath: null,
+    connected: true,
+    reason
   };
 }
 

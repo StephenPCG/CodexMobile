@@ -555,7 +555,8 @@ export function createChatService({
         reasoningEffort: job.reasoningEffort,
         permissionMode: job.permissionMode,
         runMode: job.runMode,
-        turnId: job.turnId
+        turnId: job.turnId,
+        forceHeadlessLocal: job.forceHeadlessLocal
       },
       (payload) => {
         if (payload.sessionId) {
@@ -605,9 +606,12 @@ export function createChatService({
     });
   }
 
-  async function assertDesktopBridgeAvailable() {
+  async function resolveBridgeForChat({ allowBackgroundFallback = false } = {}) {
     const bridge = getDesktopBridgeStatus ? await getDesktopBridgeStatus({ force: true, probeHeadless: false, probeAppServer: false }) : null;
     if (bridge && !bridge.connected) {
+      if (allowBackgroundFallback) {
+        return backgroundFallbackBridge(bridge, '桌面端 Codex 未连接，已改用后台 Codex 新建。');
+      }
       const error = new Error(bridge.reason || '桌面端 Codex 未连接，无法发送消息。');
       error.statusCode = 503;
       error.code = 'CODEXMOBILE_DESKTOP_BRIDGE_UNAVAILABLE';
@@ -790,8 +794,6 @@ export function createChatService({
       error.statusCode = 400;
       throw error;
     }
-    let bridge = await assertDesktopBridgeAvailable();
-
     const requestedSessionId = String(body.sessionId || '').trim();
     const isDraftSession = requestedSessionId.startsWith('draft-');
     const session = requestedSessionId && !isDraftSession ? getSession(requestedSessionId) : null;
@@ -799,6 +801,8 @@ export function createChatService({
     const selectedSessionId = session && !session.mobileOnly
       ? session.id
       : (requestedSessionId && !isDraftSession ? requestedSessionId : null);
+    const shouldCreateBackgroundThread = !selectedSessionId && Boolean(draftSessionId || isDraftSession || !requestedSessionId);
+    let bridge = await resolveBridgeForChat({ allowBackgroundFallback: shouldCreateBackgroundThread });
     const turnId = String(body.clientTurnId || '').trim() || crypto.randomUUID();
     const sendMode = String(body.sendMode || body.mode || 'start').trim();
     const config = getCacheSnapshot().config || {};
@@ -838,7 +842,8 @@ export function createChatService({
         model: session?.model || body.model || config.model || 'gpt-5.5',
         reasoningEffort: body.reasoningEffort || defaultReasoningEffort,
         permissionMode: body.permissionMode || 'bypassPermissions',
-        runMode: body.runMode || 'local'
+        runMode: body.runMode || 'local',
+        forceHeadlessLocal: shouldCreateBackgroundThread
       }, { forceQueued: true, autoStart: false });
       return {
         accepted: true,
@@ -852,7 +857,7 @@ export function createChatService({
     }
 
     if (bridge?.mode === 'desktop-ipc' && !imagePrompt) {
-      if (!selectedSessionId && desktopIpcCanUseBackgroundFallback(bridge)) {
+      if (!selectedSessionId) {
         bridge = backgroundFallbackBridge(bridge, '桌面端还不能从手机新建真实桌面线程，已改用后台 Codex 新建。');
       } else {
         try {
@@ -1074,7 +1079,8 @@ export function createChatService({
       model: session?.model || body.model || config.model || 'gpt-5.5',
       reasoningEffort: body.reasoningEffort || defaultReasoningEffort,
       permissionMode: body.permissionMode || 'bypassPermissions',
-      runMode: body.runMode || 'local'
+      runMode: body.runMode || 'local',
+      forceHeadlessLocal: shouldCreateBackgroundThread
     });
 
     return {

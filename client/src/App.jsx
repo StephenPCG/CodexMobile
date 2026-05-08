@@ -58,7 +58,7 @@ import { removeDuplicateFinalAnswerActivity } from './activity-dedupe.js';
 import { mergeActivityStep } from './activity-merge.js';
 import { isPlaceholderTimelineItem } from './activity-timeline.js';
 import { isNearChatBottom, shouldFollowChatOutput } from './chat-scroll.js';
-import { composerSendState, desktopBridgeCanCreateThread } from './send-state.js';
+import { composerSendState } from './send-state.js';
 import {
   detectComposerToken,
   filteredSlashCommands,
@@ -1514,7 +1514,7 @@ function upsertAssistantMessage(current, payload) {
   if (existingIndex >= 0) {
     const next = [...withCompletedActivity];
     next[existingIndex] = nextMessage;
-    return [...next, ...relatedDiffMessages];
+    return next;
   }
   return [...withCompletedActivity, nextMessage];
 }
@@ -1643,9 +1643,7 @@ function Drawer({
   onSync,
   syncing,
   theme,
-  setTheme,
-  canCreateThread = true,
-  createThreadUnavailableReason = ''
+  setTheme
 }) {
   const [drawerView, setDrawerView] = useState('main');
   const [subagentExpandedById, setSubagentExpandedById] = useState({});
@@ -1774,9 +1772,9 @@ function Drawer({
           </label>
           <button
             className="drawer-new-button"
-            onClick={onNewConversation}
-            disabled={!canCreateThread}
-            title={!canCreateThread ? (createThreadUnavailableReason || '请先在桌面端新建对话') : '新对话'}
+            onClick={() => onNewConversation(selectedProject || projects[0] || null)}
+            disabled={!projects.length}
+            title={selectedProject ? `在 ${selectedProject.name} 中新建对话` : '新对话'}
           >
             <Plus size={17} />
             新对话
@@ -1915,6 +1913,14 @@ function Drawer({
                   </button>
                   {sessionsOpen ? (
                     <div className="thread-list">
+                      <button
+                        type="button"
+                        className="thread-new-row"
+                        onClick={() => onNewConversation(project)}
+                      >
+                        <Plus size={14} />
+                        <span>新对话</span>
+                      </button>
                       {loadingProjectId === project.id ? (
                         <div className="thread-empty">
                           <Loader2 className="spin" size={14} />
@@ -8761,21 +8767,8 @@ export default function App() {
     }
   }
 
-  function handleNewConversation() {
-    if (!desktopBridgeCanCreateThread(status.desktopBridge)) {
-      setMessages((current) => [
-        ...current,
-        {
-          id: `desktop-create-unavailable-${Date.now()}`,
-          role: 'activity',
-          content: status.desktopBridge?.capabilities?.createThreadReason || '当前桌面端还没有开放从手机新建同源对话的入口。请先在桌面端新建或打开一个对话，再从手机继续发送。',
-          timestamp: new Date().toISOString()
-        }
-      ]);
-      setDrawerOpen(false);
-      return;
-    }
-    const project = selectedProject || projects[0];
+  function handleNewConversation(projectOverride = null) {
+    const project = projectOverride || selectedProject || projects[0];
     if (!project) {
       return;
     }
@@ -8787,6 +8780,8 @@ export default function App() {
     setSessionsByProject((current) => upsertSessionInProject(current, project.id, draft));
     setMessages([]);
     setAttachments([]);
+    setFileMentions([]);
+    setInput('');
     setDrawerOpen(false);
   }
 
@@ -9562,10 +9557,6 @@ export default function App() {
     },
     [contextStatus, selectedSession]
   );
-  const canCreateThreadFromMobile = desktopBridgeCanCreateThread(status.desktopBridge);
-  const createThreadUnavailableReason =
-    status.desktopBridge?.capabilities?.createThreadReason ||
-    '当前桌面端还没有开放从手机新建同源对话的入口';
   const notificationSupported = browserPushSupported();
   const recoveryState = connectionRecoveryState({
     authenticated,
@@ -9616,8 +9607,6 @@ export default function App() {
         syncing={syncing}
         theme={theme}
         setTheme={setTheme}
-        canCreateThread={canCreateThreadFromMobile}
-        createThreadUnavailableReason={createThreadUnavailableReason}
       />
       <DocsPanel
         open={docsOpen}

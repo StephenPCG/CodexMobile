@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createCodexAppServerClient } from './codex-app-server.js';
+import { createCodexAppServerClient, headlessLocalTransport } from './codex-app-server.js';
 import { buildCodexTurnInput, imageMarkdownFromCodexImageGeneration } from './codex-native-images.js';
 import { buildCodexLarkCliContext } from './lark-cli.js';
 import { detectFeishuSkillKeys } from './feishu-skills.js';
@@ -710,7 +710,7 @@ function abortError() {
   return error;
 }
 
-export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, attachments = [], selectedSkills = [], model, reasoningEffort, permissionMode, runMode, turnId: providedTurnId }, emit) {
+export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, attachments = [], selectedSkills = [], model, reasoningEffort, permissionMode, runMode, turnId: providedTurnId, forceHeadlessLocal = false }, emit) {
   const target = await prepareCodexRunTarget({ projectPath, runMode, sessionId });
   const workingDirectory = await ensureAsciiWorkingDirectory(target.workingDirectory);
   const { sandboxMode, approvalPolicy } = mapPermissionMode(permissionMode);
@@ -779,6 +779,9 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       cwd: workingDirectory,
       clientInfo: { name: 'CodexMobile', title: null, version: '0.1.0' },
       allowHeadlessLocal: true,
+      transport: forceHeadlessLocal
+        ? headlessLocalTransport('手机新建对话使用后台 Codex 执行')
+        : null,
       onNotification: (appMessage) => {
         resetTurnInactivityTimeout();
         const params = appMessage.params || {};

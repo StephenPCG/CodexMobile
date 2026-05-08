@@ -329,9 +329,16 @@ const INTERNAL_PROMPT_MARKERS = [
   'CodexMobile 已接入飞书官方 lark-cli'
 ];
 
+function isSyntheticAgentsInstructionsContent(message) {
+  return /^#{0,6}\s*AGENTS\.md instructions for\b/i.test(String(message || '').trim());
+}
+
 function sanitizeVisibleUserMessage(message) {
   const value = String(message || '').trim();
   if (!value) {
+    return '';
+  }
+  if (isSyntheticAgentsInstructionsContent(value)) {
     return '';
   }
   let cutAt = value.length;
@@ -757,6 +764,7 @@ function textFromLocalMessageContent(content = []) {
 function isInternalLocalUserContent(content) {
   const value = String(content || '').trim();
   return (
+    isSyntheticAgentsInstructionsContent(value) ||
     value.startsWith('<environment_context>') ||
     value.startsWith('<permissions instructions>') ||
     value.startsWith('## Memory') ||
@@ -1994,11 +2002,12 @@ export function messagesFromDesktopThread(thread, { includeActivity = false } = 
         segmentIndex += 1;
         finalAssistantText = '';
         const content = textFromDesktopUserInput(item.content);
-        if (content) {
+        const visibleContent = sanitizeVisibleUserMessage(content);
+        if (visibleContent) {
           messages.push({
             id: item.id || `${turnId}-user-${itemIndex}`,
             role: 'user',
-            content: sanitizeVisibleUserMessage(content),
+            content: visibleContent,
             timestamp,
             turnId,
             sessionId: thread.id

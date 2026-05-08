@@ -52,7 +52,7 @@ test('composerSendState preserves queue and interrupt when active turn cannot st
   assert.equal(state.canInterrupt, true);
 });
 
-test('composerSendState blocks draft sends when desktop bridge cannot create threads', () => {
+test('composerSendState allows draft sends when desktop bridge cannot create threads', () => {
   const state = composerSendState({
     hasInput: true,
     sessionIsDraft: true,
@@ -63,9 +63,25 @@ test('composerSendState blocks draft sends when desktop bridge cannot create thr
     }
   });
 
-  assert.equal(state.disabled, true);
-  assert.equal(state.mode, 'create-unavailable');
-  assert.equal(state.label, '只能继续桌面端已有对话');
+  assert.equal(state.disabled, false);
+  assert.equal(state.mode, 'start');
+  assert.equal(state.label, '发送消息');
+});
+
+test('composerSendState allows draft sends when desktop bridge is unavailable', () => {
+  const state = composerSendState({
+    hasInput: true,
+    sessionIsDraft: true,
+    desktopBridge: {
+      connected: false,
+      mode: 'unavailable',
+      capabilities: {}
+    }
+  });
+
+  assert.equal(state.disabled, false);
+  assert.equal(state.mode, 'start');
+  assert.equal(state.label, '发送消息');
 });
 
 test('composerSendState still allows existing desktop threads when createThread is unavailable', () => {

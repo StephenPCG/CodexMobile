@@ -6,6 +6,7 @@ All notable changes to CodexMobile are tracked here.
 
 ### Added
 
+- Added per-project mobile draft creation so a new thread can choose Local or New worktree before the first send, then start through the headless local Codex path.
 - Added an xterm-based browser Terminal with PTY-backed color output, direct keyboard input, a blinking cursor, paste, and mobile quick keys.
 - Added mobile workspace tools for Changes, Directories, file previews, and diff viewing.
 - Added a browser Terminal panel with multi-tab-safe backend terminal sessions.
@@ -25,11 +26,17 @@ All notable changes to CodexMobile are tracked here.
 - Scoped Local/New worktree selection to new conversations while showing the active run mode for existing sessions.
 - Routed Changes, Directories, and Terminal views through the selected session working directory, including Codex worktrees.
 - Tightened composer controls with compact model, reasoning, permission, attachment, ASR, and send/stop actions.
+- Auto-select the Codex communication transport at startup, preferring headless local Codex on Linux/non-Desktop hosts.
 - Improved local Codex session grouping and status recovery when desktop bridge data is unavailable.
 - Kept completed task activity collapsed by default while preserving the full execution text when expanded.
 - Improved mobile activity rendering and reduced noisy lifecycle messages.
 - Rewrote README to describe CodexMobile as a local Codex mobile workbench rather than a thin upstream UI fork.
 - Updated package metadata to describe the current mobile workbench scope.
+
+### Fixed
+
+- Hid synthetic AGENTS.md instruction messages from chat history.
+- Fixed a white-screen crash after the first assistant update in newly created conversations.
 
 ### Notes
 
