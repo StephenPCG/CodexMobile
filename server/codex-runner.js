@@ -710,8 +710,9 @@ function abortError() {
   return error;
 }
 
-export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, attachments = [], selectedSkills = [], model, reasoningEffort, permissionMode, turnId: providedTurnId }, emit) {
-  const workingDirectory = await ensureAsciiWorkingDirectory(projectPath);
+export async function runCodexTurn({ sessionId, draftSessionId, projectPath, message, attachments = [], selectedSkills = [], model, reasoningEffort, permissionMode, runMode, turnId: providedTurnId }, emit) {
+  const target = await prepareCodexRunTarget({ projectPath, runMode, sessionId });
+  const workingDirectory = await ensureAsciiWorkingDirectory(target.workingDirectory);
   const { sandboxMode, approvalPolicy } = mapPermissionMode(permissionMode);
   const feishuSkillKeys = detectFeishuSkillKeys(message);
   const normalizedReasoningEffort = normalizeReasoningEffort(reasoningEffort);
@@ -740,11 +741,12 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
     turnId,
     sessionId: sessionId || draftSessionId || null,
     previousSessionId: draftSessionId || sessionId || null,
-    requestedRunMode: runMode === 'newWorktree' ? 'newWorktree' : 'local',
-    runMode: 'local',
-    projectPath: path.resolve(projectPath),
+    requestedRunMode: target.requestedMode,
+    runMode: target.effectiveMode,
+    projectPath: target.originalProjectPath,
+    targetProjectPath: target.workingDirectory,
     workingDirectory,
-    worktree: null,
+    worktree: target.worktree,
     startedAt: new Date().toISOString(),
     status: 'running'
   };
@@ -766,18 +768,7 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
   let resetTurnInactivityTimeout = () => {};
 
   try {
-    target = await prepareCodexRunTarget({ projectPath, runMode, sessionId });
-    workingDirectory = await ensureAsciiWorkingDirectory(target.workingDirectory);
     state.workingDirectory = workingDirectory;
-    Object.assign(run, {
-      requestedRunMode: target.requestedMode,
-      runMode: target.effectiveMode,
-      projectPath: target.originalProjectPath,
-      targetProjectPath: target.workingDirectory,
-      workingDirectory,
-      worktree: target.worktree
-    });
-
     if (larkCliContext.enabled && larkCliContext.env) {
       larkCliContext.env.CODEXMOBILE_TURN_ID = turnId;
       larkCliContext.env.CODEXMOBILE_SESSION_ID = sessionId || draftSessionId || '';
@@ -801,7 +792,12 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
             sessionId: currentSessionId,
             previousSessionId: fromSessionId,
             turnId,
-            projectPath,
+            projectPath: target.originalProjectPath,
+            targetProjectPath: target.workingDirectory,
+            workingDirectory,
+            requestedRunMode: target.requestedMode,
+            runMode: target.effectiveMode,
+            worktree: target.worktree,
             startedAt: new Date().toISOString()
           });
           return;
@@ -1044,7 +1040,12 @@ export function getActiveRuns() {
       status: run.status,
       turnId: run.turnId,
       steerable: Boolean(run.appTurnId),
-      context: run.context || null
+      context: run.context || null,
+      requestedRunMode: run.requestedRunMode,
+      runMode: run.runMode,
+      projectPath: run.projectPath,
+      workingDirectory: run.workingDirectory,
+      worktree: run.worktree
     }));
 }
 

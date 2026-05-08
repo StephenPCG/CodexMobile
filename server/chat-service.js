@@ -554,6 +554,7 @@ export function createChatService({
         model: job.model,
         reasoningEffort: job.reasoningEffort,
         permissionMode: job.permissionMode,
+        runMode: job.runMode,
         turnId: job.turnId
       },
       (payload) => {
@@ -836,7 +837,8 @@ export function createChatService({
         fileMentions,
         model: session?.model || body.model || config.model || 'gpt-5.5',
         reasoningEffort: body.reasoningEffort || defaultReasoningEffort,
-        permissionMode: body.permissionMode || 'bypassPermissions'
+        permissionMode: body.permissionMode || 'bypassPermissions',
+        runMode: body.runMode || 'local'
       }, { forceQueued: true, autoStart: false });
       return {
         accepted: true,
@@ -1071,7 +1073,8 @@ export function createChatService({
       fileMentions,
       model: session?.model || body.model || config.model || 'gpt-5.5',
       reasoningEffort: body.reasoningEffort || defaultReasoningEffort,
-      permissionMode: body.permissionMode || 'bypassPermissions'
+      permissionMode: body.permissionMode || 'bypassPermissions',
+      runMode: body.runMode || 'local'
     });
 
     return {

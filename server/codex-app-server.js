@@ -3,6 +3,7 @@ import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { resolveCodexExecutable } from './codex-executable.js';
 import { broadcastDesktopThreadArchived, probeDesktopIpc } from './desktop-ipc-client.js';
 
 const DEFAULT_CODEX_APP_BINARY = '/Applications/Codex.app/Contents/Resources/codex';
@@ -13,6 +14,12 @@ const BRIDGE_STATUS_CACHE_MS = 2500;
 let bridgeStatusCache = null;
 
 function resolveCodexBinary() {
+  try {
+    return resolveCodexExecutable().path;
+  } catch (error) {
+    console.warn('[codex] Failed to resolve preferred Codex CLI:', error.message);
+  }
+
   const candidates = [
     process.env.CODEXMOBILE_CODEX_BINARY,
     process.env.CODEX_BINARY,

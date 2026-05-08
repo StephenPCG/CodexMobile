@@ -44,6 +44,7 @@ import { publicVoiceSpeechStatus, synthesizeSpeech } from './voice-speaker.js';
 import { publicVoiceRealtimeStatus, startVoiceRealtimeProxy } from './realtime-voice.js';
 import { maybeAutoNameSession } from './session-title-generator.js';
 import { createChatService } from './chat-service.js';
+import { getCodexExecutableInfo } from './codex-executable.js';
 import { searchProjectFiles } from './file-search.js';
 import { htmlEscape, readBody, sendHtml, sendJson } from './http-utils.js';
 import { createPushService } from './push-service.js';
@@ -403,6 +404,7 @@ async function publicStatus(authenticated) {
   const snapshot = getCacheSnapshot();
   const config = snapshot.config || await getStatusConfigFallback() || {};
   const desktopBridge = await getDesktopBridgeStatus();
+  const codexCli = await getCodexExecutableInfo();
   return {
     connected: true,
     desktopBridge,
@@ -414,6 +416,7 @@ async function publicStatus(authenticated) {
     models: config.models?.length ? config.models : fallbackModels(config),
     skills: Array.isArray(config.skills) ? config.skills : [],
     context: config.context || null,
+    codexCli,
     reasoningEffort: DEFAULT_REASONING_EFFORT,
     voiceTranscription: publicVoiceTranscriptionStatus(config),
     voiceSpeech: publicVoiceSpeechStatus(config),
@@ -954,6 +957,9 @@ async function main() {
   const auth = await initializeAuth();
   await loadFeishuAuthState();
   await chatService.loadRecentImagePrompts();
+  const codexCli = await getCodexExecutableInfo();
+  const codexCliStatus = codexCli.version || codexCli.error || 'unknown version';
+  console.log(`Codex CLI: ${codexCliStatus} (${codexCli.source}) ${codexCli.path || ''}`.trim());
 
   const server = http.createServer(requestHandler);
   const wss = new WebSocketServer({ noServer: true });

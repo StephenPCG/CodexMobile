@@ -9,7 +9,7 @@ import { imageMarkdownFromCodexImageGeneration } from './codex-native-images.js'
 import { statusLabel } from './codex-runner.js';
 import { promisify } from 'node:util';
 import { archiveDesktopThread, listDesktopThreads, readDesktopThread, setDesktopThreadName } from './codex-app-server.js';
-import { CODEX_STATE_DB, readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
+import { CODEX_HOME, CODEX_STATE_DB, readCodexConfig, readCodexWorkspaceState } from './codex-config.js';
 import {
   readMobileSessionIndex,
   renameMobileSession
@@ -27,8 +27,6 @@ const ROLLOUT_CONTEXT_READ_BYTES = Math.max(
   64 * 1024,
   Number(process.env.CODEXMOBILE_ROLLOUT_CONTEXT_READ_BYTES) || 1024 * 1024
 );
-const execFileAsync = promisify(execFile);
-
 let cache = {
   syncedAt: null,
   config: null,
@@ -543,7 +541,8 @@ async function sessionFromDesktopThread(
   projectlessWorkdir,
   visibleProjectIds,
   configContext = {},
-  spawnEdge = null
+  spawnEdge = null,
+  projectLookupContext = null
 ) {
   if (!thread?.id) {
     return null;
@@ -557,11 +556,14 @@ async function sessionFromDesktopThread(
     return null;
   }
   const resolvedCwd = path.resolve(cwd || projectlessWorkdir);
-  const projectId = projectIdFor(resolvedCwd);
+  const project = projectLookupContext && !explicitProjectless
+    ? await projectForSessionPath(resolvedCwd, projectLookupContext)
+    : null;
+  const projectId = project?.id || projectIdFor(resolvedCwd);
   const projectless =
     explicitProjectless ||
     isDocumentsCodexConversationPath(resolvedCwd) ||
-    !visibleProjectIds.has(projectId);
+    (!project && !visibleProjectIds.has(projectId));
   const preview = sanitizeVisibleUserMessage(thread.preview || mobileSession?.summary || '');
   const mobileTitle = String(mobileSession?.title || '').trim();
   const mobileTitleCandidate = mobileTitle && mobileTitle !== '新对话' ? mobileTitle : '';
@@ -703,11 +705,15 @@ export async function refreshCodexCache() {
 
   for (const project of visibleProjects) {
     const entry = upsertProject(projectById, project.path, project.trustLevel, project.label);
+    if (entry) {
+      visibleProjectIds.add(entry.id);
+    }
     const commonDir = entry ? await cachedGitCommonDir(entry.path, gitCommonDirCache) : '';
     if (commonDir && !gitProjectByCommonDir.has(commonDir)) {
       gitProjectByCommonDir.set(commonDir, entry);
     }
   }
+  const projectLookupContext = { projectById, visibleProjects, gitProjectByCommonDir, gitCommonDirCache };
   if (hasProjectlessSessions) {
     upsertProjectlessProject(projectById, workspaceState);
     visibleProjectIds.add(PROJECTLESS_PROJECT_ID);
@@ -725,7 +731,8 @@ export async function refreshCodexCache() {
       projectlessWorkdir,
       visibleProjectIds,
       config.context || {},
-      spawnEdgeByChildId.get(thread.id) || null
+      spawnEdgeByChildId.get(thread.id) || null,
+      projectLookupContext
     );
     if (isStaleProjectlessDesktopSession(thread, session)) {
       continue;
@@ -779,7 +786,8 @@ export async function refreshCodexCache() {
         projectlessWorkdir,
         visibleProjectIds,
         config.context || {},
-        edge
+        edge,
+        projectLookupContext
       );
       if (isStaleProjectlessDesktopSession(childThread, childSession)) {
         continue;
