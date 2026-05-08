@@ -43,6 +43,11 @@ import {
   Wifi,
   X
 } from 'lucide-react';
+import { CanvasAddon } from '@xterm/addon-canvas';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Terminal as XTermTerminal } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -3226,16 +3231,204 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
   );
 }
 
-function stripAnsi(value = '') {
-  return String(value || '').replace(
-    // eslint-disable-next-line no-control-regex
-    /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g,
-    ''
-  );
-}
-
 function makeTerminalId() {
   return globalThis.crypto?.randomUUID?.() || `terminal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+const TERMINAL_QUICK_KEY_ROWS = [
+  [
+    { label: 'Esc', sequence: '\u001b', title: 'Escape' },
+    { label: 'Tab', sequence: '\t', title: 'Tab' },
+    { label: 'C-c', sequence: '\u0003', title: 'Ctrl-C' },
+    { label: 'Home', sequence: '\u001b[H', title: 'Home' },
+    { label: '↑', sequence: '\u001b[A', title: 'Arrow up' },
+    { label: 'End', sequence: '\u001b[F', title: 'End' },
+    { label: 'PgUp', sequence: '\u001b[5~', title: 'Page up' }
+  ],
+  [
+    { label: '/', sequence: '/', title: 'Slash' },
+    { label: '-', sequence: '-', title: 'Hyphen' },
+    { label: 'Ctrl', modifier: 'ctrl', title: 'Control modifier' },
+    { label: 'Alt', modifier: 'alt', title: 'Alt modifier' },
+    { label: '←', sequence: '\u001b[D', title: 'Arrow left' },
+    { label: '↓', sequence: '\u001b[B', title: 'Arrow down' },
+    { label: '→', sequence: '\u001b[C', title: 'Arrow right' },
+    { label: 'PgDn', sequence: '\u001b[6~', title: 'Page down' }
+  ]
+];
+
+function terminalTheme() {
+  return {
+    background: '#0b1120',
+    foreground: '#e5e7eb',
+    cursor: '#f8fafc',
+    cursorAccent: '#0b1120',
+    selectionBackground: 'rgba(148, 163, 184, 0.36)',
+    black: '#0f172a',
+    red: '#ef4444',
+    green: '#22c55e',
+    yellow: '#eab308',
+    blue: '#60a5fa',
+    magenta: '#d946ef',
+    cyan: '#22d3ee',
+    white: '#e5e7eb',
+    brightBlack: '#64748b',
+    brightRed: '#f87171',
+    brightGreen: '#4ade80',
+    brightYellow: '#fde047',
+    brightBlue: '#93c5fd',
+    brightMagenta: '#f0abfc',
+    brightCyan: '#67e8f9',
+    brightWhite: '#ffffff'
+  };
+}
+
+function applyTerminalModifier(sequence, modifierState = {}) {
+  let modified = String(sequence || '');
+  if (modifierState.alt) {
+    modified = `\u001b${modified}`;
+  }
+  if (modifierState.ctrl && modified.length === 1) {
+    const code = modified.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+      modified = String.fromCharCode(code - 64);
+    }
+  }
+  return modified;
+}
+
+function TerminalCanvas({ onData, onMount, onResize }) {
+  const containerRef = useRef(null);
+  const onDataRef = useRef(onData);
+  const onMountRef = useRef(onMount);
+  const onResizeRef = useRef(onResize);
+
+  useEffect(() => {
+    onDataRef.current = onData;
+  }, [onData]);
+
+  useEffect(() => {
+    onMountRef.current = onMount;
+  }, [onMount]);
+
+  useEffect(() => {
+    onResizeRef.current = onResize;
+  }, [onResize]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return undefined;
+    }
+    const terminal = new XTermTerminal({
+      allowTransparency: false,
+      convertEol: true,
+      cursorBlink: true,
+      cursorStyle: 'block',
+      customGlyphs: true,
+      fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace',
+      fontSize: 13,
+      lineHeight: 1.2,
+      scrollback: 5000,
+      theme: terminalTheme()
+    });
+    const fitAddon = new FitAddon();
+    const webLinksAddon = new WebLinksAddon();
+    const canvasAddon = new CanvasAddon();
+    const dataDisposable = terminal.onData((data) => {
+      onDataRef.current?.(data);
+    });
+    let lastSize = '';
+    let animationFrame = 0;
+    let disposed = false;
+
+    terminal.loadAddon(fitAddon);
+    terminal.loadAddon(webLinksAddon);
+    try {
+      terminal.loadAddon(canvasAddon);
+    } catch {
+      // Canvas rendering is an optimization; DOM rendering is fine if unavailable.
+    }
+    terminal.open(container);
+
+    const fit = () => {
+      if (disposed) {
+        return;
+      }
+      try {
+        fitAddon.fit();
+      } catch {
+        return;
+      }
+      const nextSize = `${terminal.cols}x${terminal.rows}`;
+      if (terminal.cols > 0 && terminal.rows > 0 && nextSize !== lastSize) {
+        lastSize = nextSize;
+        onResizeRef.current?.(terminal.cols, terminal.rows);
+      }
+    };
+    const scheduleFit = () => {
+      if (animationFrame) {
+        cancelAnimationFrame(animationFrame);
+      }
+      animationFrame = requestAnimationFrame(() => {
+        animationFrame = 0;
+        fit();
+      });
+    };
+    const observer = new ResizeObserver(scheduleFit);
+    observer.observe(container);
+    scheduleFit();
+    onMountRef.current?.(terminal);
+
+    return () => {
+      disposed = true;
+      if (animationFrame) {
+        cancelAnimationFrame(animationFrame);
+      }
+      observer.disconnect();
+      dataDisposable.dispose();
+      try {
+        fitAddon.dispose();
+        webLinksAddon.dispose();
+        canvasAddon.dispose();
+      } catch {
+        // Ignore addon cleanup errors from partially initialized renderers.
+      }
+      terminal.dispose();
+    };
+  }, []);
+
+  return <div ref={containerRef} className="terminal-canvas" />;
+}
+
+function TerminalQuickKey({ item, active, disabled, onInput, onModifier, onPaste }) {
+  function handleClick() {
+    if (disabled) {
+      return;
+    }
+    if (item.action === 'paste') {
+      onPaste();
+      return;
+    }
+    if (item.modifier) {
+      onModifier(item.modifier);
+      return;
+    }
+    onInput(item.sequence || '');
+  }
+
+  return (
+    <button
+      type="button"
+      className={`terminal-quick-key${active ? ' is-active' : ''}`}
+      disabled={disabled}
+      aria-pressed={item.modifier ? active : undefined}
+      title={item.title || item.label}
+      onClick={handleClick}
+    >
+      {item.label}
+    </button>
+  );
 }
 
 function TerminalPanel({
@@ -3248,17 +3441,38 @@ function TerminalPanel({
   onSendTerminal
 }) {
   const terminalIdRef = useRef(makeTerminalId());
-  const outputRef = useRef(null);
+  const terminalRef = useRef(null);
+  const terminalStateRef = useRef('idle');
+  const lastSizeRef = useRef({ cols: 100, rows: 28 });
+  const modifierStateRef = useRef({ ctrl: false, alt: false });
   const toastShownRef = useRef(false);
   const onToastRef = useRef(onToast);
   const [state, setState] = useState('idle');
-  const [output, setOutput] = useState('');
-  const [command, setCommand] = useState('');
+  const [terminalReady, setTerminalReady] = useState(false);
+  const [ctrlActive, setCtrlActive] = useState(false);
+  const [altActive, setAltActive] = useState(false);
   const projectId = project?.id || '';
+  const projectSessionId = project?.sessionId || '';
+  const projectCwd = project?.cwd || '';
 
   useEffect(() => {
     onToastRef.current = onToast;
   }, [onToast]);
+
+  useEffect(() => {
+    if (!open) {
+      setTerminalReady(false);
+      terminalRef.current = null;
+    }
+  }, [open]);
+
+  useEffect(() => {
+    terminalStateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    modifierStateRef.current = { ctrl: ctrlActive, alt: altActive };
+  }, [ctrlActive, altActive]);
 
   const sendTerminal = useCallback((payload) => {
     if (!terminalIdRef.current) {
@@ -3267,20 +3481,54 @@ function TerminalPanel({
     return Boolean(onSendTerminal?.({ terminalId: terminalIdRef.current, ...payload }));
   }, [onSendTerminal]);
 
+  const resetModifiers = useCallback(() => {
+    setCtrlActive(false);
+    setAltActive(false);
+  }, []);
+
+  const writeRemote = useCallback((data, modifierState = modifierStateRef.current) => {
+    if (terminalStateRef.current !== 'connected' || !data) {
+      return false;
+    }
+    const sent = sendTerminal({ type: 'terminal-input', data: applyTerminalModifier(data, modifierState) });
+    if (modifierState.ctrl || modifierState.alt) {
+      resetModifiers();
+    }
+    terminalRef.current?.focus();
+    return sent;
+  }, [resetModifiers, sendTerminal]);
+
+  const handleTerminalData = useCallback((data) => {
+    writeRemote(data);
+  }, [writeRemote]);
+
+  const handleTerminalMount = useCallback((terminal) => {
+    terminalRef.current = terminal;
+    setTerminalReady(true);
+    terminal.focus();
+  }, []);
+
+  const handleTerminalResize = useCallback((cols, rows) => {
+    lastSizeRef.current = { cols, rows };
+    if (terminalStateRef.current === 'connected') {
+      sendTerminal({ type: 'terminal-resize', cols, rows });
+    }
+  }, [sendTerminal]);
+
   useEffect(() => {
-    if (!open || !projectId) {
+    if (!open || !projectId || !terminalReady) {
       return undefined;
     }
     if (connectionState !== 'connected') {
       setState('connecting');
-      setOutput('Waiting for CodexMobile WebSocket...');
+      terminalRef.current?.writeln('Waiting for CodexMobile WebSocket...');
       return undefined;
     }
     const terminalId = makeTerminalId();
     terminalIdRef.current = terminalId;
     toastShownRef.current = false;
     setState('connecting');
-    setOutput('');
+    terminalRef.current?.reset();
     const notifyConnectionFailed = (message) => {
       if (toastShownRef.current) {
         return;
@@ -3294,54 +3542,79 @@ function TerminalPanel({
       }
       if (payload.type === 'terminal-ready') {
         setState('connected');
+        terminalRef.current?.focus();
       } else if (payload.type === 'terminal-output') {
-        setOutput((current) => `${current}${stripAnsi(payload.data)}`);
+        terminalRef.current?.write(String(payload.data || ''));
       } else if (payload.type === 'terminal-error') {
         const message = payload.message || 'Terminal error';
         setState('error');
-        setOutput((current) => `${current}\n${message}\n`);
+        terminalRef.current?.writeln(`\r\n${message}`);
         notifyConnectionFailed(message);
       } else if (payload.type === 'terminal-exit') {
         setState('closed');
-        setOutput((current) => `${current}\n[terminal exited]\n`);
+        terminalRef.current?.writeln('\r\n[terminal exited]');
       }
     }) || (() => {});
+    const size = lastSizeRef.current || { cols: 100, rows: 28 };
     const sent = onSendTerminal?.({
       type: 'terminal-open',
       terminalId,
       projectId,
-      sessionId: project?.sessionId || '',
-      cwd: project?.cwd || '',
-      cols: 100,
-      rows: 28
+      sessionId: projectSessionId,
+      cwd: projectCwd,
+      cols: size.cols,
+      rows: size.rows
     });
     if (!sent) {
       const message = 'WebSocket 未连接';
       setState('error');
-      setOutput(message);
+      terminalRef.current?.writeln(message);
       notifyConnectionFailed(message);
     }
     return () => {
       onSendTerminal?.({ type: 'terminal-close', terminalId });
       unregister();
     };
-  }, [open, project, projectId, connectionState, onRegisterTerminal, onSendTerminal]);
-
-  useEffect(() => {
-    outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
-  }, [output]);
+  }, [open, projectId, projectSessionId, projectCwd, terminalReady, connectionState, onRegisterTerminal, onSendTerminal]);
 
   if (!open) {
     return null;
   }
 
-  function submitCommand(event) {
-    event.preventDefault();
-    if (!command.trim()) {
+  async function handlePaste() {
+    if (state !== 'connected') {
       return;
     }
-    sendTerminal({ type: 'terminal-input', data: `${command}\n` });
-    setCommand('');
+    let text = '';
+    try {
+      text = await navigator.clipboard?.readText?.() || '';
+    } catch {
+      text = '';
+    }
+    if (!text) {
+      text = window.prompt('Paste terminal input') || '';
+    }
+    if (text) {
+      writeRemote(text, { ctrl: false, alt: false });
+    }
+  }
+
+  function handleQuickInput(sequence) {
+    writeRemote(sequence);
+  }
+
+  function handleModifier(modifier) {
+    if (state !== 'connected') {
+      return;
+    }
+    if (modifier === 'ctrl') {
+      setCtrlActive((value) => !value);
+      setAltActive(false);
+    } else if (modifier === 'alt') {
+      setAltActive((value) => !value);
+      setCtrlActive(false);
+    }
+    terminalRef.current?.focus();
   }
 
   return (
@@ -3356,18 +3629,40 @@ function TerminalPanel({
         </div>
         <span className={`terminal-state is-${state}`}>{state}</span>
       </header>
-      <pre ref={outputRef} className="terminal-output">{output || 'Connecting terminal...'}</pre>
-      <form className="terminal-input-row" onSubmit={submitCommand}>
-        <button type="button" onClick={() => sendTerminal({ type: 'terminal-input', data: '\x03' })}>Ctrl-C</button>
-        <input
-          value={command}
-          onChange={(event) => setCommand(event.target.value)}
-          placeholder="Run a command"
-          autoCapitalize="none"
-          autoCorrect="off"
+      <div className="terminal-body">
+        <TerminalCanvas
+          onData={handleTerminalData}
+          onMount={handleTerminalMount}
+          onResize={handleTerminalResize}
         />
-        <button type="submit" disabled={state !== 'connected'}><ArrowUp size={16} /></button>
-      </form>
+      </div>
+      <div className="terminal-quick-panel">
+        <button
+          type="button"
+          className="terminal-paste-button"
+          disabled={state !== 'connected'}
+          onClick={() => {
+            void handlePaste();
+          }}
+        >
+          Paste
+        </button>
+        {TERMINAL_QUICK_KEY_ROWS.map((row, rowIndex) => (
+          <div className="terminal-quick-row" key={`terminal-quick-row-${rowIndex}`}>
+            {row.map((item) => (
+              <TerminalQuickKey
+                key={item.label}
+                item={item}
+                active={(item.modifier === 'ctrl' && ctrlActive) || (item.modifier === 'alt' && altActive)}
+                disabled={state !== 'connected'}
+                onInput={handleQuickInput}
+                onModifier={handleModifier}
+                onPaste={handlePaste}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

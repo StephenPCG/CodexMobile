@@ -1,5 +1,11 @@
 import { spawn } from 'node:child_process';
-import os from 'node:os';
+
+let pty = null;
+try {
+  pty = (await import('node-pty')).default;
+} catch {
+  pty = null;
+}
 
 const MAX_TERMINALS_PER_SOCKET = 4;
 const DETACH_TERMINAL_PROCESS = process.platform !== 'win32';
@@ -28,7 +34,19 @@ function terminalShell() {
   if (process.platform === 'win32') {
     return { command: process.env.ComSpec || 'cmd.exe', args: [] };
   }
-  return { command: process.env.SHELL || '/bin/bash', args: ['-i'] };
+  return { command: process.env.SHELL || '/bin/bash', args: [] };
+}
+
+function terminalEnv(cols, rows) {
+  return {
+    ...process.env,
+    TERM: 'xterm-256color',
+    COLORTERM: process.env.COLORTERM || 'truecolor',
+    LANG: process.env.LANG || 'C.UTF-8',
+    COLUMNS: String(cols),
+    LINES: String(rows),
+    CODEXMOBILE_TERMINAL: '1'
+  };
 }
 
 function signalTerminalProcess(child, signal) {
@@ -86,6 +104,17 @@ export function createTerminalService({ getProject, getTarget } = {}) {
     }
     terminals.delete(terminalId);
     terminal.closed = true;
+    if (terminal.kind === 'pty') {
+      try {
+        terminal.process.kill();
+      } catch {
+        // Ignore PTY cleanup errors.
+      }
+      if (notify) {
+        send(ws, { type: 'terminal-exit', terminalId, code: null, signal: 'closed' });
+      }
+      return;
+    }
     try {
       if (terminal.process.stdin?.writable) {
         terminal.process.stdin.end('exit\n');
@@ -124,31 +153,66 @@ export function createTerminalService({ getProject, getTarget } = {}) {
       cwd: payload.cwd
     });
     const { command, args } = terminalShell();
-    const child = spawn(command, args, {
+    const cols = Number(payload.cols) || 100;
+    const rows = Number(payload.rows) || 28;
+
+    try {
+      if (!pty?.spawn) {
+        throw new Error('node-pty is unavailable');
+      }
+      const child = pty.spawn(command, args, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd: project.path,
+        env: terminalEnv(cols, rows)
+      });
+
+      terminals.set(terminalId, { process: child, kind: 'pty', closed: false });
+      send(ws, {
+        type: 'terminal-ready',
+        terminalId,
+        projectId: project.id,
+        cwd: project.path,
+        shell: command,
+        pty: true
+      });
+      child.onData((data) => {
+        send(ws, { type: 'terminal-output', terminalId, data });
+      });
+      child.onExit(({ exitCode, signal }) => {
+        const terminal = terminals.get(terminalId);
+        if (!terminal || terminal.closed) {
+          return;
+        }
+        terminals.delete(terminalId);
+        send(ws, { type: 'terminal-exit', terminalId, code: exitCode ?? null, signal: signal ? String(signal) : null });
+      });
+      return;
+    } catch (error) {
+      send(ws, {
+        type: 'terminal-output',
+        terminalId,
+        data: `PTY unavailable, falling back to pipe shell: ${error.message || 'unknown error'}\r\n`
+      });
+    }
+
+    const fallbackArgs = process.platform === 'win32' ? args : [...args, '-i'];
+    const child = spawn(command, fallbackArgs, {
       cwd: project.path,
-      env: {
-        ...process.env,
-        TERM: process.env.TERM || 'xterm-256color',
-        COLUMNS: String(Number(payload.cols) || 100),
-        LINES: String(Number(payload.rows) || 28),
-        CODEXMOBILE_TERMINAL: '1'
-      },
+      env: terminalEnv(cols, rows),
       detached: DETACH_TERMINAL_PROCESS,
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
-    terminals.set(terminalId, { process: child, closed: false });
+    terminals.set(terminalId, { process: child, kind: 'spawn', closed: false });
     send(ws, {
       type: 'terminal-ready',
       terminalId,
       projectId: project.id,
       cwd: project.path,
-      shell: command
-    });
-    send(ws, {
-      type: 'terminal-output',
-      terminalId,
-      data: `CodexMobile terminal on ${os.hostname()}\n${project.path}\n`
+      shell: command,
+      pty: false
     });
 
     child.stdout.on('data', (chunk) => {
@@ -171,7 +235,7 @@ export function createTerminalService({ getProject, getTarget } = {}) {
     });
     child.on('close', (code, signal) => {
       const terminal = terminals.get(terminalId);
-      if (terminal?.closed) {
+      if (!terminal || terminal.closed) {
         return;
       }
       terminals.delete(terminalId);
@@ -183,9 +247,28 @@ export function createTerminalService({ getProject, getTarget } = {}) {
     const terminalId = safeTerminalId(payload.terminalId);
     const terminal = terminalsFor(ws).get(terminalId);
     if (!terminal?.process?.stdin?.writable) {
+      if (terminal?.kind === 'pty') {
+        terminal.process.write(String(payload.data || ''));
+        return;
+      }
       throw terminalError('Terminal is not connected', 409);
     }
     terminal.process.stdin.write(String(payload.data || ''));
+  }
+
+  function resizeTerminal(ws, payload = {}) {
+    const terminalId = safeTerminalId(payload.terminalId);
+    const terminal = terminalsFor(ws).get(terminalId);
+    const cols = Math.max(1, Number(payload.cols) || 100);
+    const rows = Math.max(1, Number(payload.rows) || 28);
+    if (terminal?.kind === 'pty') {
+      try {
+        terminal.process.resize(cols, rows);
+      } catch {
+        // Ignore stale resize requests during terminal teardown.
+      }
+    }
+    send(ws, { type: 'terminal-resized', terminalId, cols, rows });
   }
 
   function handleSocketMessage(ws, raw) {
@@ -206,12 +289,7 @@ export function createTerminalService({ getProject, getTarget } = {}) {
       } else if (payload.type === 'terminal-close') {
         closeTerminal(ws, safeTerminalId(payload.terminalId));
       } else if (payload.type === 'terminal-resize') {
-        send(ws, {
-          type: 'terminal-resized',
-          terminalId: safeTerminalId(payload.terminalId),
-          cols: Number(payload.cols) || null,
-          rows: Number(payload.rows) || null
-        });
+        resizeTerminal(ws, payload);
       }
     } catch (error) {
       send(ws, {

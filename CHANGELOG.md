@@ -6,6 +6,7 @@ All notable changes to CodexMobile are tracked here.
 
 ### Added
 
+- Added an xterm-based browser Terminal with PTY-backed color output, direct keyboard input, a blinking cursor, paste, and mobile quick keys.
 - Added mobile workspace tools for Changes, Directories, file previews, and diff viewing.
 - Added a browser Terminal panel with multi-tab-safe backend terminal sessions.
 - Added a queue panel for running conversations: queued drafts can be viewed, restored, deleted, or sent immediately as steer input.
