@@ -36,6 +36,48 @@ export const SLASH_COMMANDS = [
   }
 ];
 
+export const SLASH_COMMANDS_EN = [
+  {
+    id: 'status',
+    token: '/status',
+    aliases: ['/状态'],
+    title: 'Status',
+    description: 'View context, quota, and connection status',
+    action: 'open-context'
+  },
+  {
+    id: 'compact',
+    token: '/compact',
+    aliases: ['/压缩上下文'],
+    title: 'Compact Context',
+    description: 'Summarize older context and keep the conversation light',
+    action: 'insert-prompt',
+    prompt: 'Please compact the older context in this conversation. Preserve key decisions, file paths, unfinished items, and the best next entry points.'
+  },
+  {
+    id: 'review',
+    token: '/review',
+    aliases: ['/代码审查'],
+    title: 'Code Review',
+    description: 'Review current changes for risks, bugs, and missing tests',
+    action: 'insert-prompt',
+    prompt: 'Please review the current repository changes from a code-review perspective. Prioritize bugs, behavior regressions, risks, and missing tests, with concrete file locations.'
+  },
+  {
+    id: 'subagents',
+    token: '/subagents',
+    aliases: ['/子代理'],
+    title: 'Subagents',
+    description: 'Ask Codex to split suitable parallel work',
+    action: 'insert-prompt',
+    prompt: 'If the task is suitable for splitting, please use subagents to handle independent non-conflicting parts in parallel, then summarize the result.'
+  }
+];
+
+export function slashCommandsForLocale(locale) {
+  return locale === 'en' ? SLASH_COMMANDS_EN : SLASH_COMMANDS;
+}
+
 export function detectComposerToken(text, cursor = null) {
   const value = String(text || '');
   const end = Number.isInteger(cursor) ? Math.max(0, Math.min(cursor, value.length)) : value.length;

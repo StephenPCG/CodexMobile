@@ -47,7 +47,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal as XTermTerminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
@@ -61,6 +61,7 @@ import { composerSendState } from './send-state.js';
 import {
   detectComposerToken,
   filteredSlashCommands,
+  slashCommandsForLocale,
   replaceComposerToken
 } from './composer-shortcuts.js';
 import { connectionRecoveryState } from './connection-recovery.js';
@@ -155,16 +156,11 @@ const DEFAULT_STATUS = {
   auth: { authenticated: false }
 };
 
-const CONNECTION_STATUS = {
-  connected: { label: '已连接', className: 'is-connected' },
-  connecting: { label: '连接中', className: 'is-connecting' },
-  disconnected: { label: '已断开', className: 'is-disconnected' }
-};
-
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 const REASONING_DEFAULT_VERSION = 'xhigh-v1';
 const RUN_MODE_KEY = 'codexmobile.runMode';
 const THEME_KEY = 'codexmobile.theme';
+const LANGUAGE_KEY = 'codexmobile.language';
 const SELECTED_SKILLS_KEY = 'codexmobile.selectedSkills';
 const VOICE_MAX_RECORDING_MS = 90 * 1000;
 const VOICE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -181,6 +177,896 @@ const REALTIME_VOICE_MIN_TURN_MS = 500;
 const REALTIME_VOICE_BARGE_IN_LEVEL_THRESHOLD = 0.026;
 const REALTIME_VOICE_BARGE_IN_SUSTAIN_MS = 180;
 const STALE_ACTIVITY_STATUS_MS = 2 * 60 * 60 * 1000;
+
+const LOCALE_OPTIONS = ['system', 'zh', 'en'];
+const THEME_OPTIONS = ['system', 'light', 'dark'];
+
+const TRANSLATIONS = {
+  zh: {
+    'common.system': '跟随系统',
+    'common.close': '关闭',
+    'common.back': '返回',
+    'common.cancel': '取消',
+    'common.save': '保存',
+    'common.archive': '归档',
+    'common.processing': '处理中...',
+    'common.loading': '加载中',
+    'common.refresh': '刷新',
+    'common.retry': '重试',
+    'common.copy': '复制',
+    'common.copied': '已复制',
+    'common.delete': '删除',
+    'common.unknown': '未知',
+    'common.unavailable': '不可用',
+    'common.bundledDependency': '内置依赖',
+    'common.backgroundLocalCodex': '后台本机 Codex',
+    'common.standaloneAppServer': '独立 app-server',
+    'common.connected': '已连接',
+    'common.connecting': '连接中',
+    'common.disconnected': '未连接',
+    'common.backgroundCodex': '后台 Codex',
+    'common.failed': '失败',
+    'common.running': '运行中',
+    'common.success': '成功',
+    'pairing.lead': '我的本机 Codex 移动工作台。电脑继续执行，iPhone 随时接管、追问、看过程、处理确认和收完成通知。',
+    'pairing.capabilities': 'CodexMobile 核心能力',
+    'pairing.sync': '桌面对话同步',
+    'pairing.process': '完整执行过程',
+    'pairing.private': '私有网络访问',
+    'pairing.note': '输入电脑端启动日志里的 6 位配对码。',
+    'pairing.placeholder': '6 位配对码',
+    'pairing.connect': '连接',
+    'settings.title': '设置',
+    'settings.appearance': '外观',
+    'settings.language': '语言',
+    'settings.theme': '主题',
+    'settings.zh': '中文',
+    'settings.en': 'English',
+    'settings.light': '浅色',
+    'settings.dark': '深色',
+    'settings.integrations': '集成',
+    'settings.environment': '环境信息',
+    'settings.host': '主机',
+    'settings.system': '系统',
+    'settings.codexConnection': '连接方式',
+    'drawer.connectedWithTasks': '已连接 · {count} 个任务运行中',
+    'drawer.searchPlaceholder': '搜索对话...',
+    'drawer.categories': '对话分类',
+    'drawer.conversation': '对话',
+    'drawer.newConversation': '新对话',
+    'drawer.pending': '待发送',
+    'drawer.noConversations': '暂无对话',
+    'drawer.renameConversation': '重命名对话',
+    'drawer.archiveConversation': '归档对话',
+    'drawer.expandSubagents': '展开子代理对话',
+    'drawer.collapseSubagents': '折叠子代理对话',
+    'drawer.subagents': '子代理',
+    'drawer.running': '运行中',
+    'drawer.processing': '正在处理',
+    'drawer.hasNewResult': '有新完成结果',
+    'quota.title': '剩余额度',
+    'quota.staleRetry': '{message}，点击刷新',
+    'quota.staleResult': '实时查询失败，显示最近一次成功结果',
+    'quota.accountRetry': '{message}，点击刷新重试',
+    'quota.failed': '查询失败',
+    'quota.disabled': '已停用',
+    'quota.loading': '正在读取额度...',
+    'quota.empty': '暂无 Codex 凭证',
+    'quota.refresh': '刷新额度',
+    'quota.notUpdated': '暂未更新',
+    'quota.updatedAt': '更新于 {time}',
+    'quota.unknownUpdate': '更新时间未知',
+    'top.openMenu': '打开菜单',
+    'top.more': '更多操作',
+    'top.changes': '变更',
+    'top.directories': '目录',
+    'top.terminal': '终端',
+    'top.rename': '修改对话标题',
+    'top.archive': '归档对话',
+    'top.copyThreadId': '复制对话 ID',
+    'top.copiedThreadId': '已复制对话 ID',
+    'top.gitPanel': 'Git 面板',
+    'top.enableNotifications': '开启完成通知',
+    'top.notificationsEnabled': '完成通知已开启',
+    'top.noProject': '未选择项目',
+    'modal.titleRequired': '标题不能为空',
+    'modal.operationFailed': '操作失败',
+    'modal.title': '标题',
+    'modal.archiveConfirm': '归档“{title}”后会从列表中移除，并同步到可用的 Codex 后端。',
+    'modal.renameFailed': '重命名失败：{message}',
+    'modal.archiveRunning': '对话正在运行，稍后再归档。',
+    'modal.archiveFailed': '归档失败：{message}',
+    'welcome.body': '选择一个项目开始新对话，或从左侧菜单打开历史对话。',
+    'welcome.projects': '项目',
+    'welcome.empty': '还没有可用项目',
+    'docs.title': '飞书文档',
+    'docs.close': '关闭文档',
+    'docs.pendingScope': '待补权限',
+    'docs.waitingAuth': '等待授权',
+    'docs.notConnected': '未连接',
+    'docs.notConfigured': '未配置',
+    'docs.authOpened': '授权页已打开，完成后回到这里刷新状态。',
+    'docs.extraAuthSummary': '飞书账号已连接，但部分文档权限还没授权。补充授权后，Codex 可完整操作飞书文档、PPT、表格和云空间文件。',
+    'docs.readySummary': 'Codex 已可操作飞书文档、PPT、表格和云空间文件。',
+    'docs.noCli': '本机还没有检测到 lark-cli。',
+    'docs.noSkills': '官方文档技能还没有安装完整。',
+    'docs.connectSummary': '连接飞书账号后，Codex 才能以你的身份操作文档、PPT 和表格。',
+    'docs.configSummary': '请先在后端配置飞书 App ID 和 Secret。',
+    'docs.usage': '配置并授权后，在消息中提到飞书文档、PPT、表格或云空间时，Codex 会使用 lark-cli 来创建、读取和更新对应内容。',
+    'docs.authCode': '授权码 {code}',
+    'docs.generated': '已生成',
+    'docs.openAuth': '打开授权页',
+    'docs.missingScopes': '缺少 {scopes}',
+    'docs.scopeSeparator': '、',
+    'docs.addAuth': '补充授权',
+    'docs.openFeishu': '打开飞书',
+    'docs.disconnect': '断开',
+    'docs.connect': '连接飞书',
+    'docs.officialSkills': '官方技能',
+    'docs.appCredentials': 'App 凭证',
+    'docs.userAuth': '用户授权',
+    'docs.slidesScope': 'PPT 权限',
+    'docs.sheetsScope': '表格权限',
+    'git.title': 'Git 面板',
+    'git.diff': 'Git Diff',
+    'git.sync': 'Git 同步',
+    'git.commitPush': '提交并推送',
+    'git.commit': 'Git 提交',
+    'git.push': 'Git 推送',
+    'git.branch': '创建分支',
+    'git.refreshStatus': '刷新状态',
+    'git.files': '{count} 个文件',
+    'git.moreFiles': '还有 {count} 个文件',
+    'git.diffPreview': 'Diff 预览',
+    'git.readingDiff': '正在读取 diff...',
+    'git.noDiff': '暂无 diff',
+    'git.diffTruncated': 'diff 太长，已截断显示。',
+    'git.syncHint': 'pull 使用 --ff-only，sync 会 pull 后按需 push',
+    'git.commitMessage': '提交信息',
+    'git.branchName': '分支名',
+    'git.committed': '已提交 {hash}',
+    'git.updated': '已更新 {branch}',
+    'git.completed': 'Git 操作已完成',
+    'git.running': '正在执行 Git 操作...',
+    'git.failed': 'Git 操作失败',
+    'git.statusReadFailed': '读取 Git 状态失败',
+    'git.diffReadFailed': '读取 Git diff 失败',
+    'git.clean': '工作区干净',
+    'git.currentChanges': '当前改动',
+    'git.notRead': '未读取',
+    'git.tabs': 'Git 操作',
+    'git.status': '状态',
+    'git.syncOperation': '同步操作',
+    'git.warningFiles': '工作区有 {count} 个改动文件',
+    'git.warningBehind': '落后远端 {count} 个提交，pull/sync 会先尝试快进',
+    'git.warningBranch': '当前不是 codex/ 分支，操作前请确认分支用途',
+    'git.warningNoUpstream': '当前分支没有 upstream，push 会设置 origin upstream',
+    'git.warningDirtyBehind': '本地有改动且落后远端，pull 可能失败并保留 Git 原始输出',
+    'workspace.title': '文件',
+    'workspace.preview': '文件预览',
+    'workspace.filesAndChanges': '文件和变更',
+    'workspace.search': '搜索文件',
+    'workspace.searchFailed': '搜索失败',
+    'workspace.detached': 'detached',
+    'workspace.stagedSummary': '{staged} staged, {unstaged} unstaged',
+    'workspace.searching': '正在搜索文件...',
+    'workspace.noSearchResults': '没有匹配的文件。',
+    'workspace.readingChanges': '正在读取变更...',
+    'workspace.readChangesFailed': '读取变更失败',
+    'workspace.stagedChanges': '已暂存变更 ({count})',
+    'workspace.unstagedChanges': '未暂存变更 ({count})',
+    'workspace.noChanges': '没有检测到变更。可切到目录浏览文件。',
+    'workspace.readDirectory': '正在读取目录...',
+    'workspace.readDirectoryFailed': '读取目录失败',
+    'workspace.emptyDirectory': '空目录',
+    'workspace.noChangesDisplay': '没有可显示的变更。',
+    'workspace.readFile': '正在读取文件...',
+    'workspace.readFileFailed': '读取文件失败',
+    'workspace.binaryFile': '这个文件看起来是二进制文件，无法预览。',
+    'workspace.emptyFile': '文件为空。',
+    'workspace.fileTruncated': '文件较大，仅显示前 {size}。',
+    'workspace.copyPath': '复制路径',
+    'workspace.copyContentSuccess': '已复制文件内容',
+    'terminal.title': '终端',
+    'terminal.close': '关闭终端',
+    'terminal.connectFailed': '终端连接失败',
+    'terminal.wsDisconnected': 'WebSocket 未连接',
+    'terminal.waitingWs': '等待 CodexMobile WebSocket...',
+    'terminal.exited': '[terminal exited]',
+    'terminal.paste': '粘贴',
+    'activity.failed': '处理失败',
+    'activity.processing': '处理中',
+    'activity.processed': '已处理',
+    'activity.progress': '任务进度',
+    'activity.localFailed': '本地任务失败',
+    'activity.localRunning': '正在处理本地任务',
+    'activity.localDone': '本地任务已处理',
+    'activity.exitCode': '退出码 {code}',
+    'activity.subagentDefault': '{count} 个后台智能体（使用 @ 标记智能体）',
+    'activity.subagent': '子代理',
+    'activity.open': '打开',
+    'activity.filesChanged': '{count} 个文件已更改',
+    'activity.thinking': '正在思考中',
+    'activity.sendFailed': '发送失败',
+    'subagent.worker': '执行',
+    'subagent.explorer': '探索',
+    'message.actions': '消息操作',
+    'message.copyFailed': '复制失败',
+    'message.backToLatest': '回到最新消息',
+    'message.deleteConfirm': '删除这条消息？',
+    'message.deleteFailed': '删除失败：{message}',
+    'message.copyCode': '复制代码',
+    'image.preview': '预览图片',
+    'image.loadFailed': '图片加载失败',
+    'image.retry': '重试',
+    'image.reload': '重新加载',
+    'image.generated': '生成图片',
+    'image.zoomOut': '缩小图片',
+    'image.zoomIn': '放大图片',
+    'image.resetZoom': '重置图片缩放',
+    'image.attachments': '图片附件',
+    'chat.emptyTitle': '新对话',
+    'chat.emptyBody': '问 Codex 任何事。',
+    'voice.title': '语音对话',
+    'voice.close': '关闭语音对话',
+    'voice.taskLabel': '交给 Codex 的任务',
+    'voice.continue': '继续补充',
+    'voice.submit': '交给 Codex',
+    'voice.stop': '停止',
+    'voice.start': '开始',
+    'voice.end': '结束',
+    'voice.stopTranscribe': '停止语音转录',
+    'voice.processing': '正在处理语音',
+    'voice.transcribe': '语音转录',
+    'voice.statusIdle': '准备对话',
+    'voice.statusListening': '正在听',
+    'voice.statusTranscribing': '正在转写',
+    'voice.statusSending': '正在发送',
+    'voice.statusWaiting': '等待回复',
+    'voice.statusSpeaking': '正在朗读',
+    'voice.statusSummarizing': '正在整理任务',
+    'voice.statusHandoff': '确认交给 Codex',
+    'voice.statusError': '对话出错',
+    'context.title': '背景信息窗口：',
+    'context.used': '{used}% 已用（剩余 {remaining}%）',
+    'context.syncing': '正在同步背景信息窗口',
+    'context.tokens': '已用 {input} 标记，共 {total}',
+    'context.compacted': 'Codex 已自动压缩背景信息',
+    'context.autoCompact': 'Codex 自动压缩其背景信息',
+    'context.view': '查看背景信息窗口',
+    'connection.recovery': '连接恢复',
+    'composer.online': '在线',
+    'composer.connecting': '连接中',
+    'composer.offline': '离线',
+    'composer.album': '相册',
+    'composer.file': '文件',
+    'composer.startIn': '启动位置',
+    'composer.model': '模型',
+    'composer.reasoning': '思考深度',
+    'composer.searchSkill': '搜索技能',
+    'composer.noSkill': '不指定技能',
+    'composer.noSkillMatch': '没有匹配的技能',
+    'composer.skillsNotLoaded': '技能列表还没加载',
+    'composer.searchingFiles': '正在搜索文件',
+    'composer.noFileMatch': '没有匹配的文件',
+    'composer.selectedSkillCount': '{count} 个技能',
+    'composer.skillGeneric': '技能',
+    'composer.queue': '排队消息',
+    'composer.checkAttachments': '请查看附件。',
+    'composer.checkFileReferences': '请查看引用文件。',
+    'composer.queued': '排队中',
+    'composer.sendNow': '立即发送到当前任务',
+    'composer.deleteQueued': '删除排队消息',
+    'composer.codexProcessing': 'Codex 正在处理',
+    'composer.desktopDisconnected': '桌面端 Codex 未连接',
+    'composer.desktopDisconnectedHint': '打开桌面端 Codex，或配置同源 app-server control socket 后再发送',
+    'composer.createUnavailable': '只能继续桌面端已有对话',
+    'composer.createUnavailableHint': '当前桌面端还没有开放从手机新建同源对话的入口',
+    'composer.steer': '发送到当前任务',
+    'composer.steerHint': '直接补充给桌面端正在执行的任务',
+    'composer.steerUnavailable': '当前任务暂时不能接收补充消息',
+    'composer.queueMessage': '加入队列',
+    'composer.queueHint': '当前任务结束后自动发送',
+    'composer.interrupt': '中止并发送',
+    'composer.interruptHint': '停下当前任务，用这条消息重新引导',
+    'composer.removeAttachment': '移除附件',
+    'composer.removeFileMention': '移除文件引用',
+    'composer.placeholder': '给 Codex 发送消息',
+    'composer.addAttachment': '添加附件',
+    'composer.permissionMode': '权限模式：{mode}',
+    'composer.runMode': '启动模式：{mode}',
+    'composer.modelMode': '模型：{model}，思考深度：{reasoning}',
+    'permissions.default': '默认权限',
+    'permissions.acceptEdits': '自动审核',
+    'permissions.bypassPermissions': '完全访问',
+    'run.local': '本地工作',
+    'run.newWorktree': '新建 Worktree',
+    'run.localShort': '本地',
+    'run.newWorktreeShort': 'Worktree',
+    'reasoning.low': 'Low',
+    'reasoning.medium': 'Medium',
+    'reasoning.high': 'High',
+    'reasoning.xhigh': 'Extra High',
+    'toast.syncDone': '同步完成',
+    'toast.syncDoneBody': '对话和状态已经刷新。',
+    'toast.syncFailed': '同步失败',
+    'toast.syncFailedBody': '无法刷新同步。',
+    'toast.connectionRefreshed': '连接已刷新',
+    'toast.connectionRefreshedBody': '已重新读取本机服务状态。',
+    'toast.connectionFailed': '连接失败',
+    'toast.connectionFailedBody': '本机服务暂时不可达。',
+    'toast.statusRead': 'CodexMobile 状态已读取。',
+    'toast.selectProject': '请先选择项目',
+    'toast.voiceFailed': '语音转录失败',
+    'toast.voiceRecordFailed': '录音失败',
+    'toast.voiceNoText': '没有识别到文字',
+    'voice.noContent': '还没有可整理的语音内容',
+    'voice.realtimeUnavailable': '实时语音连接不可用',
+    'voice.httpsRequired': '请使用 HTTPS 地址',
+    'voice.recordUnsupported': '当前浏览器不支持录音',
+    'voice.realtimeUnsupported': '当前浏览器不支持实时音频',
+    'voice.realtimeStartFailed': '实时语音启动失败',
+    'voice.noHandoffTask': '没有整理出可交给 Codex 的任务',
+    'voice.invalidJson': '整理结果不是标准 JSON，已作为草稿保留',
+    'voice.summarizeFailed': '语音任务整理失败',
+    'voice.realtimeFailed': '实时语音连接失败',
+    'voice.realtimeNotConfigured': '未配置实时语音',
+    'voice.noAudio': '没有录到声音',
+    'voice.tooLarge': '录音超过 10MB',
+    'voice.playFailed': '播放失败',
+    'voice.speechUnsupported': '当前浏览器不支持朗读',
+    'voice.speechFailed': '朗读失败',
+    'voice.dialogFailed': '语音对话失败',
+    'voice.microphoneDenied': '麦克风权限被拒绝',
+    'voice.recordStartFailed': '录音启动失败',
+    'voice.sendFailed': '发送给 Codex 失败',
+    'docs.noAuthUrl': '没有收到飞书授权地址',
+    'docs.connectFailed': '飞书连接失败',
+    'docs.disconnectFailed': '断开飞书失败',
+    'docs.refreshFailed': '刷新飞书状态失败',
+    'toast.notificationUnavailable': '通知不可用',
+    'toast.notificationsEnabled': '完成通知已开启',
+    'toast.notificationDenied': '未开启通知',
+    'toast.notificationFailed': '通知开启失败',
+    'toast.notificationFailedBody': '无法请求 Web Push 通知权限。',
+    'toast.notice': '提醒',
+    'toast.taskFailed': '任务失败',
+    'toast.aborted': '已中止'
+  },
+  en: {
+    'common.system': 'Follow System',
+    'common.close': 'Close',
+    'common.back': 'Back',
+    'common.cancel': 'Cancel',
+    'common.save': 'Save',
+    'common.archive': 'Archive',
+    'common.processing': 'Processing...',
+    'common.loading': 'Loading',
+    'common.refresh': 'Refresh',
+    'common.retry': 'Retry',
+    'common.copy': 'Copy',
+    'common.copied': 'Copied',
+    'common.delete': 'Delete',
+    'common.unknown': 'Unknown',
+    'common.unavailable': 'Unavailable',
+    'common.bundledDependency': 'Bundled dependency',
+    'common.backgroundLocalCodex': 'Background Local Codex',
+    'common.standaloneAppServer': 'Standalone app-server',
+    'common.connected': 'Connected',
+    'common.connecting': 'Connecting',
+    'common.disconnected': 'Disconnected',
+    'common.backgroundCodex': 'Background Codex',
+    'common.failed': 'Failed',
+    'common.running': 'Running',
+    'common.success': 'Success',
+    'pairing.lead': 'A mobile workbench for your local Codex. Let the computer keep working while your iPhone can follow up, review progress, approve actions, and receive completion updates.',
+    'pairing.capabilities': 'CodexMobile capabilities',
+    'pairing.sync': 'Desktop thread sync',
+    'pairing.process': 'Full activity stream',
+    'pairing.private': 'Private network access',
+    'pairing.note': 'Enter the 6-digit pairing code from the desktop startup log.',
+    'pairing.placeholder': '6-digit pairing code',
+    'pairing.connect': 'Connect',
+    'settings.title': 'Settings',
+    'settings.appearance': 'Appearance',
+    'settings.language': 'Language',
+    'settings.theme': 'Theme',
+    'settings.zh': '中文',
+    'settings.en': 'English',
+    'settings.light': 'Light',
+    'settings.dark': 'Dark',
+    'settings.integrations': 'Integrations',
+    'settings.environment': 'Environment',
+    'settings.host': 'Host',
+    'settings.system': 'System',
+    'settings.codexConnection': 'Codex connection',
+    'drawer.connectedWithTasks': 'Connected · {count} running tasks',
+    'drawer.searchPlaceholder': 'Search conversations...',
+    'drawer.categories': 'Conversation Groups',
+    'drawer.conversation': 'Conversation',
+    'drawer.newConversation': 'New Conversation',
+    'drawer.pending': 'Pending',
+    'drawer.noConversations': 'No conversations',
+    'drawer.renameConversation': 'Rename Conversation',
+    'drawer.archiveConversation': 'Archive Conversation',
+    'drawer.expandSubagents': 'Expand subagent conversations',
+    'drawer.collapseSubagents': 'Collapse subagent conversations',
+    'drawer.subagents': 'subagents',
+    'drawer.running': 'Running',
+    'drawer.processing': 'Processing',
+    'drawer.hasNewResult': 'New completed result',
+    'quota.title': 'Rate limits remaining',
+    'quota.staleRetry': '{message}, click to refresh',
+    'quota.staleResult': 'Live query failed; showing the last successful result',
+    'quota.accountRetry': '{message}, click to refresh',
+    'quota.failed': 'Query failed',
+    'quota.disabled': 'Disabled',
+    'quota.loading': 'Reading rate limits...',
+    'quota.empty': 'No Codex credentials',
+    'quota.refresh': 'Refresh rate limits',
+    'quota.notUpdated': 'Not updated yet',
+    'quota.updatedAt': 'Updated {time}',
+    'quota.unknownUpdate': 'Update time unknown',
+    'top.openMenu': 'Open menu',
+    'top.more': 'More Actions',
+    'top.changes': 'Changes',
+    'top.directories': 'Directories',
+    'top.terminal': 'Terminal',
+    'top.rename': 'Rename Conversation',
+    'top.archive': 'Archive Conversation',
+    'top.copyThreadId': 'Copy Conversation ID',
+    'top.copiedThreadId': 'Conversation ID Copied',
+    'top.gitPanel': 'Git Panel',
+    'top.enableNotifications': 'Enable Completion Notifications',
+    'top.notificationsEnabled': 'Completion Notifications Enabled',
+    'top.noProject': 'No Project Selected',
+    'modal.titleRequired': 'Title is required',
+    'modal.operationFailed': 'Operation failed',
+    'modal.title': 'Title',
+    'modal.archiveConfirm': 'After archiving "{title}", it will be removed from the list and synced to any available Codex backend.',
+    'modal.renameFailed': 'Rename failed: {message}',
+    'modal.archiveRunning': 'This conversation is still running. Archive it later.',
+    'modal.archiveFailed': 'Archive failed: {message}',
+    'welcome.body': 'Select a project to start a new conversation, or open an existing conversation from the side menu.',
+    'welcome.projects': 'Projects',
+    'welcome.empty': 'No projects available',
+    'docs.title': 'Feishu Docs',
+    'docs.close': 'Close Docs',
+    'docs.pendingScope': 'Needs scopes',
+    'docs.waitingAuth': 'Waiting for authorization',
+    'docs.notConnected': 'Not connected',
+    'docs.notConfigured': 'Not configured',
+    'docs.authOpened': 'The authorization page is open. Finish there, then refresh the status here.',
+    'docs.extraAuthSummary': 'Your Feishu account is connected, but some document scopes are still missing. After granting them, Codex can fully work with Feishu Docs, Slides, Sheets, and Drive files.',
+    'docs.readySummary': 'Codex can now work with Feishu Docs, Slides, Sheets, and Drive files.',
+    'docs.noCli': 'lark-cli was not detected on this host.',
+    'docs.noSkills': 'The official document skills are not fully installed.',
+    'docs.connectSummary': 'Connect your Feishu account so Codex can work with Docs, Slides, and Sheets as you.',
+    'docs.configSummary': 'Configure the Feishu App ID and Secret on the server first.',
+    'docs.usage': 'After setup and authorization, mention Feishu Docs, Slides, Sheets, or Drive files in a message and Codex will use lark-cli to create, read, and update them.',
+    'docs.authCode': 'Authorization code {code}',
+    'docs.generated': 'Generated',
+    'docs.openAuth': 'Open Authorization Page',
+    'docs.missingScopes': 'Missing {scopes}',
+    'docs.scopeSeparator': ', ',
+    'docs.addAuth': 'Grant More Access',
+    'docs.openFeishu': 'Open Feishu',
+    'docs.disconnect': 'Disconnect',
+    'docs.connect': 'Connect Feishu',
+    'docs.officialSkills': 'Official skills',
+    'docs.appCredentials': 'App credentials',
+    'docs.userAuth': 'User authorization',
+    'docs.slidesScope': 'Slides scope',
+    'docs.sheetsScope': 'Sheets scope',
+    'git.title': 'Git Panel',
+    'git.diff': 'Git Diff',
+    'git.sync': 'Git Sync',
+    'git.commitPush': 'Commit and Push',
+    'git.commit': 'Git Commit',
+    'git.push': 'Git Push',
+    'git.branch': 'Create Branch',
+    'git.refreshStatus': 'Refresh Status',
+    'git.files': '{count} files',
+    'git.moreFiles': '{count} more files',
+    'git.diffPreview': 'Diff Preview',
+    'git.readingDiff': 'Reading diff...',
+    'git.noDiff': 'No diff',
+    'git.diffTruncated': 'Diff is too long and was truncated.',
+    'git.syncHint': 'pull uses --ff-only; sync pulls and pushes when needed',
+    'git.commitMessage': 'Commit Message',
+    'git.branchName': 'Branch Name',
+    'git.committed': 'Committed {hash}',
+    'git.updated': 'Updated {branch}',
+    'git.completed': 'Git operation completed',
+    'git.running': 'Running Git operation...',
+    'git.failed': 'Git operation failed',
+    'git.statusReadFailed': 'Failed to read Git status',
+    'git.diffReadFailed': 'Failed to read Git diff',
+    'git.clean': 'Working tree clean',
+    'git.currentChanges': 'Current changes',
+    'git.notRead': 'Not read',
+    'git.tabs': 'Git Actions',
+    'git.status': 'Status',
+    'git.syncOperation': 'Sync Operation',
+    'git.warningFiles': '{count} changed files in the working tree',
+    'git.warningBehind': '{count} commits behind remote; pull/sync will try a fast-forward first',
+    'git.warningBranch': 'Current branch is not a codex/ branch; confirm its purpose before operating',
+    'git.warningNoUpstream': 'Current branch has no upstream; push will set origin upstream',
+    'git.warningDirtyBehind': 'Local changes plus remote commits may make pull fail and preserve raw Git output',
+    'workspace.title': 'Files',
+    'workspace.preview': 'File Preview',
+    'workspace.filesAndChanges': 'Files and Changes',
+    'workspace.search': 'Search files',
+    'workspace.searchFailed': 'Search failed',
+    'workspace.detached': 'detached',
+    'workspace.stagedSummary': '{staged} staged, {unstaged} unstaged',
+    'workspace.searching': 'Searching files...',
+    'workspace.noSearchResults': 'No matching files.',
+    'workspace.readingChanges': 'Reading changes...',
+    'workspace.readChangesFailed': 'Failed to read changes',
+    'workspace.stagedChanges': 'Staged Changes ({count})',
+    'workspace.unstagedChanges': 'Unstaged Changes ({count})',
+    'workspace.noChanges': 'No changes detected. Use Directories to browse files.',
+    'workspace.readDirectory': 'Reading directory...',
+    'workspace.readDirectoryFailed': 'Failed to read directory',
+    'workspace.emptyDirectory': 'Empty directory',
+    'workspace.noChangesDisplay': 'No changes to display.',
+    'workspace.readFile': 'Reading file...',
+    'workspace.readFileFailed': 'Failed to read file',
+    'workspace.binaryFile': 'This looks like a binary file and cannot be previewed.',
+    'workspace.emptyFile': 'File is empty.',
+    'workspace.fileTruncated': 'Large file. Showing the first {size}.',
+    'workspace.copyPath': 'Copy Path',
+    'workspace.copyContentSuccess': 'File content copied',
+    'terminal.title': 'Terminal',
+    'terminal.close': 'Close Terminal',
+    'terminal.connectFailed': 'Terminal connection failed',
+    'terminal.wsDisconnected': 'WebSocket disconnected',
+    'terminal.waitingWs': 'Waiting for CodexMobile WebSocket...',
+    'terminal.exited': '[terminal exited]',
+    'terminal.paste': 'Paste',
+    'activity.failed': 'Failed',
+    'activity.processing': 'Processing',
+    'activity.processed': 'Processed',
+    'activity.progress': 'Task progress',
+    'activity.localFailed': 'Local task failed',
+    'activity.localRunning': 'Processing local task',
+    'activity.localDone': 'Local task completed',
+    'activity.exitCode': 'Exit code {code}',
+    'activity.subagentDefault': '{count} background agents (marked with @)',
+    'activity.subagent': 'subagent',
+    'activity.open': 'Open',
+    'activity.filesChanged': '{count} files changed',
+    'activity.thinking': 'Thinking',
+    'activity.sendFailed': 'Send failed',
+    'subagent.worker': 'Worker',
+    'subagent.explorer': 'Explorer',
+    'message.actions': 'Message Actions',
+    'message.copyFailed': 'Copy failed',
+    'message.backToLatest': 'Back to latest message',
+    'message.deleteConfirm': 'Delete this message?',
+    'message.deleteFailed': 'Delete failed: {message}',
+    'message.copyCode': 'Copy code',
+    'image.preview': 'Preview image',
+    'image.loadFailed': 'Image failed to load',
+    'image.retry': 'Retry',
+    'image.reload': 'Reload',
+    'image.generated': 'Generated image',
+    'image.zoomOut': 'Zoom out',
+    'image.zoomIn': 'Zoom in',
+    'image.resetZoom': 'Reset image zoom',
+    'image.attachments': 'Image attachments',
+    'chat.emptyTitle': 'New Conversation',
+    'chat.emptyBody': 'Ask Codex anything.',
+    'voice.title': 'Voice Chat',
+    'voice.close': 'Close Voice Chat',
+    'voice.taskLabel': 'Task for Codex',
+    'voice.continue': 'Keep Adding',
+    'voice.submit': 'Send to Codex',
+    'voice.stop': 'Stop',
+    'voice.start': 'Start',
+    'voice.end': 'End',
+    'voice.stopTranscribe': 'Stop voice transcription',
+    'voice.processing': 'Processing voice',
+    'voice.transcribe': 'Voice transcription',
+    'voice.statusIdle': 'Ready',
+    'voice.statusListening': 'Listening',
+    'voice.statusTranscribing': 'Transcribing',
+    'voice.statusSending': 'Sending',
+    'voice.statusWaiting': 'Waiting for reply',
+    'voice.statusSpeaking': 'Speaking',
+    'voice.statusSummarizing': 'Summarizing task',
+    'voice.statusHandoff': 'Confirm send to Codex',
+    'voice.statusError': 'Voice error',
+    'context.title': 'Context window:',
+    'context.used': '{used}% used ({remaining}% remaining)',
+    'context.syncing': 'Syncing context window',
+    'context.tokens': '{input} tokens used of {total}',
+    'context.compacted': 'Codex already auto-compacted its context',
+    'context.autoCompact': 'Codex will auto-compact its context',
+    'context.view': 'View context window',
+    'connection.recovery': 'Connection Recovery',
+    'composer.online': 'online',
+    'composer.connecting': 'connecting',
+    'composer.offline': 'offline',
+    'composer.album': 'Photos',
+    'composer.file': 'Files',
+    'composer.startIn': 'Start in',
+    'composer.model': 'Model',
+    'composer.reasoning': 'Reasoning',
+    'composer.searchSkill': 'Search skills',
+    'composer.noSkill': 'No skill',
+    'composer.noSkillMatch': 'No matching skills',
+    'composer.skillsNotLoaded': 'Skills have not loaded',
+    'composer.searchingFiles': 'Searching files',
+    'composer.noFileMatch': 'No matching files',
+    'composer.selectedSkillCount': '{count} skills',
+    'composer.skillGeneric': 'Skill',
+    'composer.queue': 'Queued Messages',
+    'composer.checkAttachments': 'Please review the attachments.',
+    'composer.checkFileReferences': 'Please review the referenced files.',
+    'composer.queued': 'Queued',
+    'composer.sendNow': 'Send to current task now',
+    'composer.deleteQueued': 'Delete queued message',
+    'composer.codexProcessing': 'Codex is working',
+    'composer.desktopDisconnected': 'Desktop Codex disconnected',
+    'composer.desktopDisconnectedHint': 'Open Codex Desktop, or configure the same-origin app-server control socket before sending',
+    'composer.createUnavailable': 'Can only continue existing desktop conversations',
+    'composer.createUnavailableHint': 'The current desktop backend does not expose a same-origin conversation creation entrypoint yet',
+    'composer.steer': 'Send to Current Task',
+    'composer.steerHint': 'Add this directly to the task currently running on desktop',
+    'composer.steerUnavailable': 'The current task cannot receive additions right now',
+    'composer.queueMessage': 'Add to Queue',
+    'composer.queueHint': 'Send automatically after the current task finishes',
+    'composer.interrupt': 'Stop and Send',
+    'composer.interruptHint': 'Stop the current task and steer with this message',
+    'composer.removeAttachment': 'Remove attachment',
+    'composer.removeFileMention': 'Remove file reference',
+    'composer.placeholder': 'Message Codex',
+    'composer.addAttachment': 'Add attachment',
+    'composer.permissionMode': 'Permission mode: {mode}',
+    'composer.runMode': 'Run mode: {mode}',
+    'composer.modelMode': 'Model: {model}, reasoning: {reasoning}',
+    'permissions.default': 'Default permissions',
+    'permissions.acceptEdits': 'Auto-review',
+    'permissions.bypassPermissions': 'Full access',
+    'run.local': 'Work locally',
+    'run.newWorktree': 'New worktree',
+    'run.localShort': 'Local',
+    'run.newWorktreeShort': 'Worktree',
+    'reasoning.low': 'Low',
+    'reasoning.medium': 'Medium',
+    'reasoning.high': 'High',
+    'reasoning.xhigh': 'Extra High',
+    'toast.syncDone': 'Sync complete',
+    'toast.syncDoneBody': 'Conversations and status have been refreshed.',
+    'toast.syncFailed': 'Sync failed',
+    'toast.syncFailedBody': 'Unable to refresh sync.',
+    'toast.connectionRefreshed': 'Connection refreshed',
+    'toast.connectionRefreshedBody': 'Local service status has been reloaded.',
+    'toast.connectionFailed': 'Connection failed',
+    'toast.connectionFailedBody': 'The local service is temporarily unavailable.',
+    'toast.statusRead': 'CodexMobile status was read.',
+    'toast.selectProject': 'Select a project first',
+    'toast.voiceFailed': 'Voice transcription failed',
+    'toast.voiceRecordFailed': 'Recording failed',
+    'toast.voiceNoText': 'No text recognized',
+    'voice.noContent': 'No voice content to organize yet',
+    'voice.realtimeUnavailable': 'Realtime voice connection is unavailable',
+    'voice.httpsRequired': 'Use an HTTPS URL',
+    'voice.recordUnsupported': 'This browser does not support recording',
+    'voice.realtimeUnsupported': 'This browser does not support realtime audio',
+    'voice.realtimeStartFailed': 'Failed to start realtime voice',
+    'voice.noHandoffTask': 'No task was organized for Codex',
+    'voice.invalidJson': 'The organized result was not valid JSON and was kept as a draft',
+    'voice.summarizeFailed': 'Failed to organize the voice task',
+    'voice.realtimeFailed': 'Realtime voice connection failed',
+    'voice.realtimeNotConfigured': 'Realtime voice is not configured',
+    'voice.noAudio': 'No audio was recorded',
+    'voice.tooLarge': 'Recording exceeds 10 MB',
+    'voice.playFailed': 'Playback failed',
+    'voice.speechUnsupported': 'This browser does not support speech playback',
+    'voice.speechFailed': 'Speech playback failed',
+    'voice.dialogFailed': 'Voice chat failed',
+    'voice.microphoneDenied': 'Microphone permission was denied',
+    'voice.recordStartFailed': 'Failed to start recording',
+    'voice.sendFailed': 'Failed to send to Codex',
+    'docs.noAuthUrl': 'No Feishu authorization URL received',
+    'docs.connectFailed': 'Failed to connect Feishu',
+    'docs.disconnectFailed': 'Failed to disconnect Feishu',
+    'docs.refreshFailed': 'Failed to refresh Feishu status',
+    'toast.notificationUnavailable': 'Notifications unavailable',
+    'toast.notificationsEnabled': 'Completion notifications enabled',
+    'toast.notificationDenied': 'Notifications not enabled',
+    'toast.notificationFailed': 'Failed to enable notifications',
+    'toast.notificationFailedBody': 'Unable to request Web Push notification permission.',
+    'toast.notice': 'Notice',
+    'toast.taskFailed': 'Task failed',
+    'toast.aborted': 'Aborted'
+  }
+};
+
+const UI_TEXT_PAIRS = [
+  ['已连接', 'Connected'],
+  ['连接中', 'Connecting'],
+  ['已断开', 'Disconnected'],
+  ['后台 Codex', 'Background Codex'],
+  ['后台本机 Codex', 'Background Local Codex'],
+  ['独立 app-server', 'Standalone app-server'],
+  ['内置依赖', 'Bundled dependency'],
+  ['不可用', 'Unavailable'],
+  ['未知', 'Unknown'],
+  ['新对话', 'New Conversation'],
+  ['对话', 'Conversation'],
+  ['正在上传', 'Uploading'],
+  ['桌面端 Codex 未连接', 'Desktop Codex disconnected'],
+  ['中止当前任务', 'Stop current task'],
+  ['发送到当前任务', 'Send to current task'],
+  ['选择发送方式', 'Choose send mode'],
+  ['发送消息', 'Send message'],
+  ['提醒', 'Notice'],
+  ['任务失败', 'Task failed'],
+  ['已中止', 'Aborted'],
+  ['任务已完成', 'Task completed'],
+  ['发送失败', 'Send failed'],
+  ['正在思考中', 'Thinking'],
+  ['正在思考', 'Thinking'],
+  ['正在处理', 'Processing'],
+  ['已处理', 'Processed'],
+  ['结果同步中', 'Syncing result'],
+  ['过程已同步', 'Activity synced'],
+  ['正在自动压缩上下文', 'Auto-compacting context'],
+  ['上下文已自动压缩', 'Context auto-compacted'],
+  ['搜索代码', 'Searching code'],
+  ['探索文件', 'Exploring files'],
+  ['编辑文件', 'Editing files'],
+  ['运行命令', 'Running command'],
+  ['截取浏览器', 'Taking browser screenshot'],
+  ['打开页面', 'Opening page'],
+  ['操作页面', 'Controlling page'],
+  ['操作浏览器', 'Controlling browser'],
+  ['需要重新配对', 'Pairing required'],
+  ['当前设备授权失效，需要重新输入配对码。', 'This device authorization expired. Enter the pairing code again.'],
+  ['重新配对', 'Pair again'],
+  ['正在重连', 'Reconnecting'],
+  ['正在恢复手机和本机服务的连接。', 'Restoring the connection between this phone and the local service.'],
+  ['重试', 'Retry'],
+  ['连接已断开', 'Connection disconnected'],
+  ['本机服务暂时不可达，可以重试或重新配对。', 'The local service is temporarily unavailable. Retry or pair again.'],
+  ['重试连接', 'Retry connection'],
+  ['正在回复', 'Replying'],
+  ['正在整理回复', 'Preparing reply'],
+  ['正在准备任务', 'Preparing task'],
+  ['正在修改并验证', 'Editing and verifying'],
+  ['正在执行命令', 'Running command'],
+  ['命令已完成', 'Command completed'],
+  ['文件已更新', 'File updated'],
+  ['文件更新失败', 'File update failed'],
+  ['工具调用完成', 'Tool call completed'],
+  ['正在调用工具', 'Calling tool'],
+  ['工具调用失败', 'Tool call failed'],
+  ['已完成一步操作', 'Step completed'],
+  ['这一步操作失败', 'Step failed'],
+  ['确认授权', 'Confirm authorization'],
+  ['查找文件', 'Finding files'],
+  ['创建文件', 'Creating files'],
+  ['修改并验证', 'Editing and verifying'],
+  ['修改标题', 'Renaming title'],
+  ['读取内容', 'Reading content'],
+  ['修改内容', 'Editing content'],
+  ['上传文件', 'Uploading files'],
+  ['导出文件', 'Exporting files'],
+  ['删除文件', 'Deleting files'],
+  ['验证结果', 'Verifying result'],
+  ['网页搜索', 'Web search'],
+  ['后台智能体', 'Background agent'],
+  ['搜索', 'Search'],
+  ['更新计划', 'Updating plan'],
+  ['调用工具', 'Calling tool'],
+  ['正在运行后台智能体', 'Running background agent'],
+  ['计划更新失败', 'Plan update failed'],
+  ['正在更新计划', 'Updating plan'],
+  ['已更新计划', 'Plan updated']
+];
+
+const TEXT_TO_LOCALES = UI_TEXT_PAIRS.reduce((map, [zh, en]) => {
+  map.set(zh, { zh, en });
+  map.set(en, { zh, en });
+  return map;
+}, new Map());
+
+function templateText(template, vars = {}) {
+  return String(template || '').replace(/\{(\w+)\}/g, (_, key) => vars[key] ?? '');
+}
+
+function localeFromNavigator() {
+  const language = String(navigator.language || navigator.userLanguage || '').toLowerCase();
+  return language.startsWith('zh') ? 'zh' : 'en';
+}
+
+function resolvedThemeFromSystem() {
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function storedOption(key, options, fallback = 'system') {
+  const stored = localStorage.getItem(key);
+  return options.includes(stored) ? stored : fallback;
+}
+
+function localizeGeneratedText(text, locale) {
+  if (locale !== 'en') {
+    return text;
+  }
+  const value = String(text || '');
+  const countPatterns = [
+    [/^搜索失败 (\d+) 次$/, 'Search failed {count} times'],
+    [/^正在搜索 (\d+) 次$/, 'Searching {count} times'],
+    [/^已搜索 (\d+) 次$/, 'Searched {count} times'],
+    [/^网页搜索失败 (\d+) 次$/, 'Web search failed {count} times'],
+    [/^正在搜索网页 (\d+) 次$/, 'Searching web {count} times'],
+    [/^已搜索网页 (\d+) 次$/, 'Searched web {count} times'],
+    [/^探索失败 (\d+) 次$/, 'Exploration failed {count} times'],
+    [/^正在探索 (\d+) 个文件$/, 'Exploring {count} files'],
+    [/^已探索 (\d+) 个文件$/, 'Explored {count} files'],
+    [/^编辑失败 (\d+) 个文件$/, 'Editing failed for {count} files'],
+    [/^正在编辑 (\d+) 个文件$/, 'Editing {count} files'],
+    [/^已编辑 (\d+) 个文件$/, 'Edited {count} files'],
+    [/^(\d+) 个本地任务失败$/, '{count} local tasks failed'],
+    [/^正在处理 (\d+) 个本地任务$/, 'Processing {count} local tasks'],
+    [/^已处理 (\d+) 个本地任务$/, 'Processed {count} local tasks'],
+    [/^浏览器操作失败 (\d+) 次$/, 'Browser actions failed {count} times'],
+    [/^正在操作浏览器 (\d+) 次$/, 'Controlling browser {count} times'],
+    [/^已操作浏览器 (\d+) 次$/, 'Controlled browser {count} times'],
+    [/^(\d+) 步操作失败$/, '{count} steps failed'],
+    [/^正在完成 (\d+) 步操作$/, 'Completing {count} steps'],
+    [/^已完成 (\d+) 步操作$/, 'Completed {count} steps'],
+    [/^后台智能体失败 (\d+) 个$/, '{count} background agents failed'],
+    [/^正在运行 (\d+) 个后台智能体$/, 'Running {count} background agents'],
+    [/^已完成 (\d+) 个后台智能体$/, 'Completed {count} background agents']
+  ];
+  for (const [pattern, replacement] of countPatterns) {
+    const match = value.match(pattern);
+    if (match) {
+      return templateText(replacement, { count: match[1] });
+    }
+  }
+  const prefixPatterns = [
+    [/^正在编辑 (.+)$/, 'Editing {detail}'],
+    [/^正在运行 (.+)$/, 'Running {detail}'],
+    [/^正在搜索 (.+)$/, 'Searching {detail}'],
+    [/^正在处理 (.+)$/, 'Processing {detail}']
+  ];
+  for (const [pattern, replacement] of prefixPatterns) {
+    const match = value.match(pattern);
+    if (match) {
+      return templateText(replacement, { detail: match[1] });
+    }
+  }
+  return value;
+}
+
+function makeI18n(locale) {
+  const safeLocale = locale === 'en' ? 'en' : 'zh';
+  return {
+    locale: safeLocale,
+    t(key, vars) {
+      const text = TRANSLATIONS[safeLocale]?.[key] ?? TRANSLATIONS.zh[key] ?? key;
+      return templateText(text, vars);
+    },
+    ui(value) {
+      const text = String(value || '');
+      const exact = TEXT_TO_LOCALES.get(text);
+      return exact ? exact[safeLocale] : localizeGeneratedText(text, safeLocale);
+    }
+  };
+}
+
+const DEFAULT_I18N = makeI18n('zh');
+const I18nContext = createContext(DEFAULT_I18N);
+
+function useI18n() {
+  return useContext(I18nContext);
+}
 
 const RUN_MODE_OPTIONS = [
   { value: 'local', label: 'Work locally', shortLabel: 'Local' },
@@ -264,12 +1150,12 @@ const REASONING_OPTIONS = [
   { value: 'xhigh', label: 'Extra High' }
 ];
 
-function formatTime(value) {
+function formatTime(value, locale = 'zh') {
   if (!value) {
     return '';
   }
   try {
-    return new Intl.DateTimeFormat('zh-CN', {
+    return new Intl.DateTimeFormat(locale === 'en' ? 'en-US' : 'zh-CN', {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -280,36 +1166,36 @@ function formatTime(value) {
   }
 }
 
-function formatQuotaUpdateTime(value) {
+function formatQuotaUpdateTime(value, t = DEFAULT_I18N.t) {
   if (!value) {
-    return '暂未更新';
+    return t('quota.notUpdated');
   }
   const formatted = formatTime(value);
-  return formatted ? `更新于 ${formatted}` : '更新时间未知';
+  return formatted ? t('quota.updatedAt', { time: formatted }) : t('quota.unknownUpdate');
 }
 
-function subAgentRoleLabel(role) {
+function subAgentRoleLabel(role, t = DEFAULT_I18N.t) {
   const value = String(role || '').trim().toLowerCase();
   if (value === 'worker') {
-    return '执行';
+    return t('subagent.worker');
   }
   if (value === 'explorer') {
-    return '探索';
+    return t('subagent.explorer');
   }
-  return value || '子代理';
+  return value || t('activity.subagent');
 }
 
-function subAgentSubtitle(session) {
+function subAgentSubtitle(session, t = DEFAULT_I18N.t) {
   const agent = session?.subAgent || {};
-  const parts = ['子代理'];
+  const parts = [t('activity.subagent')];
   if (agent.nickname) {
     parts.push(agent.nickname);
   }
   if (agent.role) {
-    parts.push(subAgentRoleLabel(agent.role));
+    parts.push(subAgentRoleLabel(agent.role, t));
   }
   if (agent.status === 'open') {
-    parts.push('进行中');
+    parts.push(t('common.running'));
   }
   return parts.join(' · ');
 }
@@ -464,8 +1350,14 @@ function shortModelName(model) {
     .replace(/-mini$/i, ' mini');
 }
 
-function permissionLabel(value) {
-  return PERMISSION_OPTIONS.find((option) => option.value === value)?.label || 'Default permissions';
+function permissionLabel(value, t = DEFAULT_I18N.t) {
+  if (value === 'acceptEdits') {
+    return t('permissions.acceptEdits');
+  }
+  if (value === 'bypassPermissions') {
+    return t('permissions.bypassPermissions');
+  }
+  return t('permissions.default');
 }
 
 function PermissionModeIcon({ value, size = 18 }) {
@@ -478,12 +1370,12 @@ function PermissionModeIcon({ value, size = 18 }) {
   return <Hand size={size} />;
 }
 
-function runModeLabel(value) {
-  return RUN_MODE_OPTIONS.find((option) => option.value === value)?.label || 'Work locally';
+function runModeLabel(value, t = DEFAULT_I18N.t) {
+  return value === 'newWorktree' ? t('run.newWorktree') : t('run.local');
 }
 
-function runModeShortLabel(value) {
-  return RUN_MODE_OPTIONS.find((option) => option.value === value)?.shortLabel || 'Local';
+function runModeShortLabel(value, t = DEFAULT_I18N.t) {
+  return value === 'newWorktree' ? t('run.newWorktreeShort') : t('run.localShort');
 }
 
 function RunModeIcon({ value, size = 18 }) {
@@ -493,8 +1385,11 @@ function RunModeIcon({ value, size = 18 }) {
   return <Laptop size={size} />;
 }
 
-function reasoningLabel(value) {
-  return REASONING_OPTIONS.find((option) => option.value === value)?.label || '超高';
+function reasoningLabel(value, t = DEFAULT_I18N.t) {
+  if (value === 'low') return t('reasoning.low');
+  if (value === 'medium') return t('reasoning.medium');
+  if (value === 'high') return t('reasoning.high');
+  return t('reasoning.xhigh');
 }
 
 function safeStoredJsonArray(key) {
@@ -506,14 +1401,14 @@ function safeStoredJsonArray(key) {
   }
 }
 
-function selectedSkillSummary(selectedSkills) {
+function selectedSkillSummary(selectedSkills, t = DEFAULT_I18N.t) {
   if (!selectedSkills?.length) {
-    return '技能';
+    return t('composer.skillGeneric');
   }
   if (selectedSkills.length === 1) {
-    return selectedSkills[0]?.label || selectedSkills[0]?.name || '技能';
+    return selectedSkills[0]?.label || selectedSkills[0]?.name || t('composer.skillGeneric');
   }
-  return `技能 ${selectedSkills.length}`;
+  return t('composer.selectedSkillCount', { count: selectedSkills.length });
 }
 
 function imageUrlWithRetry(url, retryKey) {
@@ -1007,17 +1902,17 @@ function spokenReplyText(value) {
     .slice(0, 2400);
 }
 
-function voiceDialogStatusLabel(state) {
+function voiceDialogStatusLabel(state, t = DEFAULT_I18N.t) {
   const labels = {
-    idle: '准备对话',
-    listening: '正在听',
-    transcribing: '正在转写',
-    sending: '正在发送',
-    waiting: '等待回复',
-    speaking: '正在朗读',
-    summarizing: '正在整理任务',
-    handoff: '确认交给 Codex',
-    error: '对话出错'
+    idle: t('voice.statusIdle'),
+    listening: t('voice.statusListening'),
+    transcribing: t('voice.statusTranscribing'),
+    sending: t('voice.statusSending'),
+    waiting: t('voice.statusWaiting'),
+    speaking: t('voice.statusSpeaking'),
+    summarizing: t('voice.statusSummarizing'),
+    handoff: t('voice.statusHandoff'),
+    error: t('voice.statusError')
   };
   return labels[state] || labels.idle;
 }
@@ -1649,6 +2544,7 @@ function upsertAssistantMessage(current, payload) {
 }
 
 function PairingScreen({ onPaired }) {
+  const { t } = useI18n();
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [pairing, setPairing] = useState(false);
@@ -1681,25 +2577,25 @@ function PairingScreen({ onPaired }) {
       </div>
       <h1>CodexMobile</h1>
       <p className="pairing-lead">
-        我的本机 Codex 移动工作台。电脑继续执行，iPhone 随时接管、追问、看过程、处理确认和收完成通知。
+        {t('pairing.lead')}
       </p>
-      <div className="pairing-points" aria-label="CodexMobile 核心能力">
-        <span>桌面对话同步</span>
-        <span>完整执行过程</span>
-        <span>私有网络访问</span>
+      <div className="pairing-points" aria-label={t('pairing.capabilities')}>
+        <span>{t('pairing.sync')}</span>
+        <span>{t('pairing.process')}</span>
+        <span>{t('pairing.private')}</span>
       </div>
-      <p className="pairing-note">输入电脑端启动日志里的 6 位配对码。</p>
+      <p className="pairing-note">{t('pairing.note')}</p>
       <form className="pairing-form" onSubmit={handlePair}>
         <input
           inputMode="numeric"
           maxLength={6}
-          placeholder="6 位配对码"
+          placeholder={t('pairing.placeholder')}
           value={code}
           onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
         />
         <button type="submit" disabled={code.length !== 6 || pairing}>
           {pairing ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
-          连接
+          {t('pairing.connect')}
         </button>
       </form>
       {error ? <div className="pairing-error">{error}</div> : null}
@@ -1736,7 +2632,7 @@ function formatQuotaPercent(quotaWindow) {
   return percent === null ? '--' : `${Math.round(percent)}%`;
 }
 
-function codexCliSourceLabel(source) {
+function codexCliSourceLabel(source, t = DEFAULT_I18N.t) {
   if (source === 'path') {
     return 'PATH';
   }
@@ -1744,18 +2640,18 @@ function codexCliSourceLabel(source) {
     return 'CODEXMOBILE_CODEX_PATH';
   }
   if (source === 'bundled') {
-    return '内置依赖';
+    return t('common.bundledDependency');
   }
   if (source === 'unavailable') {
-    return '不可用';
+    return t('common.unavailable');
   }
-  return '未知';
+  return t('common.unknown');
 }
 
-function codexBridgeModeLabel(desktopBridge) {
+function codexBridgeModeLabel(desktopBridge, t = DEFAULT_I18N.t) {
   const mode = desktopBridge?.mode || 'unavailable';
   if (mode === 'headless-local') {
-    return '后台本机 Codex';
+    return t('common.backgroundLocalCodex');
   }
   if (mode === 'desktop-ipc') {
     return 'Codex Desktop Remote';
@@ -1764,17 +2660,17 @@ function codexBridgeModeLabel(desktopBridge) {
     return 'Codex Desktop app-server';
   }
   if (mode === 'isolated-dev') {
-    return '独立 app-server';
+    return t('common.standaloneAppServer');
   }
-  return desktopBridge?.connected ? '已连接' : '未连接';
+  return desktopBridge?.connected ? t('common.connected') : t('common.disconnected');
 }
 
-function hostSystemLabel(environment = {}) {
+function hostSystemLabel(environment = {}, t = DEFAULT_I18N.t) {
   const system = [environment.osType || environment.platform, environment.osRelease]
     .filter(Boolean)
     .join(' ');
   const arch = environment.arch ? `(${environment.arch})` : '';
-  return [system, arch].filter(Boolean).join(' ') || '未知';
+  return [system, arch].filter(Boolean).join(' ') || t('common.unknown');
 }
 
 function quotaToneClass(percent) {
@@ -1813,9 +2709,12 @@ function Drawer({
   onDeleteSession,
   onNewConversation,
   onOpenDocs,
-  theme,
-  setTheme
+  languageSetting,
+  setLanguageSetting,
+  themeSetting,
+  setThemeSetting
 }) {
+  const { t } = useI18n();
   const [drawerView, setDrawerView] = useState('main');
   const [subagentExpandedById, setSubagentExpandedById] = useState({});
   const [quotaLoading, setQuotaLoading] = useState(false);
@@ -1829,9 +2728,9 @@ function Drawer({
   const runningCount = Object.values(runningById || {}).filter(Boolean).length;
   const environment = status?.environment || {};
   const codexCli = status?.codexCli || {};
-  const codexCliVersion = codexCli.version || (codexCli.error ? '不可用' : '未知');
-  const codexCliMeta = [codexCliSourceLabel(codexCli.source), codexCli.path].filter(Boolean).join(' · ');
-  const bridgeMeta = [status?.desktopBridge?.connected ? '已连接' : '未连接', status?.desktopBridge?.mode]
+  const codexCliVersion = codexCli.version || (codexCli.error ? t('common.unavailable') : t('common.unknown'));
+  const codexCliMeta = [codexCliSourceLabel(codexCli.source, t), codexCli.path].filter(Boolean).join(' · ');
+  const bridgeMeta = [status?.desktopBridge?.connected ? t('common.connected') : t('common.disconnected'), status?.desktopBridge?.mode]
     .filter(Boolean)
     .join(' · ');
 
@@ -1848,10 +2747,10 @@ function Drawer({
         : await apiFetch('/api/quotas/codex');
       setQuotaResult(result);
       setQuotaAccounts(Array.isArray(result.accounts) ? result.accounts : []);
-      setQuotaNotice(result.stale ? (result.staleReason || '实时查询失败，显示最近一次成功结果') : '');
+      setQuotaNotice(result.stale ? (result.staleReason || t('quota.staleResult')) : '');
       setQuotaLoaded(true);
     } catch (error) {
-      setQuotaError(`${error.message || '查询失败'}，点击刷新重试`);
+      setQuotaError(t('quota.accountRetry', { message: error.message || t('quota.failed') }));
       setQuotaLoaded(true);
     } finally {
       setQuotaLoading(false);
@@ -1877,7 +2776,7 @@ function Drawer({
     }
     setQuotaResult(quotaSnapshot);
     setQuotaAccounts(Array.isArray(quotaSnapshot.accounts) ? quotaSnapshot.accounts : []);
-    setQuotaNotice(quotaSnapshot.stale ? (quotaSnapshot.staleReason || '实时查询失败，显示最近一次成功结果') : '');
+    setQuotaNotice(quotaSnapshot.stale ? (quotaSnapshot.staleReason || t('quota.staleResult')) : '');
     setQuotaError('');
     setQuotaLoaded(true);
   }, [quotaSnapshot]);
@@ -1888,65 +2787,78 @@ function Drawer({
         <div className={`drawer-backdrop ${open ? 'is-open' : ''}`} onClick={onClose} />
         <aside className={`drawer ${open ? 'is-open' : ''}`}>
           <div className="drawer-subheader">
-            <button className="icon-button" onClick={() => setDrawerView('main')} aria-label="返回">
+            <button className="icon-button" onClick={() => setDrawerView('main')} aria-label={t('common.back')}>
               <ChevronLeft size={22} />
             </button>
-            <strong>设置</strong>
-            <button className="icon-button" onClick={onClose} aria-label="关闭菜单">
+            <strong>{t('settings.title')}</strong>
+            <button className="icon-button" onClick={onClose} aria-label={t('common.close')}>
               <X size={20} />
             </button>
           </div>
           <div className="settings-view">
             <section className="settings-group">
-              <div className="drawer-heading">外观</div>
+              <div className="drawer-heading">{t('settings.appearance')}</div>
               <div className="theme-setting">
                 <div className="theme-setting-title">
-                  <span>主题选择</span>
+                  <span>{t('settings.language')}</span>
                 </div>
-                <div className="theme-segment" role="group" aria-label="主题选择">
-                  <button
-                    type="button"
-                    className={theme === 'light' ? 'is-selected' : ''}
-                    onClick={() => setTheme('light')}
-                  >
-                    白色
-                  </button>
-                  <button
-                    type="button"
-                    className={theme === 'dark' ? 'is-selected' : ''}
-                    onClick={() => setTheme('dark')}
-                  >
-                    黑色
-                  </button>
+                <div className="theme-segment is-three" role="group" aria-label={t('settings.language')}>
+                  {LOCALE_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={languageSetting === option ? 'is-selected' : ''}
+                      onClick={() => setLanguageSetting(option)}
+                    >
+                      {option === 'system' ? t('common.system') : option === 'zh' ? t('settings.zh') : t('settings.en')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="theme-setting">
+                <div className="theme-setting-title">
+                  <span>{t('settings.theme')}</span>
+                </div>
+                <div className="theme-segment is-three" role="group" aria-label={t('settings.theme')}>
+                  {THEME_OPTIONS.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={themeSetting === option ? 'is-selected' : ''}
+                      onClick={() => setThemeSetting(option)}
+                    >
+                      {option === 'system' ? t('common.system') : option === 'light' ? t('settings.light') : t('settings.dark')}
+                    </button>
+                  ))}
                 </div>
               </div>
             </section>
             <section className="settings-group">
-              <div className="drawer-heading">集成</div>
+              <div className="drawer-heading">{t('settings.integrations')}</div>
               <div className="settings-list">
                 <button type="button" className="settings-entry settings-card-entry" onClick={onOpenDocs}>
                   <span>
                     <FeishuLogoIcon size={18} />
-                    飞书文档
+                    {t('docs.title')}
                   </span>
                   <ChevronRight size={17} />
                 </button>
               </div>
             </section>
             <section className="settings-group">
-              <div className="drawer-heading">环境信息</div>
+              <div className="drawer-heading">{t('settings.environment')}</div>
               <div className="env-info">
                 <div>
-                  <span>主机</span>
-                  <strong>{environment.hostName || status?.hostName || '未知'}</strong>
+                  <span>{t('settings.host')}</span>
+                  <strong>{environment.hostName || status?.hostName || t('common.unknown')}</strong>
                 </div>
                 <div>
-                  <span>系统</span>
-                  <strong>{hostSystemLabel(environment)}</strong>
+                  <span>{t('settings.system')}</span>
+                  <strong>{hostSystemLabel(environment, t)}</strong>
                 </div>
                 <div>
-                  <span>连接方式</span>
-                  <strong>{codexBridgeModeLabel(status?.desktopBridge)}</strong>
+                  <span>{t('settings.codexConnection')}</span>
+                  <strong>{codexBridgeModeLabel(status?.desktopBridge, t)}</strong>
                 </div>
                 <div>
                   <span>Codex CLI</span>
@@ -1971,9 +2883,9 @@ function Drawer({
         <div className="drawer-header">
           <div>
             <strong>CodexMobile</strong>
-            <small>{runningCount ? `已连接 · ${runningCount} 个任务运行中` : '已连接'}</small>
+            <small>{runningCount ? t('drawer.connectedWithTasks', { count: runningCount }) : t('common.connected')}</small>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭菜单">
+          <button className="icon-button" onClick={onClose} aria-label={t('common.close')}>
             <X size={20} />
           </button>
         </div>
@@ -1985,14 +2897,14 @@ function Drawer({
               type="search"
               value={drawerQuery}
               onChange={(event) => setDrawerQuery(event.target.value)}
-              placeholder="搜索对话..."
-              aria-label="搜索对话"
+              placeholder={t('drawer.searchPlaceholder')}
+              aria-label={t('drawer.searchPlaceholder')}
             />
           </label>
         </div>
 
         <section className="drawer-section project-section">
-          <div className="drawer-heading">对话分类</div>
+          <div className="drawer-heading">{t('drawer.categories')}</div>
           <div className="project-list">
             {projects.map((project) => {
               const isSelected = selectedProject?.id === project.id;
@@ -2002,7 +2914,7 @@ function Drawer({
                 ? [project.name, project.pathLabel, project.path].some((value) => String(value || '').toLowerCase().includes(normalizedDrawerQuery))
                 : true;
               const visibleProjectSessions = normalizedDrawerQuery
-                ? projectSessions.filter((session) => String(session.title || '对话').toLowerCase().includes(normalizedDrawerQuery))
+                ? projectSessions.filter((session) => String(session.title || t('drawer.conversation')).toLowerCase().includes(normalizedDrawerQuery))
                 : projectSessions;
               if (normalizedDrawerQuery && !projectMatches && !visibleProjectSessions.length) {
                 return null;
@@ -2042,13 +2954,13 @@ function Drawer({
                       onClick={() => onSelectSession(project, session)}
                     >
                       <span className="thread-title-line">
-                        <span>{session.title || '对话'}</span>
+                        <span>{session.title || t('drawer.conversation')}</span>
                         {!isSubAgent && childCount ? (
                           <span
                             role="button"
                             tabIndex={0}
                             className="thread-subagent-toggle"
-                            aria-label={subagentsOpen ? '折叠子代理对话' : '展开子代理对话'}
+                            aria-label={subagentsOpen ? t('drawer.collapseSubagents') : t('drawer.expandSubagents')}
                             aria-expanded={subagentsOpen}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -2062,23 +2974,23 @@ function Drawer({
                               }
                             }}
                           >
-                            {openChildCount ? `${openChildCount}/${childCount}` : childCount} 子代理
+                            {openChildCount ? `${openChildCount}/${childCount}` : childCount} {t('drawer.subagents')}
                             <ChevronDown size={12} />
                           </span>
                         ) : null}
                         {sessionRunning ? (
-                          <Loader2 className="thread-status-spin spin" size={12} aria-label="运行中" />
+                          <Loader2 className="thread-status-spin spin" size={12} aria-label={t('drawer.running')} />
                         ) : sessionCompleted ? (
-                          <span className="thread-complete-dot" aria-label="有新完成结果" />
+                          <span className="thread-complete-dot" aria-label={t('drawer.hasNewResult')} />
                         ) : null}
                       </span>
                       <small>
                         {sessionRunning
-                          ? '正在处理'
+                          ? t('drawer.processing')
                           : session.draft
-                            ? '待发送'
+                            ? t('drawer.pending')
                             : isSubAgent || session.isSubAgent
-                              ? subAgentSubtitle(session)
+                              ? subAgentSubtitle(session, t)
                               : formatTime(session.updatedAt)}
                       </small>
                     </button>
@@ -2088,8 +3000,8 @@ function Drawer({
                           type="button"
                           className="thread-rename"
                           onClick={() => onRenameSession(project, session)}
-                          aria-label="重命名对话"
-                          title="重命名对话"
+                          aria-label={t('drawer.renameConversation')}
+                          title={t('drawer.renameConversation')}
                         >
                           <Pencil size={14} />
                         </button>
@@ -2097,8 +3009,8 @@ function Drawer({
                           type="button"
                           className="thread-delete"
                           onClick={() => onDeleteSession(project, session)}
-                          aria-label="归档对话"
-                          title="归档对话"
+                          aria-label={t('drawer.archiveConversation')}
+                          title={t('drawer.archiveConversation')}
                         >
                           <Archive size={14} />
                         </button>
@@ -2133,9 +3045,9 @@ function Drawer({
                             onClick={() => onNewConversation(project)}
                           >
                             <span className="thread-title-line">
-                              <span>新对话</span>
+                              <span>{t('drawer.newConversation')}</span>
                             </span>
-                            <small>待发送</small>
+                            <small>{t('drawer.pending')}</small>
                           </button>
                           <ChevronRight size={14} className="thread-row-more" />
                         </div>
@@ -2143,7 +3055,7 @@ function Drawer({
                       {loadingProjectId === project.id ? (
                         <div className="thread-empty">
                           <Loader2 className="spin" size={14} />
-                          加载中
+                          {t('common.loading')}
                         </div>
                       ) : visibleProjectSessions.length ? (
                         rootSessions.map((session) => {
@@ -2161,7 +3073,7 @@ function Drawer({
                           );
                         })
                       ) : (
-                        <div className="thread-empty">暂无对话</div>
+                        <div className="thread-empty">{t('drawer.noConversations')}</div>
                       )}
                     </div>
                   ) : null}
@@ -2175,7 +3087,7 @@ function Drawer({
           <div className="quota-widget is-expanded">
             <div className="quota-card">
               <div className="quota-card-head">
-                <span className="quota-title">Rate limits remaining</span>
+                <span className="quota-title">{t('quota.title')}</span>
               </div>
               <div className="quota-panel">
                 {quotaError ? (
@@ -2185,7 +3097,7 @@ function Drawer({
                 ) : null}
                 {!quotaError && quotaNotice ? (
                   <button type="button" className="quota-error" onClick={refreshCodexQuota}>
-                    {quotaNotice}，点击刷新
+                    {t('quota.staleRetry', { message: quotaNotice })}
                   </button>
                 ) : null}
                 {!quotaError && quotaAccounts.length ? (
@@ -2226,27 +3138,27 @@ function Drawer({
                             className="quota-account-message"
                             onClick={accountStatus === 'failed' ? refreshCodexQuota : undefined}
                           >
-                            {accountStatus === 'disabled' ? '已停用' : `${account.error || '查询失败'}，点击刷新重试`}
+                            {accountStatus === 'disabled' ? t('quota.disabled') : t('quota.accountRetry', { message: account.error || t('quota.failed') })}
                           </button>
                         )}
                       </div>
                     );
                   })
                 ) : null}
-                {quotaLoading && !quotaLoaded ? <div className="quota-empty">正在读取额度...</div> : null}
+                {quotaLoading && !quotaLoaded ? <div className="quota-empty">{t('quota.loading')}</div> : null}
                 {!quotaLoading && !quotaError && quotaLoaded && !quotaAccounts.length ? (
-                  <div className="quota-empty">暂无 Codex 凭证</div>
+                  <div className="quota-empty">{t('quota.empty')}</div>
                 ) : null}
               </div>
               <div className="quota-footer">
-                <small>{formatQuotaUpdateTime(quotaResult?.updatedAt || quotaResult?.fetchedAt || quotaResult?.staleSavedAt || quotaResult?.cacheUpdatedAt)}</small>
+                <small>{formatQuotaUpdateTime(quotaResult?.updatedAt || quotaResult?.fetchedAt || quotaResult?.staleSavedAt || quotaResult?.cacheUpdatedAt, t)}</small>
                 <button
                   type="button"
                   className="quota-refresh"
                   onClick={refreshCodexQuota}
                   disabled={quotaLoading}
-                  aria-label="刷新额度"
-                  title="刷新额度"
+                  aria-label={t('quota.refresh')}
+                  title={t('quota.refresh')}
                 >
                   {quotaLoading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
                 </button>
@@ -2256,7 +3168,7 @@ function Drawer({
           <button type="button" className="settings-entry" onClick={() => setDrawerView('settings')}>
             <span>
               <Settings size={18} />
-              设置
+              {t('settings.title')}
             </span>
             <ChevronRight size={17} />
           </button>
@@ -2266,14 +3178,15 @@ function Drawer({
   );
 }
 
-function bridgeConnectionLabel(connectionState, desktopBridge) {
+function bridgeConnectionLabel(connectionState, desktopBridge, t = DEFAULT_I18N.t) {
   if (connectionState !== 'connected') {
-    return CONNECTION_STATUS[connectionState] || CONNECTION_STATUS.disconnected;
+    if (connectionState === 'connecting') return { label: t('common.connecting'), className: 'is-connecting' };
+    return { label: t('common.disconnected'), className: 'is-disconnected' };
   }
   if (desktopBridge?.mode === 'headless-local') {
-    return { label: '后台 Codex', className: 'is-connected is-headless' };
+    return { label: t('common.backgroundCodex'), className: 'is-connected is-headless' };
   }
-  return CONNECTION_STATUS.connected;
+  return { label: t('common.connected'), className: 'is-connected' };
 }
 
 function TopBar({
@@ -2291,15 +3204,16 @@ function TopBar({
   onEnableNotifications,
   gitDisabled = false
 }) {
+  const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [copiedThreadId, setCopiedThreadId] = useState(false);
   const menuRef = useRef(null);
   const copiedTimerRef = useRef(null);
   const canCopyThreadId = Boolean(selectedSession?.id && !isDraftSession(selectedSession));
   const canOperateThread = Boolean(selectedProject?.id && selectedSession?.id);
-  const threadTitle = String(selectedSession?.title || (selectedProject ? '新对话' : 'CodexMobile')).trim();
-  const projectTitle = String(selectedProject?.name || '未选择项目').trim();
-  const subtitle = `${projectTitle} · ${runModeShortLabel(runMode)}`;
+  const threadTitle = String(selectedSession?.title || (selectedProject ? t('drawer.newConversation') : 'CodexMobile')).trim();
+  const projectTitle = String(selectedProject?.name || t('top.noProject')).trim();
+  const subtitle = `${projectTitle} · ${runModeShortLabel(runMode, t)}`;
 
   useEffect(() => {
     if (!menuOpen) {
@@ -2331,7 +3245,7 @@ function TopBar({
     }
     const copied = await copyTextToClipboard(selectedSession.id);
     if (!copied) {
-      window.alert('复制失败');
+      window.alert(t('message.copyFailed'));
       return;
     }
     setCopiedThreadId(true);
@@ -2368,7 +3282,7 @@ function TopBar({
 
   return (
     <header className="top-bar">
-      <button className="icon-button" onClick={onMenu} aria-label="打开菜单">
+      <button className="icon-button" onClick={onMenu} aria-label={t('top.openMenu')}>
         <Menu size={22} />
       </button>
       <div className="top-title">
@@ -2377,7 +3291,7 @@ function TopBar({
           <span>{projectTitle}</span>
           <span className="top-title-separator">·</span>
           <RunModeIcon value={runMode} size={13} />
-          <span>{runModeShortLabel(runMode)}</span>
+          <span>{runModeShortLabel(runMode, t)}</span>
         </small>
       </div>
       <div className="top-actions">
@@ -2386,46 +3300,46 @@ function TopBar({
             type="button"
             className="icon-button"
             onClick={() => setMenuOpen((value) => !value)}
-            aria-label="更多操作"
+            aria-label={t('top.more')}
             aria-expanded={menuOpen}
           >
             <MoreHorizontal size={22} />
           </button>
           {menuOpen ? (
-            <div className="top-menu-popover" role="menu" aria-label="更多操作">
+            <div className="top-menu-popover" role="menu" aria-label={t('top.more')}>
               <button type="button" role="menuitem" onClick={() => handleOpenWorkspace('changes')} disabled={!selectedProject}>
                 <GitPullRequestCreateArrow size={16} />
-                <span>Changes</span>
+                <span>{t('top.changes')}</span>
               </button>
               <button type="button" role="menuitem" onClick={() => handleOpenWorkspace('directories')} disabled={!selectedProject}>
                 <Folder size={16} />
-                <span>Directories</span>
+                <span>{t('top.directories')}</span>
               </button>
               <button type="button" role="menuitem" onClick={handleOpenTerminal} disabled={!selectedProject}>
                 <Terminal size={16} />
-                <span>Terminal</span>
+                <span>{t('top.terminal')}</span>
               </button>
               <div className="top-menu-divider" />
               <button type="button" role="menuitem" onClick={handleRenameThread} disabled={!canOperateThread}>
                 <Pencil size={16} />
-                <span>修改对话标题</span>
+                <span>{t('top.rename')}</span>
               </button>
               <button type="button" role="menuitem" className="is-danger" onClick={handleArchiveThread} disabled={!canOperateThread}>
                 <Archive size={16} />
-                <span>归档对话</span>
+                <span>{t('top.archive')}</span>
               </button>
               <button type="button" role="menuitem" onClick={handleCopyThreadId} disabled={!canCopyThreadId}>
                 {copiedThreadId ? <Check size={16} /> : <Copy size={16} />}
-                <span>{copiedThreadId ? '已复制对话 ID' : '复制对话 ID'}</span>
+                <span>{copiedThreadId ? t('top.copiedThreadId') : t('top.copyThreadId')}</span>
               </button>
               <div className="top-menu-divider" />
               <button type="button" role="menuitem" onClick={() => handleGitAction('status')} disabled={gitDisabled}>
                 <GitBranch size={16} />
-                <span>Git 面板</span>
+                <span>{t('top.gitPanel')}</span>
               </button>
               <button type="button" role="menuitem" onClick={handleEnableNotifications}>
                 <Bell size={16} />
-                <span>{notificationEnabled ? '完成通知已开启' : '开启完成通知'}</span>
+                <span>{notificationEnabled ? t('top.notificationsEnabled') : t('top.enableNotifications')}</span>
               </button>
             </div>
           ) : null}
@@ -2436,12 +3350,13 @@ function TopBar({
 }
 
 function SessionActionModal({ action, onClose, onConfirm }) {
-  const [title, setTitle] = useState(action?.session?.title || '新对话');
+  const { t } = useI18n();
+  const [title, setTitle] = useState(action?.session?.title || t('drawer.newConversation'));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setTitle(action?.session?.title || '新对话');
+    setTitle(action?.session?.title || t('drawer.newConversation'));
     setBusy(false);
     setError('');
   }, [action]);
@@ -2451,7 +3366,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
   }
 
   const isRename = action.type === 'rename';
-  const threadTitle = action.session?.title || '对话';
+  const threadTitle = action.session?.title || t('drawer.conversation');
   async function submit(event) {
     event?.preventDefault?.();
     if (busy) {
@@ -2459,7 +3374,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
     }
     const nextTitle = title.trim();
     if (isRename && !nextTitle) {
-      setError('标题不能为空');
+      setError(t('modal.titleRequired'));
       return;
     }
     setBusy(true);
@@ -2468,7 +3383,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
       await onConfirm(isRename ? nextTitle : undefined);
     } catch (confirmError) {
       setBusy(false);
-      setError(confirmError.message || '操作失败');
+      setError(confirmError.message || t('modal.operationFailed'));
     }
   }
 
@@ -2478,7 +3393,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
         className="modal-card"
         role="dialog"
         aria-modal="true"
-        aria-label={isRename ? '修改对话标题' : '归档对话'}
+        aria-label={isRename ? t('top.rename') : t('top.archive')}
         onSubmit={submit}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -2486,10 +3401,10 @@ function SessionActionModal({ action, onClose, onConfirm }) {
           {isRename ? <Pencil size={22} /> : <Archive size={22} />}
         </div>
         <div className="modal-body">
-          <h2>{isRename ? '修改对话标题' : '归档对话'}</h2>
+          <h2>{isRename ? t('top.rename') : t('top.archive')}</h2>
           {isRename ? (
             <label className="modal-field">
-              <span>标题</span>
+              <span>{t('modal.title')}</span>
               <input
                 autoFocus
                 value={title}
@@ -2499,17 +3414,17 @@ function SessionActionModal({ action, onClose, onConfirm }) {
             </label>
           ) : (
             <p>
-              归档“{threadTitle}”后会从列表中移除，并同步到可用的 Codex 后端。
+              {t('modal.archiveConfirm', { title: threadTitle })}
             </p>
           )}
           {error ? <p className="modal-error">{error}</p> : null}
         </div>
         <div className="modal-actions">
           <button type="button" className="modal-secondary" onClick={onClose} disabled={busy}>
-            取消
+            {t('common.cancel')}
           </button>
           <button type="submit" className={isRename ? 'modal-primary' : 'modal-danger'} disabled={busy}>
-            {busy ? '处理中...' : isRename ? '保存' : '归档'}
+            {busy ? t('common.processing') : isRename ? t('common.save') : t('common.archive')}
           </button>
         </div>
       </form>
@@ -2518,6 +3433,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
 }
 
 function WelcomePane({ projects, onNewConversation }) {
+  const { t } = useI18n();
   const visibleProjects = Array.isArray(projects) ? projects.slice(0, 6) : [];
   return (
     <main className="welcome-pane">
@@ -2526,9 +3442,9 @@ function WelcomePane({ projects, onNewConversation }) {
           <MessageSquarePlus size={28} />
         </div>
         <h1>CodexMobile</h1>
-        <p>选择一个项目开始新对话，或从左侧菜单打开历史对话。</p>
+        <p>{t('welcome.body')}</p>
         {visibleProjects.length ? (
-          <div className="welcome-projects" aria-label="项目">
+          <div className="welcome-projects" aria-label={t('welcome.projects')}>
             {visibleProjects.map((project) => (
               <button key={project.id} type="button" onClick={() => onNewConversation(project)}>
                 <Folder size={18} />
@@ -2541,7 +3457,7 @@ function WelcomePane({ projects, onNewConversation }) {
             ))}
           </div>
         ) : (
-          <div className="welcome-empty">还没有可用项目</div>
+          <div className="welcome-empty">{t('welcome.empty')}</div>
         )}
       </div>
     </main>
@@ -2576,6 +3492,7 @@ function FeishuLogoIcon({ size = 30, className = '' }) {
 }
 
 function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, onOpenHome, onOpenAuth, onRefresh }) {
+  const { t } = useI18n();
   if (!open) {
     return null;
   }
@@ -2592,47 +3509,47 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
   const authPending = docs?.authPending;
   const setupItems = [
     { id: 'cli', label: 'lark-cli', ok: cliInstalled },
-    { id: 'skills', label: '官方 skills', ok: skillsInstalled },
-    { id: 'config', label: 'App 凭证', ok: configured },
-    { id: 'auth', label: '用户授权', ok: connected },
-    { id: 'slides', label: 'PPT 权限', ok: slidesAuthorized },
-    { id: 'sheets', label: '表格权限', ok: sheetsAuthorized }
+    { id: 'skills', label: t('docs.officialSkills'), ok: skillsInstalled },
+    { id: 'config', label: t('docs.appCredentials'), ok: configured },
+    { id: 'auth', label: t('docs.userAuth'), ok: connected },
+    { id: 'slides', label: t('docs.slidesScope'), ok: slidesAuthorized },
+    { id: 'sheets', label: t('docs.sheetsScope'), ok: sheetsAuthorized }
   ];
   const subtitle = connected
     ? needsExtraAuth
-      ? '待补权限'
+      ? t('docs.pendingScope')
       : ''
     : authPending?.status === 'polling'
-      ? '等待授权'
+      ? t('docs.waitingAuth')
       : configured
-        ? '未连接'
-        : '未配置';
+        ? t('docs.notConnected')
+        : t('docs.notConfigured');
   const summary = authPending?.status === 'polling'
-      ? '授权页已打开，完成后回到这里刷新状态。'
+      ? t('docs.authOpened')
       : connected
         ? needsExtraAuth
-          ? '飞书账号已连接，但部分文档权限还没授权。补充授权后，Codex 可完整操作飞书文档、PPT、表格和云空间文件。'
-          : 'Codex 已可操作飞书文档、PPT、表格和云空间文件。'
+          ? t('docs.extraAuthSummary')
+          : t('docs.readySummary')
         : !cliInstalled
-          ? '本机还没有检测到 lark-cli。'
+          ? t('docs.noCli')
           : !skillsInstalled
-            ? '官方文档 skills 还没有安装完整。'
+            ? t('docs.noSkills')
             : configured
-              ? '连接飞书账号后，Codex 才能以你的身份操作文档、PPT 和表格。'
-              : '请先在后端配置飞书 App ID 和 Secret。';
+              ? t('docs.connectSummary')
+              : t('docs.configSummary');
   const canConnect = cliInstalled && skillsInstalled && configured;
 
   return (
-    <section className="docs-panel" role="dialog" aria-modal="true" aria-label="飞书文档">
+    <section className="docs-panel" role="dialog" aria-modal="true" aria-label={t('docs.title')}>
       <header className="docs-panel-header">
-        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭文档">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('docs.close')}>
           <ChevronLeft size={22} />
         </button>
         <div className="docs-panel-title">
-          <strong>飞书文档</strong>
+          <strong>{t('docs.title')}</strong>
           {subtitle ? <span>{subtitle}</span> : null}
         </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭文档">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('docs.close')}>
           <X size={20} />
         </button>
       </header>
@@ -2641,17 +3558,17 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
           <div className="docs-status-icon">
             <FeishuLogoIcon size={58} />
           </div>
-          <h2>飞书文档</h2>
+          <h2>{t('docs.title')}</h2>
           <p>{summary}</p>
           <p className="docs-usage-note">
-            配置并授权后，在消息中提到飞书文档、PPT、表格或云空间时，Codex 会使用 lark-cli 来创建、读取和更新对应内容。
+            {t('docs.usage')}
           </p>
           {error ? <div className="docs-panel-error">{error}</div> : null}
           {authPending?.verificationUrl && (!connected || needsExtraAuth) ? (
             <div className="docs-auth-box">
-              <span>授权码 {authPending.userCode || '已生成'}</span>
+              <span>{t('docs.authCode', { code: authPending.userCode || t('docs.generated') })}</span>
               <button type="button" onClick={() => onOpenAuth(authPending.verificationUrl)}>
-                打开授权页
+                {t('docs.openAuth')}
               </button>
             </div>
           ) : null}
@@ -2665,7 +3582,7 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
           </div>
           {needsExtraAuth && missingScopes.length ? (
             <div className="docs-scope-hint">
-              缺少 {missingScopes.slice(0, 4).join('、')}
+              {t('docs.missingScopes', { scopes: missingScopes.slice(0, 4).join(t('docs.scopeSeparator')) })}
             </div>
           ) : null}
           <div className="docs-panel-actions">
@@ -2677,26 +3594,26 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
                   ) : (
                     <FeishuLogoIcon size={18} />
                   )}
-                  {needsExtraAuth ? '补充授权' : '打开飞书'}
+                  {needsExtraAuth ? t('docs.addAuth') : t('docs.openFeishu')}
                 </button>
                 <button type="button" onClick={onDisconnect} disabled={busy}>
                   {busy ? <Loader2 className="spin" size={16} /> : <X size={16} />}
-                  断开
+                  {t('docs.disconnect')}
                 </button>
                 <button type="button" onClick={onRefresh} disabled={busy}>
                   <RefreshCw size={16} />
-                  刷新
+                  {t('common.refresh')}
                 </button>
               </>
             ) : (
               <>
                 <button type="button" onClick={onConnect} disabled={!canConnect || busy}>
                   {busy ? <Loader2 className="spin" size={16} /> : <ShieldCheck size={16} />}
-                  连接飞书
+                  {t('docs.connect')}
                 </button>
                 <button type="button" onClick={onRefresh} disabled={busy}>
                   <RefreshCw size={16} />
-                  刷新
+                  {t('common.refresh')}
                 </button>
               </>
             )}
@@ -2707,27 +3624,27 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
   );
 }
 
-function gitActionTitle(action) {
+function gitActionTitle(action, t = DEFAULT_I18N.t) {
   if (action === 'status') {
-    return 'Git 面板';
+    return t('git.title');
   }
   if (action === 'diff') {
-    return 'Git Diff';
+    return t('git.diff');
   }
   if (action === 'sync') {
-    return 'Git 同步';
+    return t('git.sync');
   }
   if (action === 'commit-push') {
-    return '提交并推送';
+    return t('git.commitPush');
   }
   if (action === 'commit') {
-    return 'Git 提交';
+    return t('git.commit');
   }
   if (action === 'push') {
-    return 'Git 推送';
+    return t('git.push');
   }
   if (action === 'branch') {
-    return '创建分支';
+    return t('git.branch');
   }
   return 'Git';
 }
@@ -2759,28 +3676,29 @@ function gitViewFromAction(action) {
   return 'status';
 }
 
-function gitSafetyWarnings(status = {}) {
+function gitSafetyWarnings(status = {}, t = DEFAULT_I18N.t) {
   const warnings = [];
   const files = Array.isArray(status.files) ? status.files : [];
   if (files.length) {
-    warnings.push(`工作区有 ${files.length} 个改动文件`);
+    warnings.push(t('git.warningFiles', { count: files.length }));
   }
   if (status.behind > 0) {
-    warnings.push(`落后远端 ${status.behind} 个提交，pull/sync 会先尝试快进`);
+    warnings.push(t('git.warningBehind', { count: status.behind }));
   }
   if (status.branch && !String(status.branch).startsWith('codex/')) {
-    warnings.push('当前不是 codex/ 分支，操作前请确认分支用途');
+    warnings.push(t('git.warningBranch'));
   }
   if (status.branch && !status.upstream) {
-    warnings.push('当前分支没有 upstream，push 会设置 origin upstream');
+    warnings.push(t('git.warningNoUpstream'));
   }
   if (!status.clean && status.behind > 0) {
-    warnings.push('本地有改动且落后远端，pull 可能失败并保留 Git 原始输出');
+    warnings.push(t('git.warningDirtyBehind'));
   }
   return warnings;
 }
 
 function GitPanel({ open, action, project, onClose, onToast }) {
+  const { t } = useI18n();
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [busyAction, setBusyAction] = useState('');
@@ -2793,11 +3711,11 @@ function GitPanel({ open, action, project, onClose, onToast }) {
 
   const projectId = project?.id || '';
   const targetQuery = workspaceTargetQuery(project);
-  const title = gitActionTitle(activeView === 'status' ? 'status' : activeView);
+  const title = gitActionTitle(activeView === 'status' ? 'status' : activeView, t);
   const files = Array.isArray(status?.files) ? status.files : [];
   const canCommit = Boolean(status?.canCommit);
   const canPush = Boolean(status?.branch);
-  const safetyWarnings = gitSafetyWarnings(status || {});
+  const safetyWarnings = gitSafetyWarnings(status || {}, t);
 
   const loadGitStatus = useCallback(async () => {
     if (!open || !projectId) {
@@ -2812,7 +3730,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
       setCommitMessage((current) => current || nextStatus?.defaultCommitMessage || '');
       setBranchName((current) => current || gitBranchDraft(project));
     } catch (loadError) {
-      setError(loadError.message || '读取 Git 状态失败');
+      setError(loadError.message || t('git.statusReadFailed'));
     } finally {
       setBusy(false);
     }
@@ -2832,7 +3750,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
         setStatus(data.diff.status);
       }
     } catch (loadError) {
-      setError(loadError.message || '读取 Git diff 失败');
+      setError(loadError.message || t('git.diffReadFailed'));
     } finally {
       setBusy(false);
       setBusyAction('');
@@ -2869,7 +3787,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
     setBusyAction(nextAction);
     setError('');
     setResult(null);
-    onToast?.({ level: 'info', title: gitActionTitle(nextAction), body: '正在执行 Git 操作...' });
+    onToast?.({ level: 'info', title: gitActionTitle(nextAction, t), body: t('git.running') });
     try {
       let data = null;
       if (nextAction === 'commit') {
@@ -2908,10 +3826,10 @@ function GitPanel({ open, action, project, onClose, onToast }) {
       if (data?.status?.defaultCommitMessage) {
         setCommitMessage(data.status.defaultCommitMessage);
       }
-      onToast?.({ level: 'success', title: gitActionTitle(nextAction), body: 'Git 操作已完成' });
+      onToast?.({ level: 'success', title: gitActionTitle(nextAction, t), body: t('git.completed') });
     } catch (runError) {
-      setError(runError.message || 'Git 操作失败');
-      onToast?.({ level: 'error', title: gitActionTitle(nextAction), body: runError.message || 'Git 操作失败' });
+      setError(runError.message || t('git.failed'));
+      onToast?.({ level: 'error', title: gitActionTitle(nextAction, t), body: runError.message || t('git.failed') });
     } finally {
       setBusy(false);
       setBusyAction('');
@@ -2925,25 +3843,25 @@ function GitPanel({ open, action, project, onClose, onToast }) {
   return (
     <section className="docs-panel git-panel" role="dialog" aria-modal="true" aria-label={title}>
       <header className="docs-panel-header">
-        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭 Git">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('common.close')}>
           <ChevronLeft size={22} />
         </button>
         <div className="docs-panel-title">
           <strong>{title}</strong>
           <span>{status?.branch || project?.name || 'Git'}</span>
         </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭 Git">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('common.close')}>
           <X size={20} />
         </button>
       </header>
       <div className="docs-panel-body git-panel-body">
-        <div className="git-tabs" role="tablist" aria-label="Git 操作">
+        <div className="git-tabs" role="tablist" aria-label={t('git.tabs')}>
           {[
-            ['status', '状态'],
+            ['status', t('git.status')],
             ['diff', 'Diff'],
-            ['sync', '同步'],
-            ['commit', '提交'],
-            ['branch', '分支']
+            ['sync', t('git.sync')],
+            ['commit', t('git.commit')],
+            ['branch', t('git.branch')]
           ].map(([view, label]) => (
             <button
               key={view}
@@ -2959,18 +3877,18 @@ function GitPanel({ open, action, project, onClose, onToast }) {
         <section className="git-status-card">
           <div className="git-status-head">
             <div>
-              <strong>{status?.clean ? '工作区干净' : '当前改动'}</strong>
+              <strong>{status?.clean ? t('git.clean') : t('git.currentChanges')}</strong>
               <span>
-                {status?.branch || '未读取'}
+                {status?.branch || t('git.notRead')}
                 {status?.upstream ? ` -> ${status.upstream}` : ''}
               </span>
             </div>
-            <button type="button" className="icon-button" onClick={loadGitStatus} disabled={busy} aria-label="刷新 Git 状态">
+            <button type="button" className="icon-button" onClick={loadGitStatus} disabled={busy} aria-label={t('git.refreshStatus')}>
               <RefreshCw size={18} />
             </button>
           </div>
           <div className="git-status-metrics">
-            <span>{files.length} 个文件</span>
+            <span>{t('git.files', { count: files.length })}</span>
             <span>ahead {status?.ahead || 0}</span>
             <span>behind {status?.behind || 0}</span>
           </div>
@@ -2982,7 +3900,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
                   <span>{file.path}</span>
                 </div>
               ))}
-              {files.length > 18 ? <small>还有 {files.length - 18} 个文件</small> : null}
+              {files.length > 18 ? <small>{t('git.moreFiles', { count: files.length - 18 })}</small> : null}
             </div>
           ) : null}
           {safetyWarnings.length ? (
@@ -2997,23 +3915,23 @@ function GitPanel({ open, action, project, onClose, onToast }) {
         {activeView === 'diff' ? (
           <section className="git-diff-card">
             <div className="git-section-head">
-              <strong>Diff 预览</strong>
+              <strong>{t('git.diffPreview')}</strong>
               <button type="button" onClick={loadGitDiff} disabled={busy}>
                 {busyAction === 'diff' ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
-                刷新
+                {t('common.refresh')}
               </button>
             </div>
             {diff?.summary ? <pre className="git-diff-summary">{diff.summary}</pre> : null}
-            <pre className="git-diff-pre">{diff?.patch || (busyAction === 'diff' ? '正在读取 diff...' : '暂无 diff')}</pre>
-            {diff?.truncated ? <small className="git-diff-note">diff 太长，已截断显示。</small> : null}
+            <pre className="git-diff-pre">{diff?.patch || (busyAction === 'diff' ? t('git.readingDiff') : t('git.noDiff'))}</pre>
+            {diff?.truncated ? <small className="git-diff-note">{t('git.diffTruncated')}</small> : null}
           </section>
         ) : null}
 
         {activeView === 'sync' ? (
           <section className="git-action-card">
             <div className="git-section-head">
-              <strong>同步操作</strong>
-              <span>pull 使用 --ff-only，sync 会 pull 后按需 push</span>
+              <strong>{t('git.syncOperation')}</strong>
+              <span>{t('git.syncHint')}</span>
             </div>
             <div className="git-action-grid">
               <button type="button" onClick={() => runGitAction('pull')} disabled={busy || !projectId}>
@@ -3034,7 +3952,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
 
         {activeView === 'commit' ? (
           <label className="git-field">
-            <span>提交信息</span>
+            <span>{t('git.commitMessage')}</span>
             <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} />
           </label>
         ) : null}
@@ -3043,18 +3961,18 @@ function GitPanel({ open, action, project, onClose, onToast }) {
           <div className="git-action-grid">
             <button type="button" onClick={() => runGitAction('commit')} disabled={commitDisabled}>
               {busyAction === 'commit' ? <Loader2 className="spin" size={15} /> : <GitCommitHorizontal size={15} />}
-              提交
+              {t('git.commit')}
             </button>
             <button type="button" onClick={() => runGitAction('commit-push')} disabled={commitDisabled}>
               {busyAction === 'commit-push' ? <Loader2 className="spin" size={15} /> : <UploadCloud size={15} />}
-              提交并推送
+              {t('git.commitPush')}
             </button>
           </div>
         ) : null}
 
         {activeView === 'branch' ? (
           <label className="git-field">
-            <span>分支名</span>
+            <span>{t('git.branchName')}</span>
             <input value={branchName} onChange={(event) => setBranchName(event.target.value)} />
           </label>
         ) : null}
@@ -3063,7 +3981,7 @@ function GitPanel({ open, action, project, onClose, onToast }) {
           <div className="git-action-grid">
             <button type="button" onClick={() => runGitAction('branch')} disabled={branchDisabled}>
               {busyAction === 'branch' ? <Loader2 className="spin" size={15} /> : <GitBranch size={15} />}
-              创建分支
+              {t('git.branch')}
             </button>
           </div>
         ) : null}
@@ -3073,10 +3991,10 @@ function GitPanel({ open, action, project, onClose, onToast }) {
           <div className="git-result">
             <Check size={17} />
             <span>
-              {action === 'commit' && result.hash ? `已提交 ${result.hash}` : null}
-              {result.hash && action !== 'commit' ? `已提交 ${result.hash}` : null}
-              {result.branch || result.pushed?.branch ? `已更新 ${result.branch || result.pushed?.branch}` : null}
-              {!result.hash && !result.branch && !result.pushed?.branch ? 'Git 操作已完成' : null}
+              {action === 'commit' && result.hash ? t('git.committed', { hash: result.hash }) : null}
+              {result.hash && action !== 'commit' ? t('git.committed', { hash: result.hash }) : null}
+              {result.branch || result.pushed?.branch ? t('git.updated', { branch: result.branch || result.pushed?.branch }) : null}
+              {!result.hash && !result.branch && !result.pushed?.branch ? t('git.completed') : null}
             </span>
           </div>
         ) : null}
@@ -3085,9 +4003,9 @@ function GitPanel({ open, action, project, onClose, onToast }) {
         <div className="docs-panel-actions git-panel-actions">
           <button type="button" onClick={loadGitStatus} disabled={busy}>
             <RefreshCw size={16} />
-            刷新状态
+            {t('git.refreshStatus')}
           </button>
-          <button type="button" onClick={onClose}>关闭</button>
+          <button type="button" onClick={onClose}>{t('common.close')}</button>
         </div>
       </div>
     </section>
@@ -3134,6 +4052,7 @@ function WorkspaceFileRow({ file, staged, onOpen }) {
 }
 
 function WorkspaceDirectoryNode({ target, pathValue, label, depth, expanded, onToggle, onOpenFile }) {
+  const { t } = useI18n();
   const [state, setState] = useState({ loading: false, error: '', entries: [] });
   const isExpanded = expanded.has(pathValue);
   const targetQuery = workspaceTargetQuery(target);
@@ -3153,7 +4072,7 @@ function WorkspaceDirectoryNode({ target, pathValue, label, depth, expanded, onT
       })
       .catch((error) => {
         if (!cancelled) {
-          setState({ loading: false, error: error.message || '读取目录失败', entries: [] });
+          setState({ loading: false, error: error.message || t('workspace.readDirectoryFailed'), entries: [] });
         }
       });
     return () => {
@@ -3180,7 +4099,7 @@ function WorkspaceDirectoryNode({ target, pathValue, label, depth, expanded, onT
       </button>
       {isExpanded ? (
         state.loading ? (
-          <div className="workspace-empty" style={{ paddingLeft: childIndent }}>正在读取目录...</div>
+          <div className="workspace-empty" style={{ paddingLeft: childIndent }}>{t('workspace.readDirectory')}</div>
         ) : state.error ? (
           <div className="workspace-error-inline" style={{ paddingLeft: childIndent }}>{state.error}</div>
         ) : state.entries.length ? (
@@ -3212,7 +4131,7 @@ function WorkspaceDirectoryNode({ target, pathValue, label, depth, expanded, onT
             ))}
           </div>
         ) : (
-          <div className="workspace-empty" style={{ paddingLeft: childIndent }}>空目录</div>
+          <div className="workspace-empty" style={{ paddingLeft: childIndent }}>{t('workspace.emptyDirectory')}</div>
         )
       ) : null}
     </div>
@@ -3250,9 +4169,10 @@ function WorkspaceDirectoryTree({ project, onOpenFile }) {
 }
 
 function WorkspaceDiffDisplay({ patch }) {
+  const { t } = useI18n();
   const rows = parseUnifiedDiffLines(patch || '');
   if (!rows.length) {
-    return <div className="workspace-empty">No changes to display.</div>;
+    return <div className="workspace-empty">{t('workspace.noChangesDisplay')}</div>;
   }
   return (
     <div className="workspace-diff-view">
@@ -3268,6 +4188,7 @@ function WorkspaceDiffDisplay({ patch }) {
 }
 
 function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
+  const { t } = useI18n();
   const [displayMode, setDisplayMode] = useState('diff');
   const [state, setState] = useState({ loading: false, error: '', diff: null, file: null });
   const projectId = project?.id || '';
@@ -3302,7 +4223,7 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
       })
       .catch((error) => {
         if (!cancelled) {
-          setState({ loading: false, error: error.message || '读取文件失败', diff: null, file: null });
+          setState({ loading: false, error: error.message || t('workspace.readFileFailed'), diff: null, file: null });
         }
       });
     return () => {
@@ -3317,21 +4238,21 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
     const copied = await copyTextToClipboard(state.file.content);
     onToast?.({
       level: copied ? 'success' : 'error',
-      title: copied ? '已复制文件内容' : '复制失败'
+      title: copied ? t('workspace.copyContentSuccess') : t('message.copyFailed')
     });
   }
 
   return (
     <div className="workspace-panel-view">
       <header className="workspace-panel-header">
-        <button className="icon-button" type="button" onClick={onBack} aria-label="返回文件列表">
+        <button className="icon-button" type="button" onClick={onBack} aria-label={t('common.back')}>
           <ChevronLeft size={22} />
         </button>
         <div className="workspace-panel-title">
           <strong>{fileNameValue}</strong>
           <span>{filePath || 'Unknown path'}</span>
         </div>
-        <button className="icon-button" type="button" onClick={() => copyTextToClipboard(filePath)} aria-label="复制路径">
+        <button className="icon-button" type="button" onClick={() => copyTextToClipboard(filePath)} aria-label={t('workspace.copyPath')}>
           <Copy size={18} />
         </button>
       </header>
@@ -3353,20 +4274,20 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
 
       <div className="workspace-panel-scroll">
         {state.loading ? (
-          <div className="workspace-empty">正在读取文件...</div>
+          <div className="workspace-empty">{t('workspace.readFile')}</div>
         ) : state.error ? (
           <div className="docs-panel-error">{state.error}</div>
         ) : displayMode === 'diff' && hasDiff ? (
           <WorkspaceDiffDisplay patch={state.diff.patch} />
         ) : state.file?.binary ? (
-          <div className="workspace-empty">这个文件看起来是二进制文件，无法预览。</div>
+          <div className="workspace-empty">{t('workspace.binaryFile')}</div>
         ) : state.file?.content ? (
           <pre className="workspace-file-content"><code>{state.file.content}</code></pre>
         ) : (
-          <div className="workspace-empty">文件为空。</div>
+          <div className="workspace-empty">{t('workspace.emptyFile')}</div>
         )}
         {state.file?.truncated ? (
-          <div className="workspace-empty">文件较大，仅显示前 {formatBytes(state.file.maxBytes)}。</div>
+          <div className="workspace-empty">{t('workspace.fileTruncated', { size: formatBytes(state.file.maxBytes) })}</div>
         ) : null}
       </div>
     </div>
@@ -3374,6 +4295,7 @@ function WorkspaceFileView({ project, selectedFile, onBack, onToast }) {
 }
 
 function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToast }) {
+  const { t } = useI18n();
   const [activeTab, setActiveTab] = useState(initialTab === 'directories' ? 'directories' : 'changes');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
@@ -3391,7 +4313,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
       const data = await apiFetch(`/api/git/files?${targetQuery}`);
       setGitState({ loading: false, error: '', status: data.status || null });
     } catch (error) {
-      setGitState({ loading: false, error: error.message || '读取 Changes 失败', status: null });
+      setGitState({ loading: false, error: error.message || t('workspace.readChangesFailed'), status: null });
     }
   }, [open, projectId, targetQuery]);
 
@@ -3422,7 +4344,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
         })
         .catch((error) => {
           if (!cancelled) {
-            setSearchState({ loading: false, error: error.message || '搜索失败', files: [] });
+            setSearchState({ loading: false, error: error.message || t('workspace.searchFailed'), files: [] });
           }
         });
     }, 140);
@@ -3445,7 +4367,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
 
   if (selectedFile) {
     return (
-      <section className="workspace-panel" role="dialog" aria-modal="true" aria-label="文件预览">
+      <section className="workspace-panel" role="dialog" aria-modal="true" aria-label={t('workspace.preview')}>
         <WorkspaceFileView
           project={project}
           selectedFile={selectedFile}
@@ -3462,16 +4384,16 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
   const searching = Boolean(searchQuery.trim());
 
   return (
-    <section className="workspace-panel" role="dialog" aria-modal="true" aria-label="文件和变更">
+    <section className="workspace-panel" role="dialog" aria-modal="true" aria-label={t('workspace.filesAndChanges')}>
       <header className="workspace-panel-header">
-        <button className="icon-button" type="button" onClick={onClose} aria-label="返回">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('common.back')}>
           <ChevronLeft size={22} />
         </button>
         <div className="workspace-panel-title">
-          <strong>Files</strong>
+          <strong>{t('workspace.title')}</strong>
           <span>{project?.path || project?.name || ''}</span>
         </div>
-        <button className="icon-button" type="button" onClick={activeTab === 'changes' ? loadGitFiles : undefined} aria-label="刷新">
+        <button className="icon-button" type="button" onClick={activeTab === 'changes' ? loadGitFiles : undefined} aria-label={t('common.refresh')}>
           <RefreshCw size={18} />
         </button>
       </header>
@@ -3481,7 +4403,7 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
         <input
           value={searchQuery}
           onChange={(event) => setSearchQuery(event.target.value)}
-          placeholder="Search files"
+          placeholder={t('workspace.search')}
           autoCapitalize="none"
           autoCorrect="off"
         />
@@ -3489,25 +4411,25 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
 
       <div className="workspace-tabs" role="tablist">
         <button type="button" role="tab" className={activeTab === 'changes' ? 'is-active' : ''} onClick={() => setActiveTab('changes')}>
-          Changes
+          {t('top.changes')}
         </button>
         <button type="button" role="tab" className={activeTab === 'directories' ? 'is-active' : ''} onClick={() => setActiveTab('directories')}>
-          Directories
+          {t('top.directories')}
         </button>
       </div>
 
       {!searching && activeTab === 'changes' && status ? (
         <div className="workspace-git-summary">
           <GitBranch size={16} />
-          <strong>{status.branch || 'detached'}</strong>
-          <span>{status.totalStaged || 0} staged, {status.totalUnstaged || 0} unstaged</span>
+          <strong>{status.branch || t('workspace.detached')}</strong>
+          <span>{t('workspace.stagedSummary', { staged: status.totalStaged || 0, unstaged: status.totalUnstaged || 0 })}</span>
         </div>
       ) : null}
 
       <div className="workspace-panel-scroll">
         {searching ? (
           searchState.loading ? (
-            <div className="workspace-empty">正在搜索文件...</div>
+            <div className="workspace-empty">{t('workspace.searching')}</div>
           ) : searchState.error ? (
             <div className="docs-panel-error">{searchState.error}</div>
           ) : searchState.files.length ? (
@@ -3515,31 +4437,31 @@ function WorkspacePanel({ open, initialTab = 'changes', project, onClose, onToas
               <WorkspaceFileRow key={file.relativePath || file.path} file={{ ...file, fullPath: file.relativePath, fileName: file.name, filePath: file.relativePath?.split('/').slice(0, -1).join('/') }} onOpen={openFile} />
             ))
           ) : (
-            <div className="workspace-empty">没有匹配的文件。</div>
+            <div className="workspace-empty">{t('workspace.noSearchResults')}</div>
           )
         ) : activeTab === 'directories' ? (
           <WorkspaceDirectoryTree project={project} onOpenFile={openFile} />
         ) : gitState.loading ? (
-          <div className="workspace-empty">正在读取 Changes...</div>
+          <div className="workspace-empty">{t('workspace.readingChanges')}</div>
         ) : gitState.error ? (
           <div className="docs-panel-error">{gitState.error}</div>
         ) : stagedFiles.length || unstagedFiles.length ? (
           <div className="workspace-changes-list">
             {stagedFiles.length ? (
               <div>
-                <div className="workspace-section-label is-staged">Staged Changes ({stagedFiles.length})</div>
+                <div className="workspace-section-label is-staged">{t('workspace.stagedChanges', { count: stagedFiles.length })}</div>
                 {stagedFiles.map((file) => <WorkspaceFileRow key={`staged-${file.fullPath}`} file={file} staged={true} onOpen={openFile} />)}
               </div>
             ) : null}
             {unstagedFiles.length ? (
               <div>
-                <div className="workspace-section-label is-unstaged">Unstaged Changes ({unstagedFiles.length})</div>
+                <div className="workspace-section-label is-unstaged">{t('workspace.unstagedChanges', { count: unstagedFiles.length })}</div>
                 {unstagedFiles.map((file) => <WorkspaceFileRow key={`unstaged-${file.fullPath}`} file={file} staged={false} onOpen={openFile} />)}
               </div>
             ) : null}
           </div>
         ) : (
-          <div className="workspace-empty">No changes detected. Use Directories to browse files.</div>
+          <div className="workspace-empty">{t('workspace.noChanges')}</div>
         )}
       </div>
     </section>
@@ -3755,6 +4677,7 @@ function TerminalPanel({
   onRegisterTerminal,
   onSendTerminal
 }) {
+  const { t } = useI18n();
   const terminalIdRef = useRef(makeTerminalId());
   const terminalRef = useRef(null);
   const terminalStateRef = useRef('idle');
@@ -3836,7 +4759,7 @@ function TerminalPanel({
     }
     if (connectionState !== 'connected') {
       setState('connecting');
-      terminalRef.current?.writeln('Waiting for CodexMobile WebSocket...');
+      terminalRef.current?.writeln(t('terminal.waitingWs'));
       return undefined;
     }
     const terminalId = makeTerminalId();
@@ -3849,7 +4772,7 @@ function TerminalPanel({
         return;
       }
       toastShownRef.current = true;
-      onToastRef.current?.({ level: 'error', title: 'Terminal 连接失败', body: message || '' });
+      onToastRef.current?.({ level: 'error', title: t('terminal.connectFailed'), body: message || '' });
     };
     const unregister = onRegisterTerminal?.(terminalId, (payload) => {
       if (payload.terminalId && payload.terminalId !== terminalId) {
@@ -3867,7 +4790,7 @@ function TerminalPanel({
         notifyConnectionFailed(message);
       } else if (payload.type === 'terminal-exit') {
         setState('closed');
-        terminalRef.current?.writeln('\r\n[terminal exited]');
+        terminalRef.current?.writeln(`\r\n${t('terminal.exited')}`);
       }
     }) || (() => {});
     const size = lastSizeRef.current || { cols: 100, rows: 28 };
@@ -3881,7 +4804,7 @@ function TerminalPanel({
       rows: size.rows
     });
     if (!sent) {
-      const message = 'WebSocket 未连接';
+      const message = t('terminal.wsDisconnected');
       setState('error');
       terminalRef.current?.writeln(message);
       notifyConnectionFailed(message);
@@ -3907,7 +4830,7 @@ function TerminalPanel({
       text = '';
     }
     if (!text) {
-      text = window.prompt('Paste terminal input') || '';
+      text = window.prompt(t('terminal.paste')) || '';
     }
     if (text) {
       writeRemote(text, { ctrl: false, alt: false });
@@ -3933,13 +4856,13 @@ function TerminalPanel({
   }
 
   return (
-    <section className="terminal-panel" role="dialog" aria-modal="true" aria-label="Terminal">
+    <section className="terminal-panel" role="dialog" aria-modal="true" aria-label={t('terminal.title')}>
       <header className="workspace-panel-header terminal-panel-header">
-        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭 Terminal">
+        <button className="icon-button" type="button" onClick={onClose} aria-label={t('terminal.close')}>
           <ChevronLeft size={22} />
         </button>
         <div className="workspace-panel-title">
-          <strong>Terminal</strong>
+          <strong>{t('terminal.title')}</strong>
           <span>{project?.path || project?.name || ''}</span>
         </div>
         <span className={`terminal-state is-${state}`}>{state}</span>
@@ -3960,7 +4883,7 @@ function TerminalPanel({
             void handlePaste();
           }}
         >
-          Paste
+          {t('terminal.paste')}
         </button>
         {TERMINAL_QUICK_KEY_ROWS.map((row, rowIndex) => (
           <div className="terminal-quick-row" key={`terminal-quick-row-${rowIndex}`}>
@@ -3983,6 +4906,7 @@ function TerminalPanel({
 }
 
 function ActivityMessage({ message, now = Date.now() }) {
+  const { t, ui } = useI18n();
   const running = message.status === 'running' || message.status === 'queued';
   const failed = message.status === 'failed';
   const [open, setOpen] = useState(() => running);
@@ -3994,7 +4918,7 @@ function ActivityMessage({ message, now = Date.now() }) {
   const startedAt = message.startedAt || details.startedAt || message.timestamp;
   const endedAt = running ? now : message.completedAt || details.endedAt || message.timestamp || now;
   const duration = !running ? formatDurationMs(message.durationMs) || formatDuration(startedAt, endedAt) : formatDuration(startedAt, endedAt);
-  const headline = failed ? '处理失败' : running ? '处理中' : '已处理';
+  const headline = failed ? t('activity.failed') : running ? t('activity.processing') : t('activity.processed');
 
   useEffect(() => {
     setOpen(running);
@@ -4013,22 +4937,22 @@ function ActivityMessage({ message, now = Date.now() }) {
           <ChevronDown className={`activity-chevron ${open ? 'is-open' : ''}`} size={15} />
         </button>
         {open && (timeline.length || fileSummary) ? (
-          <div className="activity-timeline" aria-label="任务进度">
+          <div className="activity-timeline" aria-label={t('activity.progress')}>
             {timeline.map((item) =>
               item.type === 'text' ? (
                 <MarkdownContent
                   key={item.id}
                   className="message-content activity-markdown activity-text"
-                  text={item.text}
+	                  text={ui(item.text)}
                 />
               ) : item.type === 'live' ? (
                 <div key={item.id} className={`activity-live is-${item.liveType || 'step'} ${item.status === 'running' ? 'is-running' : ''}`}>
                   <span className="activity-live-dot" />
-                  <span>{item.text}</span>
+	                  <span>{ui(item.text)}</span>
                 </div>
               ) : item.type === 'divider' ? (
                 <div key={item.id} className="activity-divider">
-                  <span>{item.text}</span>
+	                  <span>{ui(item.text)}</span>
                 </div>
               ) : item.metaType === 'subagent' ? (
                 <SubagentActivityBlock key={item.id} item={item} />
@@ -4036,7 +4960,7 @@ function ActivityMessage({ message, now = Date.now() }) {
                 <details key={item.id} className={`activity-meta ${item.items.some((step) => step.status === 'running' || step.status === 'queued') ? 'is-running' : ''}`}>
                   <summary className="activity-meta-summary">
                     {activityMetaIcon(item)}
-                    <span>{item.title}</span>
+	                    <span>{ui(item.title)}</span>
                   </summary>
                   <div className="activity-meta-body">
                     {item.items.filter((step) => activityDetailText(step)).map((step) => (
@@ -4048,7 +4972,7 @@ function ActivityMessage({ message, now = Date.now() }) {
                 <div key={item.id} className={`activity-meta ${item.items.some((step) => step.status === 'running' || step.status === 'queued') ? 'is-running' : ''}`}>
                   <div className="activity-meta-summary">
                     {activityMetaIcon(item)}
-                    <span>{item.title}</span>
+	                    <span>{ui(item.title)}</span>
                   </div>
                 </div>
               )
@@ -4062,6 +4986,7 @@ function ActivityMessage({ message, now = Date.now() }) {
 }
 
 function ActivityStepDetail({ step }) {
+  const { t, ui } = useI18n();
   const detail = activityDetailText(step);
   const isCommand = step.type === 'command' || Boolean(step.command);
   if (isCommand) {
@@ -4069,15 +4994,15 @@ function ActivityStepDetail({ step }) {
     const output = step.output || step.error || '';
     const failed = step.status === 'failed';
     const running = step.status === 'running';
-    const title = `${failed ? '本地任务失败' : running ? '正在处理本地任务' : '本地任务已处理'} ${conciseActivityDetail(command, 110)}`;
+    const title = `${failed ? t('activity.localFailed') : running ? t('activity.localRunning') : t('activity.localDone')} ${conciseActivityDetail(command, 110)}`;
     const shellText = [`$ ${command}`, output].filter(Boolean).join('\n\n');
     const statusText = failed && step.exitCode !== undefined && step.exitCode !== null
-      ? `退出码 ${step.exitCode}`
+      ? t('activity.exitCode', { code: step.exitCode })
       : failed
-        ? '失败'
+        ? t('common.failed')
         : running
-          ? '运行中'
-          : '成功';
+          ? t('common.running')
+          : t('common.success');
     return (
       <details className={`activity-command-detail ${failed ? 'is-failed' : ''}`} open={failed}>
         <summary>
@@ -4096,32 +5021,33 @@ function ActivityStepDetail({ step }) {
     <div className="activity-meta-line">
       <MarkdownContent
         className="message-content activity-markdown activity-meta-label"
-        text={step.label}
+        text={ui(step.label)}
       />
       <MarkdownContent
         className="message-content activity-markdown activity-meta-detail"
-        text={detail}
+        text={ui(detail)}
       />
     </div>
   );
 }
 
 function SubagentActivityBlock({ item }) {
+  const { t, ui } = useI18n();
   const agents = item.items.flatMap((step) => (Array.isArray(step.subAgents) ? step.subAgents : []));
-  const title = item.items[0]?.label || item.title || `${agents.length || 1} 个后台智能体（使用 @ 标记智能体）`;
+  const title = item.items[0]?.label || item.title || t('activity.subagentDefault', { count: agents.length || 1 });
   return (
     <details className="activity-meta activity-subagents">
       <summary className="activity-meta-summary">
         <Bot size={13} />
-        <span>{title}</span>
+        <span>{ui(title)}</span>
       </summary>
       <div className="activity-subagent-list">
         {agents.length ? agents.map((agent) => (
           <div key={agent.threadId || `${agent.nickname}-${agent.role}`} className="activity-subagent-row">
             <span>
-              <strong>{agent.nickname || agent.threadId || '子代理'}</strong>
+              <strong>{agent.nickname || agent.threadId || t('activity.subagent')}</strong>
               {agent.role ? <small>({agent.role})</small> : null}
-              <em>{agent.statusText || '打开'}</em>
+              <em>{ui(agent.statusText || t('activity.open'))}</em>
             </span>
           </div>
         )) : (
@@ -4651,10 +5577,11 @@ function ActivityDiffView({ diffs }) {
 }
 
 function ActivityFileSummary({ summary }) {
+  const { t } = useI18n();
   return (
     <div className="activity-file-summary">
       <div className="activity-file-summary-head">
-        <span>{summary.files.length} 个文件已更改</span>
+        <span>{t('activity.filesChanged', { count: summary.files.length })}</span>
         {summary.additions ? <strong className="is-added">+{summary.additions}</strong> : null}
         {summary.deletions ? <strong className="is-deleted">-{summary.deletions}</strong> : null}
       </div>
@@ -4757,6 +5684,7 @@ function extractFileRefs(value) {
 }
 
 function GeneratedImage({ part, onPreviewImage, compact = false }) {
+  const { t } = useI18n();
   const [loadState, setLoadState] = useState('loading');
   const [retryKey, setRetryKey] = useState(0);
   const resolved = useResolvedImageSource(part.url, retryKey);
@@ -4777,7 +5705,7 @@ function GeneratedImage({ part, onPreviewImage, compact = false }) {
       type="button"
       className={`message-image-link ${compact ? 'is-thumbnail' : ''} ${loadState === 'failed' ? 'is-failed' : ''}`}
       onClick={() => (loadState === 'failed' ? setRetryKey(Date.now()) : onPreviewImage?.(part))}
-      aria-label="预览图片"
+      aria-label={t('image.preview')}
     >
       {src ? (
         <img
@@ -4792,8 +5720,8 @@ function GeneratedImage({ part, onPreviewImage, compact = false }) {
       ) : null}
       {loadState === 'failed' ? (
         <span className="image-error">
-          图片加载失败
-          <span onClick={retry}>重试</span>
+          {t('image.loadFailed')}
+          <span onClick={retry}>{t('image.retry')}</span>
         </span>
       ) : null}
     </button>
@@ -4801,11 +5729,12 @@ function GeneratedImage({ part, onPreviewImage, compact = false }) {
 }
 
 function UserImageStrip({ images, onPreviewImage }) {
+  const { t } = useI18n();
   if (!images?.length) {
     return null;
   }
   return (
-    <div className="message-image-strip" aria-label="图片附件">
+    <div className="message-image-strip" aria-label={t('image.attachments')}>
       {images.map((image, index) => (
         <GeneratedImage
           key={`${image.url}-${index}`}
@@ -4819,6 +5748,7 @@ function UserImageStrip({ images, onPreviewImage }) {
 }
 
 function ImagePreviewModal({ image, onClose }) {
+  const { t } = useI18n();
   const [loadState, setLoadState] = useState('loading');
   const [retryKey, setRetryKey] = useState(0);
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
@@ -4965,7 +5895,7 @@ function ImagePreviewModal({ image, onClose }) {
   return (
     <div className="image-lightbox" role="dialog" aria-modal="true" onClick={onClose}>
       <div className="lightbox-top">
-        <button type="button" className="lightbox-close" onClick={onClose} aria-label="关闭图片预览">
+        <button type="button" className="lightbox-close" onClick={onClose} aria-label={t('image.preview')}>
           <X size={22} />
         </button>
       </div>
@@ -4985,7 +5915,7 @@ function ImagePreviewModal({ image, onClose }) {
           <img
             ref={imageRef}
             src={src}
-            alt={image.alt || '生成图片'}
+            alt={image.alt || t('image.generated')}
             style={{
               transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
               transition: isGesturing ? 'none' : undefined
@@ -4997,13 +5927,13 @@ function ImagePreviewModal({ image, onClose }) {
       </div>
       {loadState !== 'failed' ? (
         <div className="lightbox-zoom-controls" onClick={(event) => event.stopPropagation()}>
-          <button type="button" onClick={zoomOut} aria-label="缩小图片" disabled={transform.scale <= 1}>
+          <button type="button" onClick={zoomOut} aria-label={t('image.zoomOut')} disabled={transform.scale <= 1}>
             <Minus size={17} />
           </button>
-          <button type="button" onClick={resetZoom} aria-label="重置图片缩放" disabled={transform.scale === 1 && transform.x === 0 && transform.y === 0}>
+          <button type="button" onClick={resetZoom} aria-label={t('image.resetZoom')} disabled={transform.scale === 1 && transform.x === 0 && transform.y === 0}>
             {Math.round(transform.scale * 100)}%
           </button>
-          <button type="button" onClick={zoomIn} aria-label="放大图片" disabled={transform.scale >= 5}>
+          <button type="button" onClick={zoomIn} aria-label={t('image.zoomIn')} disabled={transform.scale >= 5}>
             <Plus size={17} />
           </button>
         </div>
@@ -5018,7 +5948,7 @@ function ImagePreviewModal({ image, onClose }) {
             }}
           >
             <RefreshCw size={16} />
-            重新加载
+            {t('image.reload')}
           </button>
         </div>
       ) : null}
@@ -5027,6 +5957,7 @@ function ImagePreviewModal({ image, onClose }) {
 }
 
 function MarkdownContent({ text, onPreviewImage, className = 'message-content' }) {
+  const { t } = useI18n();
   const value = String(text || '');
 
   return (
@@ -5051,7 +5982,7 @@ function MarkdownContent({ text, onPreviewImage, className = 'message-content' }
             if (!src) {
               return null;
             }
-            return <GeneratedImage part={{ type: 'image', url: src, alt: alt || '图片' }} onPreviewImage={onPreviewImage} />;
+            return <GeneratedImage part={{ type: 'image', url: src, alt: alt || t('image.generated') }} onPreviewImage={onPreviewImage} />;
           },
           table({ node, children, ...props }) {
             return (
@@ -5101,6 +6032,7 @@ function stripDisplayDirectives(content) {
 }
 
 function CodeBlock({ language, code }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
 
@@ -5126,7 +6058,7 @@ function CodeBlock({ language, code }) {
     <div className="markdown-code-block">
       <div className="markdown-code-head">
         <span>{language}</span>
-        <button type="button" onClick={handleCopy} aria-label="复制代码">
+        <button type="button" onClick={handleCopy} aria-label={t('message.copyCode')}>
           {copied ? <Check size={14} /> : <Copy size={14} />}
         </button>
       </div>
@@ -5407,6 +6339,7 @@ function parseDiffSummary(output) {
 }
 
 function DiffSummaryBlock({ summary }) {
+  const { t } = useI18n();
   const headerTotals = String(summary.header || '').match(/\+(\d+)\s+-(\d+)/);
   const fileAdditions = summary.files?.reduce((total, file) => total + Math.max(0, Number(file.additions) || 0), 0) || 0;
   const fileDeletions = summary.files?.reduce((total, file) => total + Math.max(0, Number(file.deletions) || 0), 0) || 0;
@@ -5415,7 +6348,7 @@ function DiffSummaryBlock({ summary }) {
   return (
     <div className="diff-card">
       <div className="diff-card-title">
-        <strong>{summary.header || `${summary.files?.length || 0} files changed`}</strong>
+        <strong>{summary.header || t('activity.filesChanged', { count: summary.files?.length || 0 })}</strong>
         <span className="diff-add">+{additions}</span>
         <span className="diff-del">-{deletions}</span>
       </div>
@@ -5675,6 +6608,7 @@ function renderMarkdownBlocks(content, onPreviewImage) {
 }
 
 function ChatMessage({ message, now, onPreviewImage, onDeleteMessage }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
 
@@ -5698,7 +6632,7 @@ function ChatMessage({ message, now, onPreviewImage, onDeleteMessage }) {
   async function handleCopy() {
     const copiedText = await copyTextToClipboard(message.content);
     if (!copiedText) {
-      window.alert('复制失败');
+      window.alert(t('message.copyFailed'));
       return;
     }
     setCopied(true);
@@ -5719,14 +6653,14 @@ function ChatMessage({ message, now, onPreviewImage, onDeleteMessage }) {
           </div>
         ) : null}
         {canAct ? (
-          <div className="message-actions" aria-label="消息操作">
+          <div className="message-actions" aria-label={t('message.actions')}>
             <button type="button" className="message-action" onClick={handleCopy}>
               {copied ? <Check size={13} /> : <Copy size={13} />}
-              <span>{copied ? '已复制' : '复制'}</span>
+              <span>{copied ? t('common.copied') : t('common.copy')}</span>
             </button>
             <button type="button" className="message-action is-delete" onClick={() => onDeleteMessage?.(message)}>
               <Trash2 size={13} />
-              <span>删除</span>
+              <span>{t('common.delete')}</span>
             </button>
           </div>
         ) : null}
@@ -5736,6 +6670,7 @@ function ChatMessage({ message, now, onPreviewImage, onDeleteMessage }) {
 }
 
 function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onDeleteMessage }) {
+  const { t } = useI18n();
   const paneRef = useRef(null);
   const contentRef = useRef(null);
   const bottomPinnedRef = useRef(true);
@@ -5813,8 +6748,8 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
         <div className="empty-orbit">
           <ShieldCheck size={30} />
         </div>
-        <h2>{selectedSession ? selectedSession.title : '新对话'}</h2>
-        <p>问 Codex 任何事。</p>
+        <h2>{selectedSession ? selectedSession.title : t('chat.emptyTitle')}</h2>
+        <p>{t('chat.emptyBody')}</p>
       </section>
     );
   }
@@ -5841,7 +6776,7 @@ function ChatPane({ messages, selectedSession, running, now, onPreviewImage, onD
             bottomPinnedRef.current = true;
             setShowScrollLatest(false);
           }}
-          aria-label="回到最新消息"
+          aria-label={t('message.backToLatest')}
         >
           <ArrowDown size={16} />
         </button>
@@ -5865,6 +6800,7 @@ function VoiceDialogPanel({
   onStop,
   onClose
 }) {
+  const { t } = useI18n();
   if (!open) {
     return null;
   }
@@ -5880,13 +6816,13 @@ function VoiceDialogPanel({
 
   return (
     <div className="voice-dialog-backdrop">
-      <section className="voice-dialog-panel" role="dialog" aria-modal="true" aria-label="语音对话">
+      <section className="voice-dialog-panel" role="dialog" aria-modal="true" aria-label={t('voice.title')}>
         <div className="voice-dialog-header">
           <span>
             <Headphones size={17} />
-            语音对话
+            {t('voice.title')}
           </span>
-          <button type="button" onClick={onClose} aria-label="关闭语音对话">
+          <button type="button" onClick={onClose} aria-label={t('voice.close')}>
             <X size={18} />
           </button>
         </div>
@@ -5894,7 +6830,7 @@ function VoiceDialogPanel({
           {statusIcon}
         </div>
         <div className={`voice-dialog-status ${error ? 'is-error' : ''}`}>
-          {error || voiceDialogStatusLabel(state)}
+          {error || voiceDialogStatusLabel(state, t)}
         </div>
         {transcript ? <p className="voice-dialog-line is-user">{transcript}</p> : null}
         {assistantText ? <p className="voice-dialog-line is-assistant">{assistantText}</p> : null}
@@ -5904,14 +6840,14 @@ function VoiceDialogPanel({
               value={handoffDraft}
               onChange={(event) => onHandoffDraftChange(event.target.value)}
               rows={8}
-              aria-label="交给 Codex 的任务"
+              aria-label={t('voice.taskLabel')}
             />
             <div className="voice-dialog-actions voice-dialog-handoff-actions">
               <button type="button" className="voice-dialog-secondary" onClick={onHandoffContinue}>
-                继续补充
+                {t('voice.continue')}
               </button>
               <button type="button" className="voice-dialog-secondary" onClick={onHandoffCancel}>
-                取消
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -5919,7 +6855,7 @@ function VoiceDialogPanel({
                 onClick={onHandoffSubmit}
                 disabled={!String(handoffDraft || '').trim()}
               >
-                交给 Codex
+                {t('voice.submit')}
               </button>
             </div>
           </div>
@@ -5931,10 +6867,10 @@ function VoiceDialogPanel({
             onClick={listening ? onStop : onStart}
             disabled={busy}
           >
-            {listening ? '停止' : '开始'}
+            {listening ? t('voice.stop') : t('voice.start')}
           </button>
           <button type="button" className="voice-dialog-secondary" onClick={onClose}>
-            结束
+            {t('voice.end')}
           </button>
           </div>
         )}
@@ -5944,6 +6880,7 @@ function VoiceDialogPanel({
 }
 
 function ContextStatusDetails({ contextStatus }) {
+  const { t } = useI18n();
   const context = normalizeContextStatus(contextStatus);
   const usedPercent = numberOrNull(context.percent);
   const remainingPercent = usedPercent === null ? null : Math.max(0, Math.round((100 - usedPercent) * 10) / 10);
@@ -5951,19 +6888,19 @@ function ContextStatusDetails({ contextStatus }) {
   const contextWindow = context.contextWindow;
   const compact = context.autoCompact || {};
   const compactText = compact.detected
-    ? 'Codex 已自动压缩背景信息'
-    : 'Codex 自动压缩其背景信息';
+    ? t('context.compacted')
+    : t('context.autoCompact');
 
   return (
     <>
-      <div className="context-popover-title">背景信息窗口：</div>
+      <div className="context-popover-title">{t('context.title')}</div>
       <div>
         {usedPercent !== null && remainingPercent !== null
-          ? `${usedPercent}% 已用（剩余 ${remainingPercent}%）`
-          : '正在同步背景信息窗口'}
+          ? t('context.used', { used: usedPercent, remaining: remainingPercent })
+          : t('context.syncing')}
       </div>
       <div>
-        已用 {formatTokenCount(inputTokens)} 标记，共 {formatTokenCount(contextWindow)}
+        {t('context.tokens', { input: formatTokenCount(inputTokens), total: formatTokenCount(contextWindow) })}
       </div>
       <div>{compactText}</div>
     </>
@@ -5971,6 +6908,7 @@ function ContextStatusDetails({ contextStatus }) {
 }
 
 function ContextStatusButton({ contextStatus, open, onToggle }) {
+  const { t } = useI18n();
   const context = normalizeContextStatus(contextStatus);
   const usedPercent = numberOrNull(context.percent);
   const inputTokens = context.inputTokens;
@@ -5984,7 +6922,7 @@ function ContextStatusButton({ contextStatus, open, onToggle }) {
         type="button"
         className={`context-status-button ${compact.detected ? 'is-compacted' : ''} ${hasWindow ? 'has-window' : ''}`}
         onClick={onToggle}
-        aria-label="查看背景信息窗口"
+        aria-label={t('context.view')}
         aria-expanded={open}
       >
         <span className="context-status-dot" aria-hidden="true" />
@@ -5995,6 +6933,7 @@ function ContextStatusButton({ contextStatus, open, onToggle }) {
 }
 
 function ToastStack({ toasts, onDismiss }) {
+  const { t, ui } = useI18n();
   if (!toasts.length) {
     return null;
   }
@@ -6004,10 +6943,10 @@ function ToastStack({ toasts, onDismiss }) {
         <div key={toast.id} className={`toast-item is-${toast.level || 'info'}`}>
           <span className="toast-dot" />
           <span>
-            <strong>{toast.title}</strong>
-            {toast.body ? <small>{toast.body}</small> : null}
+            <strong>{ui(toast.title)}</strong>
+            {toast.body ? <small>{ui(toast.body)}</small> : null}
           </span>
-          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="关闭提醒">
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label={t('common.close')}>
             <X size={14} />
           </button>
         </div>
@@ -6017,6 +6956,7 @@ function ToastStack({ toasts, onDismiss }) {
 }
 
 function ConnectionRecoveryCard({ state, onRetry, onSync, onPair, onStatus }) {
+  const { t, ui } = useI18n();
   if (!state) {
     return null;
   }
@@ -6034,32 +6974,32 @@ function ConnectionRecoveryCard({ state, onRetry, onSync, onPair, onStatus }) {
   }
 
   return (
-    <section className={`connection-recovery-card is-${state.state}`} aria-label="连接恢复">
+    <section className={`connection-recovery-card is-${state.state}`} aria-label={t('connection.recovery')}>
       <span className="connection-recovery-dot" />
       <span className="connection-recovery-main">
-        <strong>{state.title}</strong>
-        <small>{state.detail}</small>
+        <strong>{ui(state.title)}</strong>
+        <small>{ui(state.detail)}</small>
       </span>
       <button type="button" onClick={() => runAction(state.primaryAction)}>
-        {state.primaryLabel}
+        {ui(state.primaryLabel)}
       </button>
       {state.secondaryAction ? (
         <button type="button" onClick={() => runAction(state.secondaryAction)}>
-          {state.secondaryLabel}
+          {ui(state.secondaryLabel)}
         </button>
       ) : null}
     </section>
   );
 }
 
-function composerConnectionStatus(connectionState) {
+function composerConnectionStatus(connectionState, t = DEFAULT_I18N.t) {
   if (connectionState === 'connected') {
-    return { label: 'online', className: 'is-online' };
+    return { label: t('composer.online'), className: 'is-online' };
   }
   if (connectionState === 'connecting') {
-    return { label: 'connecting', className: 'is-connecting' };
+    return { label: t('composer.connecting'), className: 'is-connecting' };
   }
-  return { label: 'offline', className: 'is-offline' };
+  return { label: t('composer.offline'), className: 'is-offline' };
 }
 
 function VoiceWaveIcon() {
@@ -6116,6 +7056,7 @@ function Composer({
   voiceError,
   onVoiceTranscribe
 }) {
+  const { locale, t, ui } = useI18n();
   const composerWrapRef = useRef(null);
   const textareaRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -6129,7 +7070,7 @@ function Composer({
   const hasInput = input.trim().length > 0 || attachments.length > 0 || selectedFileMentions.length > 0;
   const modelList = models?.length ? models : [{ value: selectedModel || 'gpt-5.5', label: selectedModel || 'gpt-5.5' }];
   const selectedModelLabel = modelList.find((model) => model.value === selectedModel)?.label || selectedModel || 'gpt-5.5';
-  const selectedModelTriggerLabel = `${shortModelName(selectedModelLabel)} ${reasoningLabel(selectedReasoningEffort)}`;
+  const selectedModelTriggerLabel = `${shortModelName(selectedModelLabel)} ${reasoningLabel(selectedReasoningEffort, t)}`;
   const displayRunMode = effectiveRunMode || runMode;
   const selectedPermission = PERMISSION_OPTIONS.find((option) => option.value === permissionMode) || PERMISSION_OPTIONS[0];
   const skillList = Array.isArray(skills) ? skills : [];
@@ -6140,7 +7081,7 @@ function Composer({
     [input, cursorPosition]
   );
   const slashMatches = composerToken?.type === 'slash'
-    ? filteredSlashCommands(composerToken.query)
+    ? filteredSlashCommands(composerToken.query, slashCommandsForLocale(locale))
     : [];
   const tokenSkillMatches = composerToken?.type === 'skill'
     ? skillList
@@ -6165,7 +7106,7 @@ function Composer({
   });
   const stopMode = sendState.mode === 'abort';
   const runningInputMode = running && hasInput;
-  const sendLabel = sendState.label;
+  const sendLabel = ui(sendState.label);
   const filteredSkills = skillList.filter((skill) => {
     const query = skillFilter.trim().toLowerCase();
     if (!query) {
@@ -6175,15 +7116,15 @@ function Composer({
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(query));
   });
-  const connection = composerConnectionStatus(connectionState);
+  const connection = composerConnectionStatus(connectionState, t);
   const voiceListening = voiceState === 'listening';
   const voiceProcessing = ['transcribing', 'sending'].includes(voiceState);
   const voiceFailed = voiceState === 'error' && Boolean(voiceError);
   const voiceLabel = voiceListening
-    ? '停止语音转录'
+    ? t('voice.stopTranscribe')
     : voiceProcessing
-      ? '正在处理语音'
-      : '语音转录';
+      ? t('voice.processing')
+      : t('voice.transcribe');
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -6394,11 +7335,11 @@ function Composer({
         <div className="composer-menu attach-menu" style={menuStyle('attach')}>
           <button type="button" onClick={() => imageInputRef.current?.click()}>
             <Image size={17} />
-            相册
+            {t('composer.album')}
           </button>
           <button type="button" onClick={() => fileInputRef.current?.click()}>
             <FileText size={17} />
-            文件
+            {t('composer.file')}
           </button>
         </div>
       ) : null}
@@ -6415,7 +7356,7 @@ function Composer({
               }}
             >
               <PermissionModeIcon value={option.value} size={18} />
-              <span>{option.label}</span>
+              <span>{permissionLabel(option.value, t)}</span>
               {permissionMode === option.value ? <Check className="menu-check" size={17} /> : null}
             </button>
           ))}
@@ -6423,7 +7364,7 @@ function Composer({
       ) : null}
       {openMenu === 'run-mode' && canSelectRunMode ? (
         <div className="composer-menu run-mode-menu" style={menuStyle('run-mode')}>
-          <div className="menu-section-label">Start in</div>
+          <div className="menu-section-label">{t('composer.startIn')}</div>
           {RUN_MODE_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -6435,7 +7376,7 @@ function Composer({
               }}
             >
               <RunModeIcon value={option.value} size={18} />
-              <span>{option.label}</span>
+              <span>{runModeLabel(option.value, t)}</span>
               {runMode === option.value ? <Check className="menu-check" size={17} /> : null}
             </button>
           ))}
@@ -6454,14 +7395,14 @@ function Composer({
                   event.preventDefault();
                 }
               }}
-              placeholder="搜索 skill"
-              aria-label="搜索 skill"
+              placeholder={t('composer.searchSkill')}
+              aria-label={t('composer.searchSkill')}
             />
           </div>
           {selectedSkills.length ? (
             <button type="button" className="skill-clear-button" onClick={onClearSkills}>
               <span className="menu-spacer" />
-              <span>不指定 skill</span>
+              <span>{t('composer.noSkill')}</span>
             </button>
           ) : null}
           {filteredSkills.length ? (
@@ -6483,13 +7424,13 @@ function Composer({
               );
             })
           ) : (
-            <div className="menu-empty">{skillList.length ? '没有匹配的 skill' : 'skill 列表还没加载'}</div>
+            <div className="menu-empty">{skillList.length ? t('composer.noSkillMatch') : t('composer.skillsNotLoaded')}</div>
           )}
         </div>
       ) : null}
       {openMenu === 'model' ? (
         <div className="composer-menu model-menu" style={menuStyle('model')}>
-          <div className="menu-section-label">Model</div>
+          <div className="menu-section-label">{t('composer.model')}</div>
           {modelList.map((model) => (
             <button
               key={model.value}
@@ -6506,7 +7447,7 @@ function Composer({
             </button>
           ))}
           <div className="menu-divider" />
-          <div className="menu-section-label">Reasoning</div>
+          <div className="menu-section-label">{t('composer.reasoning')}</div>
           {REASONING_OPTIONS.map((option) => (
             <button
               key={option.value}
@@ -6518,7 +7459,7 @@ function Composer({
               }}
             >
               <MoreHorizontal size={17} />
-              <span>{option.label}</span>
+              <span>{reasoningLabel(option.value, t)}</span>
               {selectedReasoningEffort === option.value ? <Check className="menu-check" size={17} /> : null}
             </button>
           ))}
@@ -6551,11 +7492,11 @@ function Composer({
                   {skill.description ? <small>{skill.description}</small> : null}
                 </span>
               </button>
-            )) : <div className="menu-empty">{skillList.length ? '没有匹配的 skill' : 'skill 列表还没加载'}</div>
+            )) : <div className="menu-empty">{skillList.length ? t('composer.noSkillMatch') : t('composer.skillsNotLoaded')}</div>
           ) : null}
           {composerToken.type === 'file' ? (
             fileSearch.loading ? (
-              <div className="menu-empty"><Loader2 className="spin" size={15} /> 正在搜索文件</div>
+              <div className="menu-empty"><Loader2 className="spin" size={15} /> {t('composer.searchingFiles')}</div>
             ) : fileSearch.results.length ? fileSearch.results.map((file) => (
               <button key={file.path} type="button" onClick={() => selectTokenFile(file)}>
                 <FileText size={16} />
@@ -6564,24 +7505,24 @@ function Composer({
                   <small>{file.relativePath}</small>
                 </span>
               </button>
-            )) : <div className="menu-empty">没有匹配的文件</div>
+            )) : <div className="menu-empty">{t('composer.noFileMatch')}</div>
           ) : null}
         </div>
       ) : null}
       {queueDrafts?.length ? (
-        <div className="queued-drafts-panel" aria-label="排队消息">
+        <div className="queued-drafts-panel" aria-label={t('composer.queue')}>
           {queueDrafts.map((draft) => (
             <div key={draft.id} className="queued-draft-row">
               <MessageSquarePlus size={15} />
               <button type="button" className="queued-draft-text" onClick={() => onRestoreQueueDraft(draft.id)}>
-                <strong>{draft.text || '请查看附件。'}</strong>
-                <small>{draft.selectedSkills?.length ? `${draft.selectedSkills.length} skills` : '排队中'}</small>
+                <strong>{draft.text || t('composer.checkAttachments')}</strong>
+                <small>{draft.selectedSkills?.length ? t('composer.selectedSkillCount', { count: draft.selectedSkills.length }) : t('composer.queued')}</small>
               </button>
               <div className="queued-draft-actions">
-                <button type="button" onClick={() => onSteerQueueDraft(draft.id)} aria-label="立即发送到当前任务">
+                <button type="button" onClick={() => onSteerQueueDraft(draft.id)} aria-label={t('composer.sendNow')}>
                   <MessageSquare size={14} />
                 </button>
-                <button type="button" onClick={() => onRemoveQueueDraft(draft.id)} aria-label="删除排队消息">
+                <button type="button" onClick={() => onRemoveQueueDraft(draft.id)} aria-label={t('composer.deleteQueued')}>
                   <Trash2 size={14} />
                 </button>
               </div>
@@ -6593,8 +7534,8 @@ function Composer({
         <div className="composer-run-status" role="status" aria-live="polite">
           <span className="composer-run-dot" />
           <span className="composer-run-main">
-            <strong>Codex 正在处理</strong>
-            <small>{runStatus.label}</small>
+            <strong>{t('composer.codexProcessing')}</strong>
+            <small>{ui(runStatus.label)}</small>
           </span>
           {runStatus.duration ? <span className="composer-run-time">{runStatus.duration}</span> : null}
         </div>
@@ -6603,8 +7544,8 @@ function Composer({
         <div className="composer-run-status is-warning" role="status" aria-live="polite">
           <span className="composer-run-dot" />
           <span className="composer-run-main">
-            <strong>桌面端 Codex 未连接</strong>
-            <small>{desktopBridge?.reason || '打开桌面端 Codex，或配置同源 app-server control socket 后再发送'}</small>
+            <strong>{t('composer.desktopDisconnected')}</strong>
+            <small>{desktopBridge?.reason || t('composer.desktopDisconnectedHint')}</small>
           </span>
         </div>
       )}
@@ -6612,8 +7553,8 @@ function Composer({
         <div className="composer-run-status is-warning" role="status" aria-live="polite">
           <span className="composer-run-dot" />
           <span className="composer-run-main">
-            <strong>只能继续桌面端已有对话</strong>
-            <small>{desktopBridge?.capabilities?.createThreadReason || '当前桌面端还没有开放从手机新建同源对话的入口'}</small>
+            <strong>{t('composer.createUnavailable')}</strong>
+            <small>{desktopBridge?.capabilities?.createThreadReason || t('composer.createUnavailableHint')}</small>
           </span>
         </div>
       )}
@@ -6632,8 +7573,8 @@ function Composer({
           >
             <MessageSquare size={16} />
             <span>
-              <strong>发送到当前任务</strong>
-              <small>{sendState.canSteer ? '直接补充给桌面端正在执行的任务' : '当前任务暂时不能接收补充消息'}</small>
+              <strong>{t('composer.steer')}</strong>
+              <small>{sendState.canSteer ? t('composer.steerHint') : t('composer.steerUnavailable')}</small>
             </span>
           </button>
           <button
@@ -6645,8 +7586,8 @@ function Composer({
           >
             <MessageSquarePlus size={16} />
             <span>
-              <strong>加入队列</strong>
-              <small>当前任务结束后自动发送</small>
+              <strong>{t('composer.queueMessage')}</strong>
+              <small>{t('composer.queueHint')}</small>
             </span>
           </button>
           <button
@@ -6659,8 +7600,8 @@ function Composer({
           >
             <Square size={15} />
             <span>
-              <strong>中止并发送</strong>
-              <small>停下当前任务，用这条消息重新引导</small>
+              <strong>{t('composer.interrupt')}</strong>
+              <small>{t('composer.interruptHint')}</small>
             </span>
           </button>
         </div>
@@ -6677,7 +7618,7 @@ function Composer({
                 <Paperclip size={14} />
                 <span>{attachment.name}</span>
                 <small>{formatBytes(attachment.size)}</small>
-                <button type="button" onClick={() => onRemoveAttachment(attachment.id)} aria-label="移除附件">
+                <button type="button" onClick={() => onRemoveAttachment(attachment.id)} aria-label={t('composer.removeAttachment')}>
                   <Trash2 size={13} />
                 </button>
               </span>
@@ -6686,7 +7627,7 @@ function Composer({
               <span key={file.path} className="attachment-chip file-mention-chip">
                 <FileText size={14} />
                 <span>{file.relativePath || file.name}</span>
-                <button type="button" onClick={() => onRemoveFileMention(file.path)} aria-label="移除文件引用">
+                <button type="button" onClick={() => onRemoveFileMention(file.path)} aria-label={t('composer.removeFileMention')}>
                   <Trash2 size={13} />
                 </button>
               </span>
@@ -6707,15 +7648,15 @@ function Composer({
             setOpenMenu(null);
             setMenuAnchor(null);
           }}
-          placeholder="给 Codex 发送消息"
+          placeholder={t('composer.placeholder')}
         />
         <div className="composer-controls">
           <div className="control-left">
             <button
               type="button"
               className="composer-icon-control"
-              aria-label="添加附件"
-              title="添加附件"
+              aria-label={t('composer.addAttachment')}
+              title={t('composer.addAttachment')}
               onClick={(event) => toggleMenu('attach', event)}
               disabled={uploading}
             >
@@ -6725,8 +7666,8 @@ function Composer({
               type="button"
               className={`composer-icon-control ${openMenu === 'permission' ? 'is-active' : ''} ${selectedPermission?.danger ? 'is-danger' : ''}`}
               onClick={(event) => toggleMenu('permission', event)}
-              aria-label={`Permission mode: ${permissionLabel(permissionMode)}`}
-              title={permissionLabel(permissionMode)}
+              aria-label={t('composer.permissionMode', { mode: permissionLabel(permissionMode, t) })}
+              title={permissionLabel(permissionMode, t)}
             >
               <PermissionModeIcon value={permissionMode} size={18} />
             </button>
@@ -6736,8 +7677,8 @@ function Composer({
                 className={`composer-icon-control ${openMenu === 'run-mode' ? 'is-active' : ''}`}
                 onClick={(event) => toggleMenu('run-mode', event)}
                 disabled={!selectedProject}
-                aria-label={`启动模式：${runModeLabel(displayRunMode)}`}
-                title={runModeLabel(displayRunMode)}
+                aria-label={t('composer.runMode', { mode: runModeLabel(displayRunMode, t) })}
+                title={runModeLabel(displayRunMode, t)}
               >
                 <RunModeIcon value={displayRunMode} size={18} />
               </button>
@@ -6748,7 +7689,7 @@ function Composer({
               type="button"
               className={`composer-model-control ${openMenu === 'model' ? 'is-active' : ''}`}
               onClick={(event) => toggleMenu('model', event)}
-              aria-label={`模型：${selectedModelLabel}，思考深度：${reasoningLabel(selectedReasoningEffort)}`}
+              aria-label={t('composer.modelMode', { model: selectedModelLabel, reasoning: reasoningLabel(selectedReasoningEffort, t) })}
               title={selectedModelTriggerLabel}
             >
               <span>{selectedModelTriggerLabel}</span>
@@ -6831,9 +7772,10 @@ export default function App() {
   );
   const [runningById, setRunningById] = useState({});
   const [threadRuntimeById, setThreadRuntimeById] = useState({});
-  const [theme, setTheme] = useState(() =>
-    localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'
-  );
+  const [languageSetting, setLanguageSetting] = useState(() => storedOption(LANGUAGE_KEY, LOCALE_OPTIONS, 'system'));
+  const [themeSetting, setThemeSetting] = useState(() => storedOption(THEME_KEY, THEME_OPTIONS, 'system'));
+  const [systemTheme, setSystemTheme] = useState(() => resolvedThemeFromSystem());
+  const [systemLocale, setSystemLocale] = useState(() => localeFromNavigator());
   const [syncing, setSyncing] = useState(false);
   const [connectionState, setConnectionState] = useState(() => (getToken() ? 'connecting' : 'disconnected'));
   const [sessionModal, setSessionModal] = useState(null);
@@ -6864,6 +7806,10 @@ export default function App() {
   const voiceDialogAudioUrlRef = useRef('');
   const voiceDialogAwaitingTurnRef = useRef(null);
   const voiceDialogLastSpokenRef = useRef('');
+  const locale = languageSetting === 'system' ? systemLocale : languageSetting;
+  const theme = themeSetting === 'system' ? systemTheme : themeSetting;
+  const i18n = useMemo(() => makeI18n(locale), [locale]);
+  const { t } = i18n;
   const voiceDialogAutoListenRef = useRef(false);
   const voiceDialogOpenRef = useRef(false);
   const voiceDialogStateRef = useRef('idle');
@@ -7280,11 +8226,11 @@ export default function App() {
     const socket = voiceRealtimeSocketRef.current;
     const transcripts = voiceDialogIdeaBufferRef.current.filter(Boolean);
     if (!transcripts.length) {
-      setVoiceDialogErrorBriefly('还没有可整理的语音内容');
+      setVoiceDialogErrorBriefly(t('voice.noContent'));
       return;
     }
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setVoiceDialogErrorBriefly('实时语音连接不可用');
+      setVoiceDialogErrorBriefly(t('voice.realtimeUnavailable'));
       return;
     }
     stopRealtimePlayback();
@@ -7305,14 +8251,14 @@ export default function App() {
 
   async function startRealtimeMicrophone(socket) {
     if (!window.isSecureContext) {
-      throw new Error('请使用 HTTPS 地址');
+      throw new Error(t('voice.httpsRequired'));
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('当前浏览器不支持录音');
+      throw new Error(t('voice.recordUnsupported'));
     }
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextCtor) {
-      throw new Error('当前浏览器不支持实时音频');
+      throw new Error(t('voice.realtimeUnsupported'));
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -7456,7 +8402,7 @@ export default function App() {
           setVoiceDialogMode('listening');
         })
         .catch((error) => {
-          setVoiceDialogErrorBriefly(error.message || '实时语音启动失败');
+          setVoiceDialogErrorBriefly(error.message || t('voice.realtimeStartFailed'));
           stopRealtimeVoiceDialog({ keepPanel: true });
         });
       return;
@@ -7483,18 +8429,18 @@ export default function App() {
     if (payload.type === 'voice.handoff.summary_done') {
       const draft = String(payload.message || payload.rawText || '').trim();
       if (!draft) {
-        setVoiceDialogErrorBriefly('没有整理出可交给 Codex 的任务');
+        setVoiceDialogErrorBriefly(t('voice.noHandoffTask'));
         return;
       }
       setVoiceDialogHandoffDraftValue(draft);
       setVoiceDialogAssistantText('');
-      setVoiceDialogError(payload.parsed ? '' : '整理结果不是标准 JSON，已作为草稿保留');
+      setVoiceDialogError(payload.parsed ? '' : t('voice.invalidJson'));
       setVoiceDialogMode('handoff');
       return;
     }
     if (payload.type === 'voice.handoff.summary_error') {
       voiceRealtimeSuppressAssistantAudioRef.current = false;
-      setVoiceDialogErrorBriefly(payload.error || '语音任务整理失败');
+      setVoiceDialogErrorBriefly(payload.error || t('voice.summarizeFailed'));
       return;
     }
     if (payload.type === 'response.created') {
@@ -7513,7 +8459,7 @@ export default function App() {
         setVoiceDialogMode('listening');
         return;
       }
-      const message = payload.error?.message || payload.error || '实时语音连接失败';
+      const message = payload.error?.message || payload.error || t('voice.realtimeFailed');
       voiceRealtimeAwaitingResponseRef.current = false;
       setVoiceDialogErrorBriefly(message);
       stopRealtimeVoiceDialog({ keepPanel: true });
@@ -7583,7 +8529,7 @@ export default function App() {
 
   function startRealtimeVoiceDialog() {
     if (!status.voiceRealtime?.configured) {
-      setVoiceDialogErrorBriefly('未配置实时语音');
+      setVoiceDialogErrorBriefly(t('voice.realtimeNotConfigured'));
       return;
     }
     if (voiceRealtimeSocketRef.current) {
@@ -7611,7 +8557,7 @@ export default function App() {
       }
     };
     socket.onerror = () => {
-      setVoiceDialogErrorBriefly('实时语音连接失败');
+      setVoiceDialogErrorBriefly(t('voice.realtimeFailed'));
       stopRealtimeVoiceDialog({ keepPanel: true });
     };
     socket.onclose = () => {
@@ -7636,10 +8582,10 @@ export default function App() {
 
   async function transcribeVoiceDialogBlob(blob) {
     if (!blob?.size) {
-      throw new Error('没有录到声音');
+      throw new Error(t('voice.noAudio'));
     }
     if (blob.size > VOICE_MAX_UPLOAD_BYTES) {
-      throw new Error('录音超过 10MB');
+      throw new Error(t('voice.tooLarge'));
     }
 
     const formData = new FormData();
@@ -7651,7 +8597,7 @@ export default function App() {
     });
     const text = String(result.text || '').trim();
     if (!text) {
-      throw new Error('没有识别到文字');
+      throw new Error(t('toast.voiceNoText'));
     }
     return text;
   }
@@ -7669,7 +8615,7 @@ export default function App() {
         voiceDialogAudioUnlockedRef.current = true;
         resolve();
       };
-      audio.onerror = () => reject(new Error('播放失败'));
+      audio.onerror = () => reject(new Error(t('voice.playFailed')));
       audio.load?.();
       audio.play().catch(reject);
     });
@@ -7678,7 +8624,7 @@ export default function App() {
   function speakWithBrowser(text) {
     return new Promise((resolve, reject) => {
       if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
-        reject(new Error('当前浏览器不支持朗读'));
+        reject(new Error(t('voice.speechUnsupported')));
         return;
       }
       const utterance = new SpeechSynthesisUtterance(text);
@@ -7686,7 +8632,7 @@ export default function App() {
       utterance.rate = 1;
       utterance.pitch = 1;
       utterance.onend = resolve;
-      utterance.onerror = () => reject(new Error('朗读失败'));
+      utterance.onerror = () => reject(new Error(t('voice.speechFailed')));
       window.speechSynthesis.cancel();
       window.speechSynthesis.speak(utterance);
     });
@@ -7726,7 +8672,7 @@ export default function App() {
       try {
         await speakWithBrowser(text);
       } catch {
-        setVoiceDialogError(error.message || '朗读失败');
+        setVoiceDialogError(error.message || t('voice.speechFailed'));
       }
     } finally {
       clearVoiceDialogAudio();
@@ -7753,15 +8699,15 @@ export default function App() {
     setVoiceDialogAssistantText('');
 
     if (!selectedProjectRef.current && !selectedProject) {
-      setVoiceDialogErrorBriefly('请先选择项目');
+      setVoiceDialogErrorBriefly(t('toast.selectProject'));
       return;
     }
     if (!window.isSecureContext) {
-      setVoiceDialogErrorBriefly('请使用 HTTPS 地址');
+      setVoiceDialogErrorBriefly(t('voice.httpsRequired'));
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      setVoiceDialogErrorBriefly('当前浏览器不支持录音');
+      setVoiceDialogErrorBriefly(t('voice.recordUnsupported'));
       return;
     }
 
@@ -7785,8 +8731,8 @@ export default function App() {
         voiceDialogRecorderRef.current = null;
         voiceDialogOpenRef.current = false;
         setVoiceDialogOpen(false);
-        showToast({ level: 'error', title: '语音转录失败', body: '录音失败' });
-        setVoiceDialogErrorBriefly('录音失败');
+        showToast({ level: 'error', title: t('toast.voiceFailed'), body: t('toast.voiceRecordFailed') });
+        setVoiceDialogErrorBriefly(t('toast.voiceRecordFailed'));
       };
       recorder.onstop = async () => {
         clearVoiceDialogTimer();
@@ -7820,8 +8766,8 @@ export default function App() {
           voiceDialogAwaitingTurnRef.current = null;
           voiceDialogOpenRef.current = false;
           setVoiceDialogOpen(false);
-          showToast({ level: 'error', title: '语音转录失败', body: error.message || '没有识别到文字' });
-          setVoiceDialogErrorBriefly(error.message || '语音对话失败');
+          showToast({ level: 'error', title: t('toast.voiceFailed'), body: error.message || t('toast.voiceNoText') });
+          setVoiceDialogErrorBriefly(error.message || t('voice.dialogFailed'));
         }
       };
 
@@ -7838,10 +8784,10 @@ export default function App() {
       stopVoiceDialogStream();
       voiceDialogRecorderRef.current = null;
       const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
-      const message = denied ? '麦克风权限被拒绝' : '录音启动失败';
+      const message = denied ? t('voice.microphoneDenied') : t('voice.recordStartFailed');
       voiceDialogOpenRef.current = false;
       setVoiceDialogOpen(false);
-      showToast({ level: 'error', title: '语音转录失败', body: message });
+      showToast({ level: 'error', title: t('toast.voiceFailed'), body: message });
       setVoiceDialogErrorBriefly(message);
     }
   }
@@ -7884,7 +8830,7 @@ export default function App() {
       return;
     }
     if (!selectedProjectRef.current && !selectedProject) {
-      setVoiceDialogError('请先选择项目');
+      setVoiceDialogError(t('toast.selectProject'));
       setVoiceDialogMode('handoff');
       return;
     }
@@ -7896,7 +8842,7 @@ export default function App() {
       setVoiceDialogHandoffDraftValue('');
       closeVoiceDialog();
     } catch (error) {
-      setVoiceDialogError(error.message || '发送给 Codex 失败');
+      setVoiceDialogError(error.message || t('voice.sendFailed'));
       setVoiceDialogMode('handoff');
     }
   }
@@ -8444,9 +9390,31 @@ export default function App() {
   }, [messages, runningById, voiceDialogOpen]);
 
   useEffect(() => {
-    localStorage.setItem(THEME_KEY, theme);
+    localStorage.setItem(THEME_KEY, themeSetting);
     document.documentElement.dataset.theme = theme;
-  }, [theme]);
+  }, [theme, themeSetting]);
+
+  useEffect(() => {
+    localStorage.setItem(LANGUAGE_KEY, languageSetting);
+    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
+  }, [languageSetting, locale]);
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!media) {
+      return undefined;
+    }
+    const syncTheme = () => setSystemTheme(media.matches ? 'dark' : 'light');
+    syncTheme();
+    media.addEventListener?.('change', syncTheme);
+    return () => media.removeEventListener?.('change', syncTheme);
+  }, []);
+
+  useEffect(() => {
+    const syncLocale = () => setSystemLocale(localeFromNavigator());
+    window.addEventListener('languagechange', syncLocale);
+    return () => window.removeEventListener('languagechange', syncLocale);
+  }, []);
 
   useEffect(() => {
     if (selectedReasoningEffort) {
@@ -9007,7 +9975,7 @@ export default function App() {
             upsertStatusMessage(current, {
               ...payload,
               status: 'failed',
-              label: '任务失败',
+          label: t('toast.taskFailed'),
               detail: payload.error
             })
           );
@@ -9016,7 +9984,7 @@ export default function App() {
             upsertStatusMessage(current, {
               ...payload,
               status: 'completed',
-              label: '已中止'
+              label: t('toast.aborted')
             })
           );
         }
@@ -9077,9 +10045,9 @@ export default function App() {
       await apiFetch('/api/sync', { method: 'POST' });
       await loadStatus();
       await loadProjects({ preserveSelection: true });
-      showToast({ level: 'success', title: '同步完成', body: '对话和状态已经刷新。' });
+      showToast({ level: 'success', title: t('toast.syncDone'), body: t('toast.syncDoneBody') });
     } catch (error) {
-      showToast({ level: 'error', title: '同步失败', body: error.message || '无法刷新同步。' });
+      showToast({ level: 'error', title: t('toast.syncFailed'), body: error.message || t('toast.syncFailedBody') });
     } finally {
       setSyncing(false);
     }
@@ -9088,9 +10056,9 @@ export default function App() {
   async function handleRetryConnection() {
     try {
       await loadStatus();
-      showToast({ level: 'success', title: '连接已刷新', body: '已重新读取本机服务状态。' });
+      showToast({ level: 'success', title: t('toast.connectionRefreshed'), body: t('toast.connectionRefreshedBody') });
     } catch (error) {
-      showToast({ level: 'error', title: '连接失败', body: error.message || '本机服务暂时不可达。' });
+      showToast({ level: 'error', title: t('toast.connectionFailed'), body: error.message || t('toast.connectionFailedBody') });
     }
   }
 
@@ -9103,8 +10071,8 @@ export default function App() {
   function handleShowConnectionStatus() {
     showToast({
       level: status.desktopBridge?.connected ? 'info' : 'warning',
-      title: bridgeConnectionLabel(connectionState, status.desktopBridge).label,
-      body: status.desktopBridge?.reason || status.desktopBridge?.mode || 'CodexMobile 状态已读取。'
+      title: bridgeConnectionLabel(connectionState, status.desktopBridge, t).label,
+      body: status.desktopBridge?.reason || status.desktopBridge?.mode || t('toast.statusRead')
     });
   }
 
@@ -9271,7 +10239,7 @@ export default function App() {
       applyLocalTitle();
       await refreshProjectSessions(project);
     } catch (error) {
-      throw new Error(`重命名失败：${error.message}`);
+      throw new Error(t('modal.renameFailed', { message: error.message }));
     }
   }
 
@@ -9313,8 +10281,8 @@ export default function App() {
       const message = String(error.message || '');
       throw new Error(
         message.toLowerCase().includes('running')
-          ? '对话正在运行，稍后再归档。'
-          : `\u5f52\u6863\u5931\u8d25\uff1a${message}`
+          ? t('modal.archiveRunning')
+          : t('modal.archiveFailed', { message })
       );
     }
   }
@@ -9349,7 +10317,7 @@ export default function App() {
     if (!message?.id) {
       return;
     }
-    if (!window.confirm('删除这条消息？')) {
+    if (!window.confirm(t('message.deleteConfirm'))) {
       return;
     }
 
@@ -9378,7 +10346,7 @@ export default function App() {
         next.splice(insertAt, 0, removedMessage);
         return next;
       });
-      window.alert(`删除失败：${error.message}`);
+      window.alert(t('message.deleteFailed', { message: error.message }));
     }
   }
 
@@ -9544,8 +10512,8 @@ export default function App() {
               turnId,
               kind: 'turn',
               status: 'failed',
-              label: '任务失败',
-              detail: turn.error || turn.detail || '任务失败'
+              label: t('toast.taskFailed'),
+              detail: turn.error || turn.detail || t('toast.taskFailed')
             })
           );
           break;
@@ -9558,7 +10526,7 @@ export default function App() {
               turnId,
               kind: 'turn',
               status: 'completed',
-              label: '已中止'
+              label: t('toast.aborted')
             })
           );
           break;
@@ -9625,7 +10593,7 @@ export default function App() {
     const nextToast = {
       id,
       level: toast.level || 'info',
-      title: toast.title || '提醒',
+      title: toast.title || t('toast.notice'),
       body: toast.body || ''
     };
     setToasts((current) => [nextToast, ...current.filter((item) => item.id !== id)].slice(0, 4));
@@ -9679,7 +10647,7 @@ export default function App() {
     if (!pushSupported || !secureContext || !standalone) {
       showToast({
         level: 'warning',
-        title: '通知不可用',
+        title: t('toast.notificationUnavailable'),
         body: notificationEnablementMessage({ supported: pushSupported, secureContext, standalone }),
         durationMs: 7000
       });
@@ -9692,7 +10660,7 @@ export default function App() {
       setNotificationPreferenceEnabled(true);
       showToast({
         level: 'success',
-        title: '完成通知已开启',
+        title: t('toast.notificationsEnabled'),
         body: notificationEnablementMessage({ supported: true, secureContext: true, standalone: true })
       });
     } catch (error) {
@@ -9701,8 +10669,8 @@ export default function App() {
       setNotificationPreferenceEnabled(false);
       showToast({
         level: error.code === 'permission-denied' ? 'warning' : 'error',
-        title: error.code === 'permission-denied' ? '未开启通知' : '通知开启失败',
-        body: error.message || '无法请求 Web Push 通知权限。',
+        title: error.code === 'permission-denied' ? t('toast.notificationDenied') : t('toast.notificationFailed'),
+        body: error.message || t('toast.notificationFailedBody'),
         durationMs: 7000
       });
     }
@@ -9838,12 +10806,12 @@ export default function App() {
     const selectedFileMentions = Array.isArray(fileMentionsForTurn) ? fileMentionsForTurn : [];
     const displayMessage =
       String(message || '').trim() ||
-      (selectedAttachments.length ? '请查看附件。' : (selectedFileMentions.length ? '请查看引用文件。' : ''));
+      (selectedAttachments.length ? t('composer.checkAttachments') : (selectedFileMentions.length ? t('composer.checkFileReferences') : ''));
     if ((!displayMessage && !selectedAttachments.length && !selectedFileMentions.length) || !project) {
       if (restoreTextOnError && displayMessage) {
         restoreVoiceTextToInput(displayMessage);
       }
-      throw new Error(project ? 'message or attachments are required' : '请先选择项目');
+      throw new Error(project ? 'message or attachments are required' : t('toast.selectProject'));
     }
 
     let sessionForTurn = selectedSession;
@@ -9908,7 +10876,7 @@ export default function App() {
           turnId,
           kind: 'reasoning',
           status: 'running',
-          label: '正在思考中',
+          label: t('activity.thinking'),
           timestamp: submittedAt,
           startedAt: submittedAt
         }
@@ -9990,7 +10958,7 @@ export default function App() {
           turnId,
           kind: 'turn',
           status: 'failed',
-          label: '发送失败',
+          label: t('activity.sendFailed'),
           detail: error.message,
           timestamp: new Date().toISOString()
         })
@@ -10044,7 +11012,7 @@ export default function App() {
 
   function handleOpenWorkspace(tab = 'changes') {
     if (!selectedProject) {
-      showToast({ level: 'error', title: '请先选择项目' });
+      showToast({ level: 'error', title: t('toast.selectProject') });
       return;
     }
     setWorkspacePanel({ open: true, tab });
@@ -10052,7 +11020,7 @@ export default function App() {
 
   function handleOpenTerminal() {
     if (!selectedProject) {
-      showToast({ level: 'error', title: '请先选择项目' });
+      showToast({ level: 'error', title: t('toast.selectProject') });
       return;
     }
     setTerminalOpen(true);
@@ -10100,11 +11068,11 @@ export default function App() {
         setStatus((current) => ({ ...current, docs: result.docs }));
       }
       if (!result.verificationUrl) {
-        throw new Error('没有收到飞书授权地址');
+        throw new Error(t('docs.noAuthUrl'));
       }
       window.location.assign(result.verificationUrl);
     } catch (error) {
-      setDocsError(error.message || '飞书连接失败');
+      setDocsError(error.message || t('docs.connectFailed'));
       setDocsBusy(false);
     }
   }
@@ -10119,7 +11087,7 @@ export default function App() {
       await apiFetch('/api/feishu/cli/auth/logout', { method: 'POST' });
       await loadStatus();
     } catch (error) {
-      setDocsError(error.message || '断开飞书失败');
+      setDocsError(error.message || t('docs.disconnectFailed'));
     } finally {
       setDocsBusy(false);
     }
@@ -10134,7 +11102,7 @@ export default function App() {
     try {
       await loadStatus();
     } catch (error) {
-      setDocsError(error.message || '刷新飞书状态失败');
+      setDocsError(error.message || t('docs.refreshFailed'));
     } finally {
       setDocsBusy(false);
     }
@@ -10174,10 +11142,15 @@ export default function App() {
   const showingWelcome = appRoute.type === 'welcome';
 
   if (!authenticated) {
-    return <PairingScreen onPaired={bootstrap} />;
+    return (
+      <I18nContext.Provider value={i18n}>
+        <PairingScreen onPaired={bootstrap} />
+      </I18nContext.Provider>
+    );
   }
 
   return (
+    <I18nContext.Provider value={i18n}>
     <div className={shellClass}>
       <TopBar
         selectedProject={selectedProject}
@@ -10217,8 +11190,10 @@ export default function App() {
           setDocsOpen(true);
           setDrawerOpen(false);
         }}
-        theme={theme}
-        setTheme={setTheme}
+        languageSetting={languageSetting}
+        setLanguageSetting={setLanguageSetting}
+        themeSetting={themeSetting}
+        setThemeSetting={setThemeSetting}
       />
       <DocsPanel
         open={docsOpen}
@@ -10344,5 +11319,6 @@ export default function App() {
       />
       <ImagePreviewModal image={previewImage} onClose={() => setPreviewImage(null)} />
     </div>
+    </I18nContext.Provider>
   );
 }

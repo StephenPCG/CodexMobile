@@ -1412,6 +1412,10 @@ button {
   background: #e8ece7;
 }
 
+.theme-segment.is-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 [data-theme="dark"] .theme-segment {
   background: #171717;
 }
