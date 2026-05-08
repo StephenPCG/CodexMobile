@@ -8,7 +8,7 @@ import { provisionalSessionTitle } from '../shared/session-title.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
-export const GENERATED_ROOT = path.join(ROOT_DIR, '.codexmobile', 'generated');
+export const GENERATED_ROOT = process.env.CODEXMOBILE_GENERATED_ROOT || path.join(ROOT_DIR, '.codexmobile', 'generated');
 
 const DEFAULT_IMAGE_BASE_URL = DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
 const DEFAULT_IMAGE_MODEL = 'gpt-image-2';

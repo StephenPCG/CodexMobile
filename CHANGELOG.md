@@ -7,12 +7,14 @@ All notable changes to CodexMobile are tracked here.
 ### Added
 
 - Added per-project mobile draft creation so a new conversation can choose Local or New worktree before the first send, then start through the headless local Codex path.
+- Added a `codex-mobile` CLI with foreground `start`, macOS launchd service install, and Linux systemd user service install.
+- Added `~/.codex-mobile/config.yaml` loading plus home-directory state, upload, generated image, and log defaults for installed deployments.
+- Added a Homebrew formula template for tap-based installs and updates.
 - Added backend Codex quota caching with startup, scheduled hourly, and manual refresh paths.
 - Added an xterm-based browser Terminal with PTY-backed color output, direct keyboard input, a blinking cursor, paste, and mobile quick keys.
 - Added mobile workspace tools for Changes, Directories, file previews, and diff viewing.
 - Added a browser Terminal panel with multi-tab-safe backend terminal sessions.
 - Added a queue panel for running conversations: queued drafts can be viewed, restored, deleted, or sent immediately as steer input.
-- Added composer shortcuts with `/` commands for status, context compaction, code review, and sub-agent workflows.
 - Added `$skill` autocomplete backed by the existing skills list.
 - Added `@file` search backed by a project-local file search API that ignores generated and dependency directories.
 - Added file mention support for chat sends so selected local paths can be attached as context.
@@ -35,6 +37,7 @@ All notable changes to CodexMobile are tracked here.
 - Moved workspace and Terminal entry points into the top More menu, and made the header show conversation title above project name.
 - Moved Feishu Docs into Settings, simplified the top More menu Git actions to Git Panel, and grouped conversation actions with unified wording.
 - Reworked the drawer quota widget into a compact Rate limits remaining card with cached data, update time, and icon-only refresh.
+- Removed the prompt-only slash menu so `/` remains normal text while `$skill` keeps structured skill selection.
 - Added top More menu actions for renaming and archiving the current conversation.
 - Reworked voice transcription into an inline composer control that records, processes, and appends text without opening a confirmation dialog.
 - Moved server connection status above the composer.
