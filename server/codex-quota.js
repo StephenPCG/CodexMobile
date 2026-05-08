@@ -16,8 +16,11 @@ const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const REQUEST_TIMEOUT_MS = Number(process.env.CODEXMOBILE_QUOTA_REQUEST_TIMEOUT_MS || 8_000);
 const MANAGEMENT_TIMEOUT_MS = Number(process.env.CODEXMOBILE_QUOTA_MANAGEMENT_TIMEOUT_MS || 2_500);
 const STALE_QUOTA_TTL_MS = Number(process.env.CODEXMOBILE_QUOTA_STALE_TTL_MS || 30 * 60_000);
+const QUOTA_REFRESH_INTERVAL_MS = Number(process.env.CODEXMOBILE_QUOTA_REFRESH_INTERVAL_MS || 60 * 60_000);
 const FIXED_PAIRING_CODE_FILE = path.join(process.cwd(), '.codexmobile', 'state', 'pairing-code.txt');
 let lastSuccessfulQuota = null;
+let cachedQuotaResult = null;
+let quotaRefreshPromise = null;
 let cachedQuotaProxyUrl = null;
 let quotaProxyResolved = false;
 
@@ -906,6 +909,72 @@ export async function getCodexQuota() {
   });
 }
 
+function decorateCachedQuotaResult(result, reason) {
+  const now = new Date().toISOString();
+  return {
+    ...result,
+    updatedAt: result?.fetchedAt || now,
+    cacheUpdatedAt: now,
+    cacheReason: reason || 'manual'
+  };
+}
+
+export async function refreshCodexQuotaCache({ reason = 'manual' } = {}) {
+  if (quotaRefreshPromise) {
+    return quotaRefreshPromise;
+  }
+  quotaRefreshPromise = getCodexQuota()
+    .then((result) => {
+      cachedQuotaResult = decorateCachedQuotaResult(result, reason);
+      return cachedQuotaResult;
+    })
+    .catch((error) => {
+      if (!cachedQuotaResult) {
+        throw error;
+      }
+      cachedQuotaResult = {
+        ...cachedQuotaResult,
+        stale: true,
+        staleReason: safeErrorMessage(error),
+        cacheUpdatedAt: new Date().toISOString(),
+        cacheReason: reason || 'manual'
+      };
+      return cachedQuotaResult;
+    })
+    .finally(() => {
+      quotaRefreshPromise = null;
+    });
+  return quotaRefreshPromise;
+}
+
+export async function getCachedCodexQuota({ refresh = false } = {}) {
+  if (refresh || !cachedQuotaResult) {
+    return refreshCodexQuotaCache({ reason: refresh ? 'manual' : 'initial' });
+  }
+  return cachedQuotaResult;
+}
+
+export function startCodexQuotaAutoRefresh({ intervalMs = QUOTA_REFRESH_INTERVAL_MS, onUpdate } = {}) {
+  const refresh = (reason) => {
+    refreshCodexQuotaCache({ reason })
+      .then((result) => {
+        onUpdate?.(result);
+      })
+      .catch((error) => {
+        console.warn(`[quota] Scheduled quota refresh failed: ${safeErrorMessage(error)}`);
+      });
+  };
+  refresh('startup');
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    return () => {};
+  }
+  const timer = setInterval(() => refresh('scheduled'), intervalMs);
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+  return () => clearInterval(timer);
+}
+
 function hasFreshQuota(result) {
   return (result?.accounts || []).some((account) =>
     account?.status === 'ok' && Array.isArray(account.windows) && account.windows.length
@@ -959,7 +1028,10 @@ export const quotaTestHooks = {
   proxyUrlFromScutilOutput,
   safeErrorMessage,
   finalizeQuotaResult,
+  decorateCachedQuotaResult,
   resetQuotaCache() {
     lastSuccessfulQuota = null;
+    cachedQuotaResult = null;
+    quotaRefreshPromise = null;
   }
 };

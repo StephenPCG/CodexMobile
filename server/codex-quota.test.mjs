@@ -76,3 +76,15 @@ test('quota result falls back to recent successful data when all accounts fail',
   assert.equal(fallback.staleReason, '网络超时，稍后重试');
   assert.equal(fallback.accounts[0].status, 'ok');
 });
+
+test('quota cache decoration exposes update metadata', () => {
+  const result = quotaTestHooks.decorateCachedQuotaResult({
+    provider: 'codex',
+    source: 'local-auth',
+    fetchedAt: '2026-05-08T10:00:00.000Z',
+    accounts: []
+  }, 'scheduled');
+  assert.equal(result.updatedAt, '2026-05-08T10:00:00.000Z');
+  assert.equal(result.cacheReason, 'scheduled');
+  assert.match(result.cacheUpdatedAt, /^\d{4}-\d{2}-\d{2}T/);
+});

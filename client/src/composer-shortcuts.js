@@ -12,7 +12,7 @@ export const SLASH_COMMANDS = [
     token: '/压缩上下文',
     aliases: ['/compact'],
     title: '压缩上下文',
-    description: '把旧上下文压缩成摘要，保持线程轻量',
+    description: '把旧上下文压缩成摘要，保持对话轻量',
     action: 'insert-prompt',
     prompt: '请压缩当前对话的旧上下文，保留关键决策、文件路径、未完成事项和后续执行入口。'
   },

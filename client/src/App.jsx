@@ -280,6 +280,14 @@ function formatTime(value) {
   }
 }
 
+function formatQuotaUpdateTime(value) {
+  if (!value) {
+    return '暂未更新';
+  }
+  const formatted = formatTime(value);
+  return formatted ? `更新于 ${formatted}` : '更新时间未知';
+}
+
 function subAgentRoleLabel(role) {
   const value = String(role || '').trim().toLowerCase();
   if (value === 'worker') {
@@ -1676,7 +1684,7 @@ function PairingScreen({ onPaired }) {
         我的本机 Codex 移动工作台。电脑继续执行，iPhone 随时接管、追问、看过程、处理确认和收完成通知。
       </p>
       <div className="pairing-points" aria-label="CodexMobile 核心能力">
-        <span>桌面线程同步</span>
+        <span>桌面对话同步</span>
         <span>完整执行过程</span>
         <span>私有网络访问</span>
       </div>
@@ -1798,21 +1806,23 @@ function Drawer({
   runningById,
   threadRuntimeById,
   completedSessionIds,
+  quotaSnapshot,
   onToggleProject,
   onSelectSession,
   onRenameSession,
   onDeleteSession,
   onNewConversation,
+  onOpenDocs,
   theme,
   setTheme
 }) {
   const [drawerView, setDrawerView] = useState('main');
   const [subagentExpandedById, setSubagentExpandedById] = useState({});
-  const [quotaExpanded, setQuotaExpanded] = useState(false);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [quotaLoaded, setQuotaLoaded] = useState(false);
   const [quotaError, setQuotaError] = useState('');
   const [quotaNotice, setQuotaNotice] = useState('');
+  const [quotaResult, setQuotaResult] = useState(null);
   const [quotaAccounts, setQuotaAccounts] = useState([]);
   const [drawerQuery, setDrawerQuery] = useState('');
   const normalizedDrawerQuery = drawerQuery.trim().toLowerCase();
@@ -1825,18 +1835,18 @@ function Drawer({
     .filter(Boolean)
     .join(' · ');
 
-  async function refreshCodexQuota(event) {
-    event?.preventDefault();
-    event?.stopPropagation();
+  async function loadCodexQuota({ refresh = false } = {}) {
     if (quotaLoading) {
       return;
     }
-    setQuotaExpanded(true);
     setQuotaLoading(true);
     setQuotaError('');
     setQuotaNotice('');
     try {
-      const result = await apiFetch('/api/quotas/codex');
+      const result = refresh
+        ? await apiFetch('/api/quotas/codex/refresh', { method: 'POST' })
+        : await apiFetch('/api/quotas/codex');
+      setQuotaResult(result);
       setQuotaAccounts(Array.isArray(result.accounts) ? result.accounts : []);
       setQuotaNotice(result.stale ? (result.staleReason || '实时查询失败，显示最近一次成功结果') : '');
       setQuotaLoaded(true);
@@ -1847,6 +1857,30 @@ function Drawer({
       setQuotaLoading(false);
     }
   }
+
+  async function refreshCodexQuota(event) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    await loadCodexQuota({ refresh: true });
+  }
+
+  useEffect(() => {
+    if (!open || quotaLoaded || quotaLoading) {
+      return;
+    }
+    loadCodexQuota().catch(() => null);
+  }, [open, quotaLoaded, quotaLoading]);
+
+  useEffect(() => {
+    if (!quotaSnapshot) {
+      return;
+    }
+    setQuotaResult(quotaSnapshot);
+    setQuotaAccounts(Array.isArray(quotaSnapshot.accounts) ? quotaSnapshot.accounts : []);
+    setQuotaNotice(quotaSnapshot.stale ? (quotaSnapshot.staleReason || '实时查询失败，显示最近一次成功结果') : '');
+    setQuotaError('');
+    setQuotaLoaded(true);
+  }, [quotaSnapshot]);
 
   if (drawerView === 'settings') {
     return (
@@ -1885,6 +1919,18 @@ function Drawer({
                     黑色
                   </button>
                 </div>
+              </div>
+            </section>
+            <section className="settings-group">
+              <div className="drawer-heading">集成</div>
+              <div className="settings-list">
+                <button type="button" className="settings-entry settings-card-entry" onClick={onOpenDocs}>
+                  <span>
+                    <FeishuLogoIcon size={18} />
+                    飞书文档
+                  </span>
+                  <ChevronRight size={17} />
+                </button>
               </div>
             </section>
             <section className="settings-group">
@@ -1976,7 +2022,7 @@ function Drawer({
               );
               const sessionsOpen = isExpanded || Boolean(normalizedDrawerQuery);
               const hasVisibleDraft = visibleProjectSessions.some((session) => isDraftSession(session));
-              const showNewThreadPlaceholder = sessionsOpen && !normalizedDrawerQuery && !hasVisibleDraft;
+              const showNewConversationPlaceholder = sessionsOpen && !normalizedDrawerQuery && !hasVisibleDraft;
               const renderThreadRow = (session, { isSubAgent = false } = {}) => {
                 const runtime = threadRuntimeById?.[session.id] || null;
                 const sessionRunning = runtime?.status === 'running' || hasRunningKey(runningById, sessionRunKeys(session));
@@ -2002,7 +2048,7 @@ function Drawer({
                             role="button"
                             tabIndex={0}
                             className="thread-subagent-toggle"
-                            aria-label={subagentsOpen ? '折叠子代理线程' : '展开子代理线程'}
+                            aria-label={subagentsOpen ? '折叠子代理对话' : '展开子代理对话'}
                             aria-expanded={subagentsOpen}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -2042,8 +2088,8 @@ function Drawer({
                           type="button"
                           className="thread-rename"
                           onClick={() => onRenameSession(project, session)}
-                          aria-label="重命名线程"
-                          title="重命名线程"
+                          aria-label="重命名对话"
+                          title="重命名对话"
                         >
                           <Pencil size={14} />
                         </button>
@@ -2051,8 +2097,8 @@ function Drawer({
                           type="button"
                           className="thread-delete"
                           onClick={() => onDeleteSession(project, session)}
-                          aria-label="归档线程"
-                          title="归档线程"
+                          aria-label="归档对话"
+                          title="归档对话"
                         >
                           <Archive size={14} />
                         </button>
@@ -2079,7 +2125,7 @@ function Drawer({
                   </button>
                   {sessionsOpen ? (
                     <div className="thread-list">
-                      {showNewThreadPlaceholder ? (
+                      {showNewConversationPlaceholder ? (
                         <div className="thread-row is-draft is-new-placeholder">
                           <button
                             type="button"
@@ -2115,7 +2161,7 @@ function Drawer({
                           );
                         })
                       ) : (
-                        <div className="thread-empty">暂无线程</div>
+                        <div className="thread-empty">暂无对话</div>
                       )}
                     </div>
                   ) : null}
@@ -2126,34 +2172,11 @@ function Drawer({
         </section>
 
         <section className="drawer-section drawer-controls">
-          <div className={`quota-widget ${quotaExpanded ? 'is-expanded' : ''}`}>
-            <div className="quota-row">
-              <button
-                type="button"
-                className="quota-main"
-                onClick={() => setQuotaExpanded((current) => !current)}
-              >
-                <span className="quota-title">额度查询</span>
-                <span className="quota-kind">Codex</span>
-              </button>
-              <button
-                type="button"
-                className="quota-refresh"
-                onClick={refreshCodexQuota}
-                disabled={quotaLoading}
-              >
-                {quotaLoading ? '刷新中...' : '刷新'}
-              </button>
-              <button
-                type="button"
-                className="quota-toggle"
-                onClick={() => setQuotaExpanded((current) => !current)}
-                aria-label={quotaExpanded ? '收起额度查询' : '展开额度查询'}
-              >
-                <ChevronDown size={16} />
-              </button>
-            </div>
-            {quotaExpanded ? (
+          <div className="quota-widget is-expanded">
+            <div className="quota-card">
+              <div className="quota-card-head">
+                <span className="quota-title">Rate limits remaining</span>
+              </div>
               <div className="quota-panel">
                 {quotaError ? (
                   <button type="button" className="quota-error" onClick={refreshCodexQuota}>
@@ -2210,11 +2233,25 @@ function Drawer({
                     );
                   })
                 ) : null}
+                {quotaLoading && !quotaLoaded ? <div className="quota-empty">正在读取额度...</div> : null}
                 {!quotaLoading && !quotaError && quotaLoaded && !quotaAccounts.length ? (
                   <div className="quota-empty">暂无 Codex 凭证</div>
                 ) : null}
               </div>
-            ) : null}
+              <div className="quota-footer">
+                <small>{formatQuotaUpdateTime(quotaResult?.updatedAt || quotaResult?.fetchedAt || quotaResult?.staleSavedAt || quotaResult?.cacheUpdatedAt)}</small>
+                <button
+                  type="button"
+                  className="quota-refresh"
+                  onClick={refreshCodexQuota}
+                  disabled={quotaLoading}
+                  aria-label="刷新额度"
+                  title="刷新额度"
+                >
+                  {quotaLoading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />}
+                </button>
+              </div>
+            </div>
           </div>
           <button type="button" className="settings-entry" onClick={() => setDrawerView('settings')}>
             <span>
@@ -2246,7 +2283,6 @@ function TopBar({
   onMenu,
   onOpenWorkspace,
   onOpenTerminal,
-  onOpenDocs,
   onGitAction,
   onRenameSession,
   onArchiveSession,
@@ -2303,11 +2339,6 @@ function TopBar({
       window.clearTimeout(copiedTimerRef.current);
     }
     copiedTimerRef.current = window.setTimeout(() => setCopiedThreadId(false), 1400);
-  }
-
-  function handleOpenDocs() {
-    setMenuOpen(false);
-    onOpenDocs?.();
   }
 
   function handleOpenWorkspace(tab) {
@@ -2377,49 +2408,24 @@ function TopBar({
               <div className="top-menu-divider" />
               <button type="button" role="menuitem" onClick={handleRenameThread} disabled={!canOperateThread}>
                 <Pencil size={16} />
-                <span>修改 thread 标题</span>
+                <span>修改对话标题</span>
               </button>
               <button type="button" role="menuitem" className="is-danger" onClick={handleArchiveThread} disabled={!canOperateThread}>
                 <Archive size={16} />
-                <span>归档 thread</span>
+                <span>归档对话</span>
               </button>
-              <div className="top-menu-divider" />
               <button type="button" role="menuitem" onClick={handleCopyThreadId} disabled={!canCopyThreadId}>
                 {copiedThreadId ? <Check size={16} /> : <Copy size={16} />}
                 <span>{copiedThreadId ? '已复制对话 ID' : '复制对话 ID'}</span>
               </button>
-              <button type="button" role="menuitem" onClick={handleOpenDocs}>
-                <FeishuLogoIcon size={18} className="top-docs-logo" />
-                <span>飞书文档</span>
-              </button>
-              <button type="button" role="menuitem" onClick={handleEnableNotifications}>
-                <Bell size={16} />
-                <span>{notificationEnabled ? '完成通知已开启' : '开启完成通知'}</span>
-              </button>
               <div className="top-menu-divider" />
-              <div className="top-menu-title">
-                <GitBranch size={16} />
-                <span>Git</span>
-              </div>
               <button type="button" role="menuitem" onClick={() => handleGitAction('status')} disabled={gitDisabled}>
                 <GitBranch size={16} />
                 <span>Git 面板</span>
               </button>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('sync')} disabled={gitDisabled}>
-                <RefreshCw size={16} />
-                <span>同步</span>
-              </button>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('commit')} disabled={gitDisabled}>
-                <GitCommitHorizontal size={16} />
-                <span>提交</span>
-              </button>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('push')} disabled={gitDisabled}>
-                <UploadCloud size={16} />
-                <span>推送</span>
-              </button>
-              <button type="button" role="menuitem" onClick={() => handleGitAction('branch')} disabled={gitDisabled}>
-                <GitBranch size={16} />
-                <span>创建分支</span>
+              <button type="button" role="menuitem" onClick={handleEnableNotifications}>
+                <Bell size={16} />
+                <span>{notificationEnabled ? '完成通知已开启' : '开启完成通知'}</span>
               </button>
             </div>
           ) : null}
@@ -2472,7 +2478,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
         className="modal-card"
         role="dialog"
         aria-modal="true"
-        aria-label={isRename ? '修改 thread 标题' : '归档 thread'}
+        aria-label={isRename ? '修改对话标题' : '归档对话'}
         onSubmit={submit}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -2480,7 +2486,7 @@ function SessionActionModal({ action, onClose, onConfirm }) {
           {isRename ? <Pencil size={22} /> : <Archive size={22} />}
         </div>
         <div className="modal-body">
-          <h2>{isRename ? '修改 thread 标题' : '归档 thread'}</h2>
+          <h2>{isRename ? '修改对话标题' : '归档对话'}</h2>
           {isRename ? (
             <label className="modal-field">
               <span>标题</span>
@@ -2520,7 +2526,7 @@ function WelcomePane({ projects, onNewConversation }) {
           <MessageSquarePlus size={28} />
         </div>
         <h1>CodexMobile</h1>
-        <p>选择一个项目开始新对话，或从左侧菜单打开历史 thread。</p>
+        <p>选择一个项目开始新对话，或从左侧菜单打开历史对话。</p>
         {visibleProjects.length ? (
           <div className="welcome-projects" aria-label="项目">
             {visibleProjects.map((project) => (
@@ -2637,6 +2643,9 @@ function DocsPanel({ open, docs, busy, error, onClose, onConnect, onDisconnect, 
           </div>
           <h2>飞书文档</h2>
           <p>{summary}</p>
+          <p className="docs-usage-note">
+            配置并授权后，在消息中提到飞书文档、PPT、表格或云空间时，Codex 会使用 lark-cli 来创建、读取和更新对应内容。
+          </p>
           {error ? <div className="docs-panel-error">{error}</div> : null}
           {authPending?.verificationUrl && (!connected || needsExtraAuth) ? (
             <div className="docs-auth-box">
@@ -6790,6 +6799,7 @@ export default function App() {
   const [docsOpen, setDocsOpen] = useState(false);
   const [docsBusy, setDocsBusy] = useState(false);
   const [docsError, setDocsError] = useState('');
+  const [quotaSnapshot, setQuotaSnapshot] = useState(null);
   const [gitPanel, setGitPanel] = useState({ open: false, action: 'commit' });
   const [workspacePanel, setWorkspacePanel] = useState({ open: false, tab: 'changes' });
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -8799,6 +8809,10 @@ export default function App() {
         syncActiveRunsFromStatus(payload.status || DEFAULT_STATUS);
         return;
       }
+      if (payload.type === 'quota-updated') {
+        setQuotaSnapshot(payload.quota || null);
+        return;
+      }
       if (payload.type === 'chat-started') {
         markRun(payload);
         if (!payloadMatchesCurrentConversation(payload)) {
@@ -9063,7 +9077,7 @@ export default function App() {
       await apiFetch('/api/sync', { method: 'POST' });
       await loadStatus();
       await loadProjects({ preserveSelection: true });
-      showToast({ level: 'success', title: '同步完成', body: '线程和状态已经刷新。' });
+      showToast({ level: 'success', title: '同步完成', body: '对话和状态已经刷新。' });
     } catch (error) {
       showToast({ level: 'error', title: '同步失败', body: error.message || '无法刷新同步。' });
     } finally {
@@ -9299,7 +9313,7 @@ export default function App() {
       const message = String(error.message || '');
       throw new Error(
         message.toLowerCase().includes('running')
-          ? '\u7ebf\u7a0b\u6b63\u5728\u8fd0\u884c\uff0c\u7a0d\u540e\u518d\u5f52\u6863\u3002'
+          ? '对话正在运行，稍后再归档。'
           : `\u5f52\u6863\u5931\u8d25\uff1a${message}`
       );
     }
@@ -10172,7 +10186,6 @@ export default function App() {
         onMenu={() => setDrawerOpen(true)}
         onOpenWorkspace={handleOpenWorkspace}
         onOpenTerminal={handleOpenTerminal}
-        onOpenDocs={() => setDocsOpen(true)}
         onGitAction={handleGitAction}
         onRenameSession={handleRenameSession}
         onArchiveSession={handleDeleteSession}
@@ -10194,11 +10207,16 @@ export default function App() {
         runningById={runningById}
         threadRuntimeById={threadRuntimeById}
         completedSessionIds={completedSessionIds}
+        quotaSnapshot={quotaSnapshot}
         onToggleProject={handleToggleProject}
         onSelectSession={handleSelectSession}
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
         onNewConversation={handleNewConversation}
+        onOpenDocs={() => {
+          setDocsOpen(true);
+          setDrawerOpen(false);
+        }}
         theme={theme}
         setTheme={setTheme}
       />

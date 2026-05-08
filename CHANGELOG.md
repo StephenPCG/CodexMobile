@@ -6,7 +6,8 @@ All notable changes to CodexMobile are tracked here.
 
 ### Added
 
-- Added per-project mobile draft creation so a new thread can choose Local or New worktree before the first send, then start through the headless local Codex path.
+- Added per-project mobile draft creation so a new conversation can choose Local or New worktree before the first send, then start through the headless local Codex path.
+- Added backend Codex quota caching with startup, scheduled hourly, and manual refresh paths.
 - Added an xterm-based browser Terminal with PTY-backed color output, direct keyboard input, a blinking cursor, paste, and mobile quick keys.
 - Added mobile workspace tools for Changes, Directories, file previews, and diff viewing.
 - Added a browser Terminal panel with multi-tab-safe backend terminal sessions.
@@ -19,20 +20,22 @@ All notable changes to CodexMobile are tracked here.
 - Added foreground toast notifications for Git progress, task completion, failures, and user-input prompts.
 - Added Web Push support for installed HTTPS PWAs, including service worker handling and server-side subscription storage.
 - Added a compact connection recovery card for reconnecting, syncing, repairing pairing, and checking status.
-- Added route-addressable welcome, per-project new-thread, and thread pages for refresh-safe navigation.
+- Added route-addressable welcome, per-project new-conversation, and conversation pages for refresh-safe navigation.
 
 ### Changed
 
 - Replaced rename/archive browser prompts with in-app modal dialogs.
-- Persisted per-project new-thread composer drafts, including text, attachments, file mentions, and run mode.
-- Show the active Local/Worktree mode in the header subtitle and keep the composer run-mode switch only on new threads.
-- Removed ambiguous drawer-level new-thread and manual sync controls; project rows keep explicit new-thread actions while startup sync remains automatic.
+- Persisted per-project new-conversation composer drafts, including text, attachments, file mentions, and run mode.
+- Show the active Local/Worktree mode in the header subtitle and keep the composer run-mode switch only on new conversations.
+- Removed ambiguous drawer-level new-conversation and manual sync controls; project rows keep explicit new-conversation actions while startup sync remains automatic.
 - Reworked Settings Codex details into environment information with host, OS, Codex connection mode, and Codex CLI details.
 - Reduced the empty composer height and softened the connection status label.
 - Render memory citation tails as collapsible cards, hide internal git directives, and proxy local-path Markdown images through the backend.
 - Removed duplicate per-project "+ 新对话" buttons while preserving the draft-style new conversation row.
-- Moved workspace and Terminal entry points into the top More menu, and made the header show thread title above project name.
-- Added top More menu actions for renaming and archiving the current thread.
+- Moved workspace and Terminal entry points into the top More menu, and made the header show conversation title above project name.
+- Moved Feishu Docs into Settings, simplified the top More menu Git actions to Git Panel, and grouped conversation actions with unified wording.
+- Reworked the drawer quota widget into a compact Rate limits remaining card with cached data, update time, and icon-only refresh.
+- Added top More menu actions for renaming and archiving the current conversation.
 - Reworked voice transcription into an inline composer control that records, processes, and appends text without opening a confirmation dialog.
 - Moved server connection status above the composer.
 - Updated the dev workflow so `npm run dev` starts both frontend and backend with hot reload.

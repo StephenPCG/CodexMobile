@@ -342,7 +342,6 @@ button {
   white-space: nowrap;
 }
 
-.top-menu-title,
 .top-menu-popover button {
   display: flex;
   align-items: center;
@@ -357,11 +356,6 @@ button {
   font-size: 14px;
   line-height: 18px;
   text-align: left;
-}
-
-.top-menu-title {
-  color: #3f454d;
-  font-weight: 500;
 }
 
 .top-menu-popover button:active {
@@ -400,16 +394,6 @@ button {
   background: rgba(222, 223, 220, 0.88);
 }
 
-.top-docs-logo {
-  display: block;
-  border-radius: 7px;
-  box-shadow: 0 0 0 1px rgba(24, 28, 33, 0.08);
-}
-
-[data-theme="dark"] .top-docs-logo {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.16);
-}
-
 [data-theme="dark"] .top-menu-popover {
   color: var(--text);
   background: rgba(31, 31, 31, 0.98);
@@ -417,7 +401,6 @@ button {
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.34);
 }
 
-[data-theme="dark"] .top-menu-title,
 [data-theme="dark"] .top-menu-popover svg {
   color: #d4d4d8;
 }
@@ -826,6 +809,12 @@ button {
   color: var(--muted);
   font-size: 15px;
   line-height: 22px;
+}
+
+.docs-status-state .docs-usage-note {
+  max-width: 320px;
+  font-size: 13px;
+  line-height: 19px;
 }
 
 .docs-panel-error {
@@ -1443,6 +1432,11 @@ button {
   box-shadow: 0 1px 4px rgba(20, 24, 31, 0.12);
 }
 
+.settings-list {
+  display: grid;
+  gap: 8px;
+}
+
 .env-info {
   display: grid;
   gap: 8px;
@@ -1975,6 +1969,17 @@ button {
   text-align: left;
 }
 
+.settings-entry.settings-card-entry {
+  min-height: 48px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f5f7f4;
+}
+
+[data-theme="dark"] .settings-entry.settings-card-entry {
+  background: #262626;
+}
+
 .setting-row {
   justify-content: space-between;
   padding: 10px;
@@ -2021,41 +2026,31 @@ button {
   margin-top: 0;
 }
 
-.quota-row {
+.quota-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 70px 32px;
-  align-items: center;
-  min-height: 46px;
-  padding: 4px 2px;
-  border-radius: 0;
-  background: transparent;
-  border-bottom: 1px solid rgba(226, 229, 225, 0.82);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(226, 229, 225, 0.9);
+  border-radius: 10px;
+  background: #f5f7f4;
 }
 
-[data-theme="dark"] .quota-row {
-  background: transparent;
-  border-bottom-color: rgba(54, 54, 54, 0.9);
+[data-theme="dark"] .quota-card {
+  border-color: rgba(54, 54, 54, 0.94);
+  background: #262626;
 }
 
-.quota-main,
 .quota-refresh,
-.quota-toggle,
 .quota-error,
 .quota-account-message {
   border: 0;
   font: inherit;
 }
 
-.quota-main {
-  min-width: 0;
+.quota-card-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 8px;
-  color: var(--text);
-  background: transparent;
-  text-align: left;
+  min-width: 0;
 }
 
 .quota-title {
@@ -2063,32 +2058,22 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.quota-kind {
-  flex: 0 0 auto;
-  color: #69717b;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-[data-theme="dark"] .quota-kind {
-  color: var(--muted);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
 }
 
 .quota-refresh {
-  width: 70px;
-  height: 30px;
-  min-width: 70px;
-  padding: 0 9px;
-  border-radius: 8px;
-  color: #20252b;
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-radius: 999px;
+  color: #4b5563;
   background: #eef0ed;
-  font-size: 12px;
-  font-weight: 650;
-  white-space: nowrap;
 }
 
 [data-theme="dark"] .quota-refresh {
@@ -2100,30 +2085,31 @@ button {
   opacity: 0.62;
 }
 
-.quota-toggle {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  color: #818993;
-  background: transparent;
-}
-
-.quota-toggle svg {
-  transition: transform 160ms ease;
-}
-
-.quota-widget.is-expanded .quota-toggle svg {
-  transform: rotate(180deg);
-}
-
 .quota-panel {
   display: grid;
   gap: 7px;
-  max-height: min(34svh, 310px);
-  margin-top: 7px;
+  max-height: min(30svh, 280px);
   overflow: auto;
-  padding-right: 3px;
+  padding-right: 2px;
+}
+
+.quota-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.quota-footer small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .quota-account {

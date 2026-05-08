@@ -27,7 +27,7 @@ import {
   refreshCodexCache,
   renameSession
 } from './codex-data.js';
-import { getCodexQuota } from './codex-quota.js';
+import { getCachedCodexQuota, refreshCodexQuotaCache, startCodexQuotaAutoRefresh } from './codex-quota.js';
 import { readCodexConfig } from './codex-config.js';
 import { getDesktopBridgeStatus } from './codex-app-server.js';
 import { createGitService } from './git-service.js';
@@ -723,9 +723,21 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && pathname === '/api/quotas/codex') {
     try {
-      sendJson(res, 200, await getCodexQuota());
+      sendJson(res, 200, await getCachedCodexQuota({ refresh: url.searchParams.get('refresh') === '1' }));
     } catch (error) {
       console.warn(`[quota] codex quota failed remote=${remoteAddress(req)} message=${error.message || 'unknown'}`);
+      sendJson(res, 500, { error: 'Failed to query Codex quota' });
+    }
+    return;
+  }
+
+  if (method === 'POST' && pathname === '/api/quotas/codex/refresh') {
+    try {
+      const quota = await refreshCodexQuotaCache({ reason: 'manual' });
+      broadcast({ type: 'quota-updated', quota });
+      sendJson(res, 200, quota);
+    } catch (error) {
+      console.warn(`[quota] codex quota refresh failed remote=${remoteAddress(req)} message=${error.message || 'unknown'}`);
       sendJson(res, 500, { error: 'Failed to query Codex quota' });
     }
     return;
@@ -1138,6 +1150,12 @@ async function main() {
 
   refreshCodexCache().catch((error) => {
     console.warn('[server] Initial sync failed:', error.message);
+  });
+
+  startCodexQuotaAutoRefresh({
+    onUpdate(quota) {
+      broadcast({ type: 'quota-updated', quota });
+    }
   });
 
   try {
