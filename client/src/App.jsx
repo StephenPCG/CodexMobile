@@ -94,6 +94,20 @@ const DEFAULT_STATUS = {
     mode: 'unavailable',
     reason: null
   },
+  environment: {
+    hostName: '',
+    osType: '',
+    osRelease: '',
+    platform: '',
+    arch: '',
+    nodeVersion: ''
+  },
+  codexCli: {
+    path: '',
+    source: '',
+    version: '',
+    error: ''
+  },
   provider: 'cliproxyapi',
   model: 'gpt-5.5',
   modelShort: '5.5 中',
@@ -1702,6 +1716,47 @@ function formatQuotaPercent(quotaWindow) {
   return percent === null ? '--' : `${Math.round(percent)}%`;
 }
 
+function codexCliSourceLabel(source) {
+  if (source === 'path') {
+    return 'PATH';
+  }
+  if (source === 'env') {
+    return 'CODEXMOBILE_CODEX_PATH';
+  }
+  if (source === 'bundled') {
+    return '内置依赖';
+  }
+  if (source === 'unavailable') {
+    return '不可用';
+  }
+  return '未知';
+}
+
+function codexBridgeModeLabel(desktopBridge) {
+  const mode = desktopBridge?.mode || 'unavailable';
+  if (mode === 'headless-local') {
+    return '后台本机 Codex';
+  }
+  if (mode === 'desktop-ipc') {
+    return 'Codex Desktop Remote';
+  }
+  if (mode === 'desktop-proxy') {
+    return 'Codex Desktop app-server';
+  }
+  if (mode === 'isolated-dev') {
+    return '独立 app-server';
+  }
+  return desktopBridge?.connected ? '已连接' : '未连接';
+}
+
+function hostSystemLabel(environment = {}) {
+  const system = [environment.osType || environment.platform, environment.osRelease]
+    .filter(Boolean)
+    .join(' ');
+  const arch = environment.arch ? `(${environment.arch})` : '';
+  return [system, arch].filter(Boolean).join(' ') || '未知';
+}
+
 function quotaToneClass(percent) {
   if (percent === null) {
     return 'is-low';
@@ -1721,6 +1776,7 @@ function quotaToneClass(percent) {
 function Drawer({
   open,
   onClose,
+  status = DEFAULT_STATUS,
   projects,
   selectedProject,
   selectedSession,
@@ -1735,8 +1791,6 @@ function Drawer({
   onRenameSession,
   onDeleteSession,
   onNewConversation,
-  onSync,
-  syncing,
   theme,
   setTheme
 }) {
@@ -1751,6 +1805,13 @@ function Drawer({
   const [drawerQuery, setDrawerQuery] = useState('');
   const normalizedDrawerQuery = drawerQuery.trim().toLowerCase();
   const runningCount = Object.values(runningById || {}).filter(Boolean).length;
+  const environment = status?.environment || {};
+  const codexCli = status?.codexCli || {};
+  const codexCliVersion = codexCli.version || (codexCli.error ? '不可用' : '未知');
+  const codexCliMeta = [codexCliSourceLabel(codexCli.source), codexCli.path].filter(Boolean).join(' · ');
+  const bridgeMeta = [status?.desktopBridge?.connected ? '已连接' : '未连接', status?.desktopBridge?.mode]
+    .filter(Boolean)
+    .join(' · ');
 
   async function refreshCodexQuota(event) {
     event?.preventDefault();
@@ -1815,23 +1876,28 @@ function Drawer({
               </div>
             </section>
             <section className="settings-group">
-              <div className="drawer-heading">Codex CLI</div>
-              <div className="cli-info">
+              <div className="drawer-heading">环境信息</div>
+              <div className="env-info">
                 <div>
-                  <span>版本</span>
-                  <strong>{status?.codexCli?.version || '未知'}</strong>
+                  <span>主机</span>
+                  <strong>{environment.hostName || status?.hostName || '未知'}</strong>
                 </div>
                 <div>
-                  <span>来源</span>
-                  <strong>{
-                    status?.codexCli?.source === 'path'
-                      ? 'PATH'
-                      : status?.codexCli?.source === 'env'
-                        ? 'CODEXMOBILE_CODEX_PATH'
-                        : '内置依赖'
-                  }</strong>
+                  <span>系统</span>
+                  <strong>{hostSystemLabel(environment)}</strong>
                 </div>
-                <small>{status?.codexCli?.path || status?.codexCli?.error || '未找到 Codex 可执行文件'}</small>
+                <div>
+                  <span>连接方式</span>
+                  <strong>{codexBridgeModeLabel(status?.desktopBridge)}</strong>
+                </div>
+                <div>
+                  <span>Codex CLI</span>
+                  <strong>{codexCliVersion}</strong>
+                </div>
+                {bridgeMeta ? <small>{bridgeMeta}</small> : null}
+                {codexCliMeta ? <small>{codexCliMeta}</small> : null}
+                {codexCli.error ? <small className="is-error">{codexCli.error}</small> : null}
+                {environment.nodeVersion ? <small>Node {environment.nodeVersion}</small> : null}
               </div>
             </section>
           </div>
@@ -1865,15 +1931,6 @@ function Drawer({
               aria-label="搜索对话"
             />
           </label>
-          <button
-            className="drawer-new-button"
-            onClick={() => onNewConversation(selectedProject || projects[0] || null)}
-            disabled={!projects.length}
-            title={selectedProject ? `在 ${selectedProject.name} 中新建对话` : '新对话'}
-          >
-            <Plus size={17} />
-            新对话
-          </button>
         </div>
 
         <section className="drawer-section project-section">
@@ -2048,16 +2105,6 @@ function Drawer({
         </section>
 
         <section className="drawer-section drawer-controls">
-          <div className="control-row sync-row">
-            <span>
-              对话同步
-            </span>
-            <button className="sync-button" onClick={onSync} disabled={syncing}>
-              {syncing ? <Loader2 className="spin" size={16} /> : null}
-              同步
-            </button>
-            <span className="sync-spacer" aria-hidden="true" />
-          </div>
           <div className={`quota-widget ${quotaExpanded ? 'is-expanded' : ''}`}>
             <div className="quota-row">
               <button
@@ -6065,8 +6112,13 @@ function Composer({
     if (!textarea) {
       return;
     }
-    textarea.style.height = '0px';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 96)}px`;
+    const minHeight = 34;
+    const maxHeight = 96;
+    textarea.style.height = 'auto';
+    const nextHeight = input.trim()
+      ? Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight)
+      : minHeight;
+    textarea.style.height = `${nextHeight}px`;
   }, [input]);
 
   useEffect(() => {
@@ -10063,6 +10115,7 @@ export default function App() {
       <Drawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
+        status={status}
         projects={projects}
         selectedProject={selectedProject}
         selectedSession={selectedSession}
@@ -10077,8 +10130,6 @@ export default function App() {
         onRenameSession={handleRenameSession}
         onDeleteSession={handleDeleteSession}
         onNewConversation={handleNewConversation}
-        onSync={handleSync}
-        syncing={syncing}
         theme={theme}
         setTheme={setTheme}
       />

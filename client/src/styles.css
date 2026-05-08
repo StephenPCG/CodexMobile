@@ -1316,7 +1316,7 @@ button {
 
 .drawer-command {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
   margin-bottom: 20px;
   padding: 3px;
@@ -1352,38 +1352,6 @@ button {
 
 .drawer-search input::placeholder {
   color: #a0a7b0;
-}
-
-.drawer-new-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 86px;
-  height: 36px;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 8px;
-  color: #fff;
-  background: #1e3f73;
-  font-size: 13px;
-  font-weight: 750;
-  box-shadow: none;
-}
-
-.drawer-new-button:active {
-  background: #102c56;
-}
-
-.drawer-new-button:disabled {
-  color: #707783;
-  background: #e4e7ec;
-  cursor: not-allowed;
-}
-
-[data-theme="dark"] .drawer-new-button:disabled {
-  color: #9ca3af;
-  background: #333333;
 }
 
 .drawer-subheader {
@@ -1475,7 +1443,7 @@ button {
   box-shadow: 0 1px 4px rgba(20, 24, 31, 0.12);
 }
 
-.cli-info {
+.env-info {
   display: grid;
   gap: 8px;
   padding: 12px;
@@ -1483,40 +1451,44 @@ button {
   background: #f5f7f4;
 }
 
-[data-theme="dark"] .cli-info {
+[data-theme="dark"] .env-info {
   background: #262626;
 }
 
-.cli-info div {
+.env-info div {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.cli-info span,
-.cli-info small {
+.env-info span,
+.env-info small {
   color: var(--muted);
   font-size: 12px;
   line-height: 16px;
 }
 
-.cli-info strong {
+.env-info strong {
   min-width: 0;
   color: var(--text);
   font-size: 13px;
   line-height: 18px;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
-.cli-info small {
+.env-info small {
   overflow-wrap: anywhere;
+}
+
+.env-info small.is-error {
+  color: var(--danger);
 }
 
 .drawer-action,
 .project-row,
-.setting-row,
-.control-row {
+.setting-row {
   width: 100%;
   display: flex;
   align-items: center;
@@ -1988,7 +1960,6 @@ button {
   border-top-color: rgba(48, 48, 48, 0.9);
 }
 
-.control-row,
 .settings-entry {
   min-height: 46px;
   padding: 4px 2px;
@@ -1997,29 +1968,11 @@ button {
   border-bottom: 1px solid rgba(226, 229, 225, 0.82);
 }
 
-[data-theme="dark"] .control-row,
 [data-theme="dark"] .settings-entry {
   background: transparent;
   border-bottom-color: rgba(54, 54, 54, 0.9);
 }
 
-.control-row {
-  justify-content: space-between;
-}
-
-.sync-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 70px 32px;
-  align-items: center;
-  gap: 0;
-  padding: 4px 2px;
-}
-
-.sync-row > span:first-child {
-  padding: 0 8px;
-}
-
-.control-row span,
 .settings-entry span {
   display: inline-flex;
   align-items: center;
@@ -2027,13 +1980,6 @@ button {
   min-width: 0;
   font-size: 14px;
   font-weight: 650;
-}
-
-.sync-row .sync-spacer {
-  display: block;
-  width: 30px;
-  min-width: 30px;
-  height: 30px;
 }
 
 .settings-entry {
@@ -2086,33 +2032,6 @@ button {
 
 .setting-row input:checked::before {
   transform: translateX(18px);
-}
-
-.sync-button {
-  width: 70px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  justify-content: center;
-  min-width: 56px;
-  height: 30px;
-  margin-top: 0;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 8px;
-  color: var(--text);
-  background: #eef0ed;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.sync-button:disabled {
-  opacity: 0.64;
-}
-
-[data-theme="dark"] .sync-button {
-  background: #303030;
 }
 
 .quota-widget {
@@ -4738,9 +4657,9 @@ button {
 .composer textarea {
   display: block;
   width: 100%;
-  min-height: 32px;
+  min-height: 34px;
   max-height: 96px;
-  padding: 8px 14px 3px;
+  padding: 7px 14px 0;
   resize: none;
   border: 0;
   outline: 0;
@@ -4760,7 +4679,7 @@ button {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  padding: 2px 8px 7px;
+  padding: 0 8px 7px;
 }
 
 .control-left,
@@ -4893,14 +4812,14 @@ button {
 .composer-connection-status {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   width: max-content;
   max-width: 100%;
-  margin: 0 0 7px 18px;
+  margin: 0 0 6px 18px;
   color: #6b7280;
-  font-size: 13px;
-  line-height: 18px;
-  font-weight: 590;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
 }
 
 .composer-connection-status span {
@@ -4908,6 +4827,10 @@ button {
   height: 8px;
   border-radius: 50%;
   background: #9ca3af;
+}
+
+.composer-connection-status strong {
+  font-weight: 400;
 }
 
 .composer-connection-status.is-online {

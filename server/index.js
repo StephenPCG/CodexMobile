@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -473,10 +474,19 @@ async function publicStatus(authenticated) {
   const config = snapshot.config || await getStatusConfigFallback() || {};
   const desktopBridge = await getDesktopBridgeStatus({ probeHeadless: false, probeAppServer: false });
   const codexCli = await getCodexExecutableInfo();
+  const hostName = getHostName();
   return {
     connected: true,
     desktopBridge,
-    hostName: getHostName(),
+    hostName,
+    environment: {
+      hostName,
+      osType: os.type(),
+      osRelease: os.release(),
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version
+    },
     port: PORT,
     provider: config.provider || 'codex',
     model: config.model || 'gpt-5.5',
