@@ -7,9 +7,8 @@ import { resolveCodexExecutable } from './codex-executable.js';
 import { broadcastDesktopThreadArchived, probeDesktopIpc } from './desktop-ipc-client.js';
 import { registerManagedProcess } from './process-manager.js';
 
-const DEFAULT_CODEX_APP_BINARY = '/Applications/Codex.app/Contents/Resources/codex';
 const DEFAULT_REQUEST_TIMEOUT_MS = positiveTimeout(process.env.CODEXMOBILE_APP_SERVER_REQUEST_TIMEOUT_MS, 30_000);
-const DEFAULT_INITIALIZE_TIMEOUT_MS = positiveTimeout(process.env.CODEXMOBILE_APP_SERVER_INITIALIZE_TIMEOUT_MS, 5_000);
+const DEFAULT_INITIALIZE_TIMEOUT_MS = positiveTimeout(process.env.CODEXMOBILE_APP_SERVER_INITIALIZE_TIMEOUT_MS, 15_000);
 const DEFAULT_CONTROL_SOCKET = path.join(os.homedir(), '.codex', 'app-server-control', 'app-server-control.sock');
 const BRIDGE_STATUS_CACHE_MS = 2500;
 const BRIDGE_FAILURE_STATUS_CACHE_MS = positiveTimeout(process.env.CODEXMOBILE_BRIDGE_FAILURE_STATUS_CACHE_MS, 30_000);
@@ -22,25 +21,7 @@ function positiveTimeout(value, fallback) {
 }
 
 function resolveCodexBinary() {
-  try {
-    return resolveCodexExecutable().path;
-  } catch (error) {
-    console.warn('[codex] Failed to resolve preferred Codex CLI:', error.message);
-  }
-
-  const candidates = [
-    process.env.CODEXMOBILE_CODEX_BINARY,
-    process.env.CODEX_BINARY,
-    DEFAULT_CODEX_APP_BINARY,
-    'codex'
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (candidate === 'codex' || fsSync.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return 'codex';
+  return resolveCodexExecutable().path;
 }
 
 function responseError(message, method = '') {
@@ -124,7 +105,7 @@ export function resolveAppServerTransport(env = process.env, { allowHeadlessLoca
 
   const preferLocalCodex = shouldAutoPreferLocalCodex(env);
   if (preferLocalCodex && allowHeadlessLocal && !disableHeadless) {
-    return headlessLocalTransport('自动检测到非本机 Desktop 环境，使用后台 Codex');
+    return headlessLocalTransport('自动检测到非本机 Desktop 环境，使用本机 Codex app-server');
   }
   if (preferLocalCodex && allowIsolated) {
     return {
@@ -160,7 +141,7 @@ export function resolveAppServerTransport(env = process.env, { allowHeadlessLoca
       strict: false,
       sockPath: null,
       connected: true,
-      reason: '桌面端 Codex 未连接，正在使用后台 Codex 执行'
+      reason: '桌面端 Codex 未连接，正在使用本机 Codex app-server'
     };
   }
   return {
@@ -172,7 +153,7 @@ export function resolveAppServerTransport(env = process.env, { allowHeadlessLoca
   };
 }
 
-export function headlessLocalTransport(reason = '手机新建对话使用后台 Codex 执行') {
+export function headlessLocalTransport(reason = '使用本机 Codex app-server 执行') {
   return {
     mode: 'headless-local',
     strict: false,
@@ -223,7 +204,7 @@ export class CodexAppServerClient {
     onNotification = null,
     onServerRequest = null,
     allowReadOnlyIsolated = false,
-    allowHeadlessLocal = false,
+    allowHeadlessLocal = true,
     transport = null
   } = {}) {
     this.env = env;

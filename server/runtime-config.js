@@ -22,6 +22,9 @@ server:
 
 codex:
   home: ~/.codex
+  # CodexMobile requires codex-cli 0.130.0+.
+  # By default it uses the bundled Codex from @openai/codex-sdk, then PATH.
+  # Configure path only for a nightly, self-built, or centrally managed binary.
   # path: /opt/homebrew/bin/codex
   # transport: auto
   # worktreeRoot: ~/.codex/worktrees/codexmobile

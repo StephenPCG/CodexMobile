@@ -28,6 +28,7 @@ All notable changes to CodexMobile are tracked here.
 
 ### Changed
 
+- Upgraded the bundled Codex dependency to 0.130.0, require codex-cli 0.130.0+, and prefer the bundled app-server binary unless an explicit Codex path is configured.
 - Replaced rename/archive browser prompts with in-app modal dialogs.
 - Persisted per-project new-conversation composer drafts, including text, attachments, file mentions, and run mode.
 - Show the active Local/Worktree mode in the header subtitle and keep the composer run-mode switch only on new conversations.

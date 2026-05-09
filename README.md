@@ -113,6 +113,7 @@ CodexMobile Node.js bridge
 - Node.js 20+
 - npm
 - 已配置好的本机 Codex 环境，默认读取 `~/.codex`
+- Codex CLI 0.130.0+。源码安装会随 `@openai/codex-sdk` 安装匹配版本的内置 Codex；如需覆盖，可在 `~/.codex-mobile/config.yaml` 配置 `codex.path`。
 - 手机和电脑在同一个可信私有网络中，例如 Tailscale 或局域网
 - 可选：Tailscale Serve，用于 iOS PWA 后台通知所需的 HTTPS
 - 可选：Docker Desktop，用于本地 SenseVoice ASR
@@ -227,6 +228,7 @@ publicUrl: https://<your-device>.<your-tailnet>.ts.net/
 
 codex:
   home: ~/.codex
+  # 默认优先使用随 CodexMobile 安装的 Codex CLI 0.130.0+；如需自定义 nightly/自编译版本再配置 path。
   # path: /opt/homebrew/bin/codex
   # transport: auto
   # worktreeRoot: ~/.codex/worktrees/codexmobile
@@ -284,6 +286,8 @@ loginctl enable-linger "$USER"
 ```
 
 `codex-mobile start` 是唯一的主进程入口。生产模式下，浏览器页面、API、WebSocket、Workspace、Git、Terminal 和语音转写入口都通过同一个 HTTP 端口提供。主进程会登记由它拉起的 Codex app-server、Terminal、lark-cli 等子进程；收到 `SIGINT` / `SIGTERM` 时会先关闭 WebSocket 和终端，再终止已登记的子进程，避免服务重启后残留占用资源。
+
+CodexMobile 后端会通过本机 Codex app-server 和 Codex 通信。启动时会检查实际使用的 `codex` 是否满足最低版本，并打印来源、版本和路径。默认选择顺序是：`codex.path` / `CODEXMOBILE_CODEX_PATH` 明确配置，其次是随项目安装的内置 Codex，最后才是系统 `PATH` 中的 Codex。
 
 开发模式 `npm run dev` 仍会额外启动 Vite HMR 端口，只用于本地开发。
 

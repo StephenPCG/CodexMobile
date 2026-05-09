@@ -780,7 +780,7 @@ export async function runCodexTurn({ sessionId, draftSessionId, projectPath, mes
       clientInfo: { name: 'CodexMobile', title: null, version: '0.1.0' },
       allowHeadlessLocal: true,
       transport: forceHeadlessLocal
-        ? headlessLocalTransport('手机新建对话使用后台 Codex 执行')
+        ? headlessLocalTransport('手机新建对话使用本机 Codex app-server 执行')
         : null,
       onNotification: (appMessage) => {
         resetTurnInactivityTimeout();

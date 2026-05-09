@@ -1,14 +1,13 @@
-import { execFile } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 const moduleRequire = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
+export const MIN_CODEX_CLI_VERSION = '0.130.0';
 
 const PLATFORM_PACKAGE_BY_TARGET = {
   'x86_64-unknown-linux-musl': '@openai/codex-linux-x64',
@@ -70,6 +69,13 @@ function isExecutable(filePath) {
   }
 }
 
+function shellQuote(value) {
+  if (process.platform === 'win32') {
+    return `"${String(value).replace(/"/g, '\\"')}"`;
+  }
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 function realPathOrSelf(filePath) {
   try {
     return fs.realpathSync(filePath);
@@ -111,25 +117,150 @@ function findCodexOnPath() {
   return '';
 }
 
-export function resolveCodexExecutable() {
+export function parseCodexCliVersion(output) {
+  const match = String(output || '').match(/(?:codex-cli\s+)?v?(\d+)\.(\d+)\.(\d+)(?:[-+\s]|$)/i);
+  if (!match) {
+    return '';
+  }
+  return `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}`;
+}
+
+export function compareVersions(left, right) {
+  const leftParts = String(left || '').split('.').map((part) => Number(part) || 0);
+  const rightParts = String(right || '').split('.').map((part) => Number(part) || 0);
+  for (let index = 0; index < 3; index += 1) {
+    if ((leftParts[index] || 0) > (rightParts[index] || 0)) {
+      return 1;
+    }
+    if ((leftParts[index] || 0) < (rightParts[index] || 0)) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+export function isCodexVersionSupported(version) {
+  return Boolean(version) && compareVersions(version, MIN_CODEX_CLI_VERSION) >= 0;
+}
+
+function readCodexVersionSync(filePath) {
+  const output = execFileSync(filePath, ['--version'], {
+    encoding: 'utf8',
+    timeout: 4000,
+    windowsHide: true
+  });
+  const rawVersion = String(output || '').trim();
+  return {
+    rawVersion,
+    version: parseCodexCliVersion(rawVersion)
+  };
+}
+
+function explicitCodexPath() {
+  const value = String(
+    process.env.CODEXMOBILE_CODEX_PATH ||
+    process.env.CODEXMOBILE_CODEX_BINARY ||
+    process.env.CODEX_BINARY ||
+    ''
+  ).trim();
+  if (value === '~') {
+    return os.homedir();
+  }
+  if (value.startsWith(`~${path.sep}`) || value.startsWith('~/')) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
+}
+
+function codexCandidates() {
+  const candidates = [];
+  const envPath = explicitCodexPath();
+  if (envPath) {
+    candidates.push({ path: envPath, source: 'env', explicit: true });
+  }
+  try {
+    candidates.push({ path: bundledCodexPath(), source: 'bundled', explicit: false });
+  } catch (error) {
+    candidates.push({ path: '', source: 'bundled', explicit: false, error: error.message });
+  }
   const pathCodex = findCodexOnPath();
   if (pathCodex) {
+    candidates.push({ path: pathCodex, source: 'path', explicit: false });
+  }
+  return candidates;
+}
+
+function candidateFailure(candidate, message) {
+  const where = candidate.path ? `${candidate.source}:${candidate.path}` : candidate.source;
+  return `${where} ${message}`;
+}
+
+function inspectCodexCandidate(candidate) {
+  if (candidate.error) {
     return {
-      path: pathCodex,
-      source: 'path'
+      ...candidate,
+      supported: false,
+      reason: candidate.error
     };
   }
-  const envPath = String(process.env.CODEXMOBILE_CODEX_PATH || '').trim();
-  if (envPath) {
+  if (!candidate.path) {
     return {
-      path: envPath,
-      source: 'env'
+      ...candidate,
+      supported: false,
+      reason: 'path is empty'
     };
   }
-  return {
-    path: bundledCodexPath(),
-    source: 'bundled'
-  };
+  if (!isExecutable(candidate.path)) {
+    return {
+      ...candidate,
+      supported: false,
+      reason: `not executable: ${candidate.path}`
+    };
+  }
+  try {
+    const versionInfo = readCodexVersionSync(candidate.path);
+    const supported = isCodexVersionSupported(versionInfo.version);
+    return {
+      ...candidate,
+      ...versionInfo,
+      minVersion: MIN_CODEX_CLI_VERSION,
+      supported,
+      reason: supported
+        ? ''
+        : `requires codex-cli >= ${MIN_CODEX_CLI_VERSION}, found ${versionInfo.rawVersion || 'unknown version'}`
+    };
+  } catch (error) {
+    return {
+      ...candidate,
+      minVersion: MIN_CODEX_CLI_VERSION,
+      supported: false,
+      reason: error.message || 'failed to read version'
+    };
+  }
+}
+
+export function resolveCodexExecutable() {
+  const failures = [];
+  for (const candidate of codexCandidates()) {
+    const inspected = inspectCodexCandidate(candidate);
+    if (inspected.supported) {
+      return {
+        path: inspected.path,
+        source: inspected.source,
+        version: inspected.rawVersion || inspected.version,
+        parsedVersion: inspected.version,
+        minVersion: MIN_CODEX_CLI_VERSION,
+        supported: true
+      };
+    }
+    failures.push(candidateFailure(inspected, inspected.reason));
+    if (inspected.explicit) {
+      throw new Error(`Configured Codex executable is not usable: ${inspected.reason}. Set codex.path to a ${MIN_CODEX_CLI_VERSION}+ binary, or remove it to use the bundled Codex.`);
+    }
+  }
+  throw new Error(
+    `No usable Codex CLI found. CodexMobile requires codex-cli >= ${MIN_CODEX_CLI_VERSION}. Checked: ${failures.join('; ') || 'no candidates'}.`
+  );
 }
 
 export async function getCodexExecutableInfo() {
@@ -141,24 +272,17 @@ export async function getCodexExecutableInfo() {
       path: '',
       source: 'unavailable',
       version: '',
-      error: error.message || 'Codex executable not found'
+      minVersion: MIN_CODEX_CLI_VERSION,
+      supported: false,
+      error: error.message || `Failed to resolve Codex CLI. Install codex-cli >= ${MIN_CODEX_CLI_VERSION}.`,
+      installHint: `Install or configure codex-cli >= ${MIN_CODEX_CLI_VERSION}. For a configured binary, check ${shellQuote('codex.path')} in ~/.codex-mobile/config.yaml.`
     };
   }
 
-  try {
-    const { stdout, stderr } = await execFileAsync(executable.path, ['--version'], {
-      timeout: 4000,
-      windowsHide: true
-    });
-    return {
-      ...executable,
-      version: String(stdout || stderr || '').trim()
-    };
-  } catch (error) {
-    return {
-      ...executable,
-      version: '',
-      error: error.message || 'Failed to read Codex version'
-    };
-  }
+  return {
+    ...executable,
+    minVersion: MIN_CODEX_CLI_VERSION,
+    supported: true,
+    installHint: ''
+  };
 }

@@ -32,7 +32,7 @@ test('resolveAppServerTransport can use a headless local fallback when explicitl
   assert.equal(transport.strict, false);
   assert.equal(transport.connected, true);
   assert.equal(transport.mode, 'headless-local');
-  assert.match(transport.reason, /后台 Codex/);
+  assert.match(transport.reason, /Codex app-server/);
 });
 
 test('resolveAppServerTransport can prefer headless local over a desktop socket', () => {
@@ -44,7 +44,7 @@ test('resolveAppServerTransport can prefer headless local over a desktop socket'
   assert.equal(transport.strict, false);
   assert.equal(transport.connected, true);
   assert.equal(transport.mode, 'headless-local');
-  assert.match(transport.reason, /后台 Codex|headless-local/);
+  assert.match(transport.reason, /Codex app-server|headless-local/);
 });
 
 test('resolveAppServerTransport supports an explicit headless transport override', () => {
